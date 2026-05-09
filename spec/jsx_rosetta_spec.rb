@@ -6,11 +6,11 @@ RSpec.describe JsxRosetta do
   end
 
   describe ".parse" do
-    it "delegates to Parser and returns the parsed AST" do
-      ast = described_class.parse("const x = <Button />;")
+    it "delegates to Parser and returns a typed AST::File" do
+      file = described_class.parse("const x = <Button />;")
 
-      expect(ast).to be_a(Hash)
-      expect(ast["type"]).to eq("File")
+      expect(file).to be_a(JsxRosetta::AST::File)
+      expect(file.type).to eq("File")
     end
   end
 end

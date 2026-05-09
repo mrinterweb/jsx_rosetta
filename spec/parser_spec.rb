@@ -4,36 +4,35 @@ RSpec.describe JsxRosetta::Parser do
   subject(:parser) { described_class.new }
 
   describe "#parse" do
-    it "returns a Babel File node at the root" do
-      ast = parser.parse("const x = <Button />;")
+    it "returns an AST::File at the root" do
+      file = parser.parse("const x = <Button />;")
 
-      expect(ast).to include("type" => "File")
-      expect(ast["program"]).to include("type" => "Program")
+      expect(file).to be_a(JsxRosetta::AST::File)
+      expect(file.program).to be_a(JsxRosetta::AST::Program)
     end
 
     it "parses the Button fixture and surfaces the JSXElement" do
-      ast = parser.parse(fixture("jsx", "button.jsx"))
+      file = parser.parse(fixture("jsx", "button.jsx"))
 
-      jsx_element = find_first_node(ast, "JSXElement")
+      jsx_element = file.walk.find { |node| node.is_a?(JsxRosetta::AST::JSXElement) }
       expect(jsx_element).not_to be_nil
-
-      tag_name = jsx_element.dig("openingElement", "name", "name")
-      expect(tag_name).to eq("button")
+      expect(jsx_element.tag_name).to eq("button")
     end
 
     it "preserves source location ranges on nodes" do
-      ast = parser.parse("<X />")
+      file = parser.parse("<X />")
 
-      jsx_element = find_first_node(ast, "JSXElement")
-      expect(jsx_element).to include("start", "end", "loc")
-      expect(jsx_element.dig("loc", "start", "line")).to eq(1)
+      jsx_element = file.walk.find { |node| node.is_a?(JsxRosetta::AST::JSXElement) }
+      expect(jsx_element.loc.dig("start", "line")).to eq(1)
+      expect(jsx_element.range).to be_a(Array)
+      expect(jsx_element.start_pos).to eq(0)
     end
 
     it "parses TSX when typescript: true" do
       tsx = "const x: number = (<Button title='Hi' />) as unknown as number;"
-      ast = parser.parse(tsx, typescript: true)
+      file = parser.parse(tsx, typescript: true)
 
-      expect(find_first_node(ast, "JSXElement")).not_to be_nil
+      expect(file.walk.find { |n| n.is_a?(JsxRosetta::AST::JSXElement) }).not_to be_nil
     end
 
     it "raises ParseError with line/column on invalid JSX" do
