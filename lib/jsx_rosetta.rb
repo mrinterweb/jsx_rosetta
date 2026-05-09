@@ -13,9 +13,23 @@ module JsxRosetta
     ast = parse(source, typescript: typescript, source_filename: source_filename)
     IR.lower(ast, source: source)
   end
+
+  def self.translate(source, backend: :view_component, typescript: false, source_filename: nil)
+    component = lower(source, typescript: typescript, source_filename: source_filename)
+    backend_for(backend).emit(component)
+  end
+
+  def self.backend_for(name)
+    case name
+    when :view_component then Backend::ViewComponent.new
+    else
+      raise Error, "unknown backend: #{name.inspect}"
+    end
+  end
 end
 
 require_relative "jsx_rosetta/parse_error"
 require_relative "jsx_rosetta/node_bridge"
 require_relative "jsx_rosetta/parser"
 require_relative "jsx_rosetta/ir"
+require_relative "jsx_rosetta/backend"
