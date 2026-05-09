@@ -102,10 +102,28 @@ module JsxRosetta
         when IR::ComponentInvocation then render_component_invocation(node, translator, indent: indent)
         when IR::Fragment then render_fragment(node, translator, indent: indent)
         when IR::Conditional then render_conditional(node, translator, indent: indent)
+        when IR::Loop then render_loop(node, translator, indent: indent)
         when IR::Slot then render_slot(node, indent: indent)
         when IR::Text then "#{spaces(indent)}#{node.value}"
         when IR::Interpolation then "#{spaces(indent)}#{interpolation_to_erb(node, translator)}"
         end
+      end
+
+      def render_loop(loop_node, translator, indent:)
+        iterable_ruby = render_test_expression(loop_node.iterable, translator)
+        js_bindings = [loop_node.item_binding, loop_node.index_binding].compact
+        ruby_bindings = js_bindings.map { |name| AST::Inflector.underscore(name) }
+        binding_str = "|#{ruby_bindings.join(", ")}|"
+
+        body = translator.with_locals(js_bindings) do
+          render_ir_node(loop_node.body, translator, indent: indent + 2)
+        end
+
+        [
+          "#{spaces(indent)}<% #{iterable_ruby}.each do #{binding_str} %>",
+          body,
+          "#{spaces(indent)}<% end %>"
+        ].join("\n")
       end
 
       def render_element(element, translator, indent:)

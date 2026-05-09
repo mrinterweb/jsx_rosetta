@@ -167,8 +167,56 @@ module JsxRosetta
         when "LogicalExpression" then lower_logical_expression(expression)
         when "ConditionalExpression" then lower_ternary_expression(expression)
         when "Identifier" then lower_identifier_expression(expression)
+        when "CallExpression" then lower_call_expression(expression)
         else
           Interpolation.new(expression: source_of(expression))
+        end
+      end
+
+      def lower_call_expression(expression)
+        loop_node = try_lower_map_loop(expression)
+        loop_node || Interpolation.new(expression: source_of(expression))
+      end
+
+      # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
+      def try_lower_map_loop(call_expression)
+        callee = call_expression[:callee]
+        return nil unless callee.is_a?(AST::Node) && callee.type == "MemberExpression"
+        return nil unless callee[:property].is_a?(AST::Node) && callee[:property][:name] == "map"
+
+        args = call_expression[:arguments]
+        return nil if args.size != 1
+        return nil unless args.first.type == "ArrowFunctionExpression"
+
+        arrow = args.first
+        params = arrow[:params]
+        return nil if params.empty? || params.size > 2
+        return nil unless params.all? { |p| p.is_a?(AST::Node) && p.type == "Identifier" }
+
+        body = lower_arrow_body(arrow[:body])
+        return nil unless body
+
+        Loop.new(
+          iterable: Interpolation.new(expression: source_of(callee[:object])),
+          item_binding: params[0][:name],
+          index_binding: params[1] && params[1][:name],
+          body: body
+        )
+      end
+      # rubocop:enable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
+
+      def lower_arrow_body(body)
+        case body.type
+        when "JSXElement", "JSXFragment"
+          lower_jsx(body)
+        when "BlockStatement"
+          return_stmt = body[:body].find { |s| s.type == "ReturnStatement" }
+          return nil unless return_stmt
+
+          arg = return_stmt[:argument]
+          return nil unless %w[JSXElement JSXFragment].include?(arg&.type)
+
+          lower_jsx(arg)
         end
       end
 

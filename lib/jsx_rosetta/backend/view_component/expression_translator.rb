@@ -7,56 +7,83 @@ module JsxRosetta
     class ViewComponent
       # Best-effort, narrowly-scoped JS-to-Ruby translation for the simple
       # expression shapes that JSX components in real codebases use most
-      # often: bare identifiers, literals, and template literals composed
-      # of string parts plus identifier interpolations. Anything more
-      # complex (function calls, conditionals, member expressions) returns
-      # `nil` from `#translate` so the backend can emit a TODO marker
-      # and fall back to the verbatim JS source.
+      # often: bare identifiers, literals, simple member-expression chains
+      # (`item.label`), and template literals composed of identifier
+      # interpolations. Anything more complex (function calls, conditionals,
+      # subscripts) returns `nil` from `#translate` so the backend can emit
+      # a TODO marker and fall back to the verbatim JS source.
       #
-      # Identifier names are looked up against a known set of component
-      # prop names; matched names become Ruby instance variables (`@name`),
-      # everything else is left bare and flagged.
+      # Identifier resolution:
+      #   * Names in the active local scope (e.g. loop bindings) translate
+      #     to the bare snake_case identifier.
+      #   * Names in `prop_names` translate to a `@snake_case` instance
+      #     variable.
+      #   * Anything else translates to the bare snake_case identifier and
+      #     is recorded as unresolved.
+      #
+      # Local scopes can be pushed via `with_locals` and stack — each
+      # entry shadows lower entries.
       class ExpressionTranslator
         IDENTIFIER = /\A[a-zA-Z_$][a-zA-Z_$0-9]*\z/
         STRING_LITERAL = /\A(['"])(.*)\1\z/m
         NUMBER_LITERAL = /\A-?\d+(\.\d+)?\z/
         TEMPLATE_LITERAL = /\A`(.*)`\z/m
         TEMPLATE_INTERPOLATION = /\$\{([a-zA-Z_$][a-zA-Z_$0-9]*)\}/
+        MEMBER_CHAIN = /\A(?<root>[a-zA-Z_$][a-zA-Z_$0-9]*)(?<rest>(?:\.[a-zA-Z_$][a-zA-Z_$0-9]*)+)\z/
         SIMPLE_LITERALS = { "null" => "nil", "undefined" => "nil", "true" => "true", "false" => "false" }.freeze
 
         Result = Data.define(:ruby, :unresolved_identifiers)
 
         def initialize(prop_names:)
           @prop_names = prop_names.to_set
+          @local_stack = []
         end
 
-        # Translate a JS expression source string to a Ruby expression.
-        # Returns a Result, or nil if the expression isn't a recognized
-        # simple shape.
+        def with_locals(names)
+          @local_stack.push(names.compact)
+          yield
+        ensure
+          @local_stack.pop
+        end
+
         def translate(source)
           source = source.strip
           unresolved = []
 
-          ruby =
-            if SIMPLE_LITERALS.key?(source) then SIMPLE_LITERALS[source]
-            elsif source.match?(NUMBER_LITERAL) || source.match?(STRING_LITERAL) then source
-            elsif source.match?(IDENTIFIER) then translate_identifier(source, unresolved)
-            elsif (m = TEMPLATE_LITERAL.match(source)) then translate_template_literal(m[1], unresolved)
-            end
-
+          ruby = translate_ruby(source, unresolved)
           ruby && Result.new(ruby: ruby, unresolved_identifiers: unresolved.uniq)
         end
 
         private
 
+        def translate_ruby(source, unresolved)
+          if SIMPLE_LITERALS.key?(source) then SIMPLE_LITERALS[source]
+          elsif source.match?(NUMBER_LITERAL) || source.match?(STRING_LITERAL) then source
+          elsif source.match?(IDENTIFIER) then translate_identifier(source, unresolved)
+          elsif (m = MEMBER_CHAIN.match(source)) then translate_member_chain(m[:root], m[:rest], unresolved)
+          elsif (m = TEMPLATE_LITERAL.match(source)) then translate_template_literal(m[1], unresolved)
+          end
+        end
+
+        def in_local_scope?(name)
+          @local_stack.any? { |scope| scope.include?(name) }
+        end
+
         def translate_identifier(name, unresolved)
           snake = AST::Inflector.underscore(name)
-          if @prop_names.include?(name)
+          if in_local_scope?(name)
+            snake
+          elsif @prop_names.include?(name)
             "@#{snake}"
           else
             unresolved << name
             snake
           end
+        end
+
+        def translate_member_chain(root, rest, unresolved)
+          translated_root = translate_identifier(root, unresolved)
+          "#{translated_root}#{rest}"
         end
 
         def translate_template_literal(content, unresolved)

@@ -162,6 +162,39 @@ RSpec.describe JsxRosetta::IR::Lowering do
     end
   end
 
+  describe "loops" do
+    it "lowers items.map((item) => <X />) to IR::Loop" do
+      ir = lower("function X({ items }) { return <ul>{items.map((item) => <li />)}</ul>; }")
+
+      loop_node = ir.body.children.first
+      expect(loop_node).to be_a(JsxRosetta::IR::Loop)
+      expect(loop_node.iterable).to eq(JsxRosetta::IR::Interpolation.new(expression: "items"))
+      expect(loop_node.item_binding).to eq("item")
+      expect(loop_node.index_binding).to be_nil
+      expect(loop_node.body).to be_a(JsxRosetta::IR::Element)
+      expect(loop_node.body.tag).to eq("li")
+    end
+
+    it "captures the index binding when present" do
+      ir = lower("function X({ items }) { return <ul>{items.map((item, i) => <li />)}</ul>; }")
+
+      expect(ir.body.children.first.index_binding).to eq("i")
+    end
+
+    it "supports a block-bodied arrow function with a return" do
+      jsx = "function X({ items }) { return <ul>{items.map((item) => { return <li />; })}</ul>; }"
+      ir = lower(jsx)
+
+      expect(ir.body.children.first).to be_a(JsxRosetta::IR::Loop)
+    end
+
+    it "leaves non-map call expressions as opaque interpolations" do
+      ir = lower("function X({ items }) { return <p>{items.length}</p>; }")
+
+      expect(ir.body.children.first).to be_a(JsxRosetta::IR::Interpolation)
+    end
+  end
+
   describe "fragments" do
     it "lowers a JSX fragment to IR::Fragment" do
       ir = lower("function X() { return <><Button /></>; }")

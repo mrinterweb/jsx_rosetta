@@ -1,0 +1,7 @@
+<ul>
+  <% @items.each do |item, index| %>
+    <li class="item item-<%= index %>">
+      <%= item.label %>
+    </li>
+  <% end %>
+</ul>

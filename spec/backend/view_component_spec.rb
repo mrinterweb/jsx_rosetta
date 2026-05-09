@@ -26,6 +26,24 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
     end
   end
 
+  describe "List fixture (loops + member-expression access)" do
+    let(:source) { File.read(File.expand_path("../fixtures/jsx/list.jsx", __dir__)) }
+    let(:expected_rb) { File.read(File.expand_path("../fixtures/expected/list_component.rb", __dir__)) }
+    let(:expected_erb) { File.read(File.expand_path("../fixtures/expected/list_component.html.erb", __dir__)) }
+
+    it "emits list_component.rb matching the golden fixture" do
+      files = files_for(source)
+
+      expect(files["list_component.rb"]).to eq(expected_rb)
+    end
+
+    it "emits list_component.html.erb matching the golden fixture" do
+      files = files_for(source)
+
+      expect(files["list_component.html.erb"]).to eq(expected_erb)
+    end
+  end
+
   describe "Disclosure fixture (slots + conditional rendering)" do
     let(:source) { File.read(File.expand_path("../fixtures/jsx/disclosure.jsx", __dir__)) }
     let(:expected_rb) { File.read(File.expand_path("../fixtures/expected/disclosure_component.rb", __dir__)) }
@@ -76,6 +94,30 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       JSX
 
       expect(files["x_component.html.erb"]).to include('data-action="<%= @on_click %> <%= @on_mouse_enter %>"')
+    end
+  end
+
+  describe "loops" do
+    it "renders items.map(...) as <% items.each do |item| %>" do
+      files = files_for("function X({ items }) { return <ul>{items.map((item) => <li />)}</ul>; }")
+
+      expect(files["x_component.html.erb"]).to include("<% @items.each do |item| %>")
+      expect(files["x_component.html.erb"]).to include("<% end %>")
+    end
+
+    it "passes both bindings to the each block when an index is present" do
+      files = files_for("function X({ items }) { return <ul>{items.map((it, i) => <li />)}</ul>; }")
+
+      expect(files["x_component.html.erb"]).to include("<% @items.each do |it, i| %>")
+    end
+
+    it "treats loop-local identifiers as locals (no @-prefix) inside the body" do
+      jsx = "function X({ items }) { return <ul>{items.map((item) => <li>{item.name}</li>)}</ul>; }"
+      files = files_for(jsx)
+
+      expect(files["x_component.html.erb"]).to include("<%= item.name %>")
+      expect(files["x_component.html.erb"]).not_to include("@item.name")
+      expect(files["x_component.html.erb"]).not_to include("<%= @item ")
     end
   end
 

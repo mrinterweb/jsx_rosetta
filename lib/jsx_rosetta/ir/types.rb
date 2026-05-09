@@ -122,5 +122,20 @@ module JsxRosetta
     EventBinding = Data.define(:event, :handler) do
       include Node
     end
+
+    # A list-rendering loop. Lowered from a JSX expression of the form:
+    #   {items.map((item) => <X />)}
+    #   {items.map((item, index) => <X />)}
+    # plus the arrow-with-block form `(item) => { return <X />; }`.
+    #
+    # iterable      : Interpolation — verbatim source of the iterable
+    #                 expression (e.g. "items", "todos.filter(...)").
+    # item_binding  : String — name of the item parameter, in original
+    #                 camelCase. Backends snake_case as needed.
+    # index_binding : String | nil — name of the index parameter, if present.
+    # body          : Node — the lowered IR node rendered for each iteration.
+    Loop = Data.define(:iterable, :item_binding, :index_binding, :body) do
+      include Node
+    end
   end
 end
