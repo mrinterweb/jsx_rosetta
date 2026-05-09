@@ -100,6 +100,32 @@ RSpec.describe JsxRosetta::IR::Lowering do
     end
   end
 
+  describe "event bindings" do
+    it "lowers on*={prop} to IR::EventBinding with the lowercased event name" do
+      ir = lower("function X({ onClick }) { return <button onClick={onClick} />; }")
+
+      event = ir.body.attributes.first
+      expect(event).to eq(
+        JsxRosetta::IR::EventBinding.new(
+          event: "click",
+          handler: JsxRosetta::IR::Interpolation.new(expression: "onClick")
+        )
+      )
+    end
+
+    it "translates onMouseEnter to the native event name" do
+      ir = lower("function X({ onMouseEnter }) { return <div onMouseEnter={onMouseEnter} />; }")
+
+      expect(ir.body.attributes.first.event).to eq("mouseenter")
+    end
+
+    it "leaves on*=\"literal\" attributes alone (no expression container)" do
+      ir = lower('function X() { return <button onClick="alert(1)" />; }')
+
+      expect(ir.body.attributes.first).to be_a(JsxRosetta::IR::Attribute)
+    end
+  end
+
   describe "conditionals" do
     it "lowers {cond && X} to IR::Conditional with no alternate" do
       ir = lower("function X({ open }) { return <div>{open && <p>shown</p>}</div>; }")
@@ -212,9 +238,9 @@ RSpec.describe JsxRosetta::IR::Lowering do
           attributes: [
             JsxRosetta::IR::Attribute.new(name: "type", value: "button"),
             JsxRosetta::IR::StyleBinding.new(expression: "`btn btn-${variant}`"),
-            JsxRosetta::IR::Attribute.new(
-              name: "onClick",
-              value: JsxRosetta::IR::Interpolation.new(expression: "onClick")
+            JsxRosetta::IR::EventBinding.new(
+              event: "click",
+              handler: JsxRosetta::IR::Interpolation.new(expression: "onClick")
             )
           ],
           children: [

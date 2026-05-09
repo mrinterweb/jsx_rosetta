@@ -60,6 +60,25 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
     end
   end
 
+  describe "event bindings" do
+    it "renders a single onClick prop as data-action" do
+      files = files_for("function X({ onClick }) { return <button onClick={onClick} />; }")
+
+      expect(files["x_component.html.erb"]).to include('data-action="<%= @on_click %>"')
+      expect(files["x_component.html.erb"]).not_to include("onClick=")
+    end
+
+    it "concatenates multiple event bindings into a single data-action" do
+      files = files_for(<<~JSX)
+        function X({ onClick, onMouseEnter }) {
+          return <button onClick={onClick} onMouseEnter={onMouseEnter} />;
+        }
+      JSX
+
+      expect(files["x_component.html.erb"]).to include('data-action="<%= @on_click %> <%= @on_mouse_enter %>"')
+    end
+  end
+
   describe "conditional rendering" do
     it "emits an if/end block for {cond && X}" do
       files = files_for("function X({ open }) { return <div>{open && <p>shown</p>}</div>; }")

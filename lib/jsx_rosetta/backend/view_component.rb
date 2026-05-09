@@ -165,7 +165,10 @@ module JsxRosetta
       end
 
       def render_attributes(attributes, translator)
-        attributes.filter_map { |attr| render_attribute(attr, translator) }.join(" ")
+        events, others = attributes.partition { |attr| attr.is_a?(IR::EventBinding) }
+        rendered = others.filter_map { |attr| render_attribute(attr, translator) }
+        rendered << render_data_action(events, translator) if events.any?
+        rendered.join(" ")
       end
 
       def render_attribute(attribute, translator)
@@ -173,6 +176,17 @@ module JsxRosetta
         when IR::StyleBinding then render_style_binding(attribute, translator)
         when IR::Attribute then render_plain_attribute(attribute, translator)
         end
+      end
+
+      def render_data_action(events, translator)
+        parts = events.map { |event| render_event_handler(event, translator) }
+        %(data-action="#{parts.join(" ")}")
+      end
+
+      def render_event_handler(event_binding, translator)
+        translated = translator.translate(event_binding.handler.expression)
+        ruby = translated ? translated.ruby : event_binding.handler.expression
+        "<%= #{ruby} %>"
       end
 
       def render_plain_attribute(attribute, translator)

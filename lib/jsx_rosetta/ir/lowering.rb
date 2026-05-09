@@ -222,11 +222,24 @@ module JsxRosetta
 
       def lower_jsx_attribute(attr)
         name = attr.attribute_name
-        value = lower_attribute_value(attr.value)
 
         return StyleBinding.new(expression: style_binding_expression(attr.value)) if name == "className"
+        if event_attribute?(name) && attr.value.is_a?(AST::JSXExpressionContainer)
+          return lower_event_attribute(name, attr.value)
+        end
 
-        Attribute.new(name: name, value: value)
+        Attribute.new(name: name, value: lower_attribute_value(attr.value))
+      end
+
+      def event_attribute?(name)
+        name.match?(/\Aon[A-Z]\w*\z/)
+      end
+
+      def lower_event_attribute(name, value)
+        EventBinding.new(
+          event: name.sub(/\Aon/, "").downcase,
+          handler: Interpolation.new(expression: source_of(value.expression))
+        )
       end
 
       def lower_attribute_value(value)

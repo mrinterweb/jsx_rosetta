@@ -108,5 +108,19 @@ module JsxRosetta
     Slot = Data.define(:name) do
       include Node
     end
+
+    # An event handler binding. Lowered from a JSX attribute named
+    # `on<Event>` whose value is an expression container.
+    #
+    # event   : String — lowercased DOM event name ("click", "change",
+    #           "mouseenter").
+    # handler : Interpolation — the JS expression bound to the event,
+    #           verbatim. For ViewComponent + Stimulus, the caller is
+    #           expected to supply a Stimulus action descriptor string
+    #           (e.g. "click->my-controller#handleClick"); the component
+    #           just renders it through.
+    EventBinding = Data.define(:event, :handler) do
+      include Node
+    end
   end
 end
