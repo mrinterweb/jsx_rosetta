@@ -1,0 +1,16 @@
+{
+  "name": "jsx_rosetta-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node sidecar for the jsx_rosetta Ruby gem. Parses JSX/TSX via @babel/parser and returns the AST as JSON.",
+  "main": "parse.js",
+  "scripts": {
+    "parse": "node parse.js"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.25.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

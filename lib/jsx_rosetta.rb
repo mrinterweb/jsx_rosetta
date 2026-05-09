@@ -4,5 +4,12 @@ require_relative "jsx_rosetta/version"
 
 module JsxRosetta
   class Error < StandardError; end
-  # Your code goes here...
+
+  def self.parse(source, typescript: false, source_filename: nil)
+    Parser.new.parse(source, typescript: typescript, source_filename: source_filename)
+  end
 end
+
+require_relative "jsx_rosetta/parse_error"
+require_relative "jsx_rosetta/node_bridge"
+require_relative "jsx_rosetta/parser"
