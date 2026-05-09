@@ -11,17 +11,22 @@ module JsxRosetta
     #
     # Phase 3 scope:
     #   - Single component per emit.
-    #   - JSX prop names are lowered to snake_case Ruby kwargs and matching
+    #   - JSX prop names lowered to snake_case Ruby kwargs and matching
     #     `@instance_variable` assignments.
-    #   - JS expressions are translated to Ruby via ExpressionTranslator
-    #     where the shape is recognized; everything else falls back to a
-    #     verbatim emission with an ERB TODO marker so the human can fix.
-    #   - HTML attributes are emitted directly; className / template-literal
-    #     class expressions are inlined into a `class="..."` attribute.
-    #   - children is currently a plain prop, not a ViewComponent slot;
-    #     Phase 4 will lift it (and other slot-shaped props) into proper
-    #     ViewComponent renders_one / content semantics.
+    #   - JS expressions translated via ExpressionTranslator where the
+    #     shape is recognized; otherwise emitted as a TODO marker plus
+    #     verbatim source.
+    #   - HTML attributes emitted directly; className / template-literal
+    #     class expressions inlined into the `class="..."` attribute.
+    #
+    # Phase 4a additions:
+    #   - `children` prop is treated as ViewComponent's default content
+    #     slot: it's filtered out of the initializer and rendered as
+    #     `<%= content %>` wherever the IR has IR::Slot(name: "children").
+    #   - IR::Conditional renders as `<% if %>...<% else %>...<% end %>`.
     class ViewComponent < Base
+      DEFAULT_SLOT_NAME = "children"
+
       def emit(component)
         prop_names = component.props.map(&:name)
         translator = ExpressionTranslator.new(prop_names: prop_names)
@@ -36,9 +41,28 @@ module JsxRosetta
 
       private
 
+      def initializable_props(component)
+        component.props.reject { |prop| prop.name == DEFAULT_SLOT_NAME }
+      end
+
       def render_ruby_class(component, translator)
-        kwargs = component.props.map { |prop| ruby_kwarg(prop, translator) }.join(", ")
-        assignments = component.props.map do |prop|
+        props = initializable_props(component)
+
+        if props.empty?
+          <<~RUBY
+            # frozen_string_literal: true
+
+            class #{component.name}Component < ::ViewComponent::Base
+            end
+          RUBY
+        else
+          render_ruby_class_with_props(component, props, translator)
+        end
+      end
+
+      def render_ruby_class_with_props(component, props, translator)
+        kwargs = props.map { |prop| ruby_kwarg(prop, translator) }.join(", ")
+        assignments = props.map do |prop|
           snake = AST::Inflector.underscore(prop.name)
           "    @#{snake} = #{snake}"
         end.join("\n")
@@ -77,6 +101,8 @@ module JsxRosetta
         when IR::Element then render_element(node, translator, indent: indent)
         when IR::ComponentInvocation then render_component_invocation(node, translator, indent: indent)
         when IR::Fragment then render_fragment(node, translator, indent: indent)
+        when IR::Conditional then render_conditional(node, translator, indent: indent)
+        when IR::Slot then render_slot(node, indent: indent)
         when IR::Text then "#{spaces(indent)}#{node.value}"
         when IR::Interpolation then "#{spaces(indent)}#{interpolation_to_erb(node, translator)}"
         end
@@ -110,6 +136,32 @@ module JsxRosetta
 
       def render_fragment(fragment, translator, indent:)
         fragment.children.map { |child| render_ir_node(child, translator, indent: indent) }.join("\n")
+      end
+
+      def render_conditional(conditional, translator, indent:)
+        test_ruby = render_test_expression(conditional.test, translator)
+        lines = ["#{spaces(indent)}<% if #{test_ruby} %>"]
+        lines << render_ir_node(conditional.consequent, translator, indent: indent + 2)
+        if conditional.alternate
+          lines << "#{spaces(indent)}<% else %>"
+          lines << render_ir_node(conditional.alternate, translator, indent: indent + 2)
+        end
+        lines << "#{spaces(indent)}<% end %>"
+        lines.join("\n")
+      end
+
+      def render_test_expression(test, translator)
+        translated = translator.translate(test.expression)
+        translated ? translated.ruby : test.expression
+      end
+
+      def render_slot(slot, indent:)
+        if slot.name == DEFAULT_SLOT_NAME
+          "#{spaces(indent)}<%= content %>"
+        else
+          # Named slots become Phase 4d work; for now flag them.
+          "#{spaces(indent)}<%# TODO: named slot #{slot.name.inspect} %>"
+        end
       end
 
       def render_attributes(attributes, translator)
@@ -175,8 +227,8 @@ module JsxRosetta
           value = component_kwarg_value(attribute.value, translator)
           "#{name}: #{value}"
         when IR::StyleBinding
-          translated = translator.translate(binding_expression(attribute))
-          ruby = translated ? translated.ruby : binding_expression(attribute).inspect
+          translated = translator.translate(attribute.expression)
+          ruby = translated ? translated.ruby : attribute.expression.inspect
           "class: #{ruby}"
         end
       end
@@ -189,10 +241,6 @@ module JsxRosetta
           translated = translator.translate(value.expression)
           translated ? translated.ruby : "nil # TODO: translate #{value.expression.inspect}"
         end
-      end
-
-      def binding_expression(style_binding)
-        style_binding.expression
       end
 
       def spaces(count)

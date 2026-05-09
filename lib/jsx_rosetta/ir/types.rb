@@ -87,5 +87,26 @@ module JsxRosetta
     Fragment = Data.define(:children) do
       include Node
     end
+
+    # A conditional render. Lowered from any of:
+    #   {cond && <X />}
+    #   {cond ? <X /> : null}
+    #   {cond ? <X /> : <Y />}
+    #
+    # test       : Interpolation — verbatim JS source of the condition.
+    # consequent : Node — what to render when test is truthy.
+    # alternate  : Node | nil — what to render otherwise (nil for `cond &&`
+    #              or for `cond ? X : null`).
+    Conditional = Data.define(:test, :consequent, :alternate) do
+      include Node
+    end
+
+    # A content slot. Backends decide how to realize it (ViewComponent's
+    # `content` for the default slot, named renders_one slots for others).
+    #
+    # name : String — "children" for the default slot, or a prop name.
+    Slot = Data.define(:name) do
+      include Node
+    end
   end
 end

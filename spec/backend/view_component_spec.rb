@@ -26,6 +26,58 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
     end
   end
 
+  describe "Disclosure fixture (slots + conditional rendering)" do
+    let(:source) { File.read(File.expand_path("../fixtures/jsx/disclosure.jsx", __dir__)) }
+    let(:expected_rb) { File.read(File.expand_path("../fixtures/expected/disclosure_component.rb", __dir__)) }
+    let(:expected_erb) { File.read(File.expand_path("../fixtures/expected/disclosure_component.html.erb", __dir__)) }
+
+    it "emits disclosure_component.rb matching the golden fixture" do
+      files = files_for(source)
+
+      expect(files["disclosure_component.rb"]).to eq(expected_rb)
+    end
+
+    it "emits disclosure_component.html.erb matching the golden fixture" do
+      files = files_for(source)
+
+      expect(files["disclosure_component.html.erb"]).to eq(expected_erb)
+    end
+  end
+
+  describe "slots and content" do
+    it "filters the children prop out of the initializer" do
+      files = files_for("function X({ children }) { return <p>{children}</p>; }")
+
+      expect(files["x_component.rb"]).not_to include("children:")
+      expect(files["x_component.rb"]).to include("class XComponent < ::ViewComponent::Base\nend")
+    end
+
+    it "renders {children} as <%= content %>" do
+      files = files_for("function X({ children }) { return <p>{children}</p>; }")
+
+      expect(files["x_component.html.erb"]).to include("<%= content %>")
+      expect(files["x_component.html.erb"]).not_to include("@children")
+    end
+  end
+
+  describe "conditional rendering" do
+    it "emits an if/end block for {cond && X}" do
+      files = files_for("function X({ open }) { return <div>{open && <p>shown</p>}</div>; }")
+
+      expect(files["x_component.html.erb"]).to include("<% if @open %>")
+      expect(files["x_component.html.erb"]).to include("<% end %>")
+      expect(files["x_component.html.erb"]).not_to include("<% else %>")
+    end
+
+    it "emits an if/else/end block for {cond ? X : Y}" do
+      files = files_for("function X({ open }) { return <div>{open ? <a /> : <b />}</div>; }")
+
+      expect(files["x_component.html.erb"]).to include("<% if @open %>")
+      expect(files["x_component.html.erb"]).to include("<% else %>")
+      expect(files["x_component.html.erb"]).to include("<% end %>")
+    end
+  end
+
   describe "Ruby class generation" do
     it "uses ::ViewComponent::Base as the parent class" do
       files = files_for("function Greeting() { return <p>hi</p>; }")

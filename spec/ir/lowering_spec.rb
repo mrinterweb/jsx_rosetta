@@ -86,6 +86,54 @@ RSpec.describe JsxRosetta::IR::Lowering do
 
       expect(ir.body.children).to eq([JsxRosetta::IR::Interpolation.new(expression: "name")])
     end
+
+    it "lowers a {children} reference to IR::Slot when children is a prop" do
+      ir = lower("function X({ children }) { return <p>{children}</p>; }")
+
+      expect(ir.body.children).to eq([JsxRosetta::IR::Slot.new(name: "children")])
+    end
+
+    it "leaves {children} as Interpolation when children is not a prop" do
+      ir = lower("function X() { return <p>{children}</p>; }")
+
+      expect(ir.body.children).to eq([JsxRosetta::IR::Interpolation.new(expression: "children")])
+    end
+  end
+
+  describe "conditionals" do
+    it "lowers {cond && X} to IR::Conditional with no alternate" do
+      ir = lower("function X({ open }) { return <div>{open && <p>shown</p>}</div>; }")
+
+      cond = ir.body.children.first
+      expect(cond).to be_a(JsxRosetta::IR::Conditional)
+      expect(cond.test).to eq(JsxRosetta::IR::Interpolation.new(expression: "open"))
+      expect(cond.consequent).to be_a(JsxRosetta::IR::Element)
+      expect(cond.alternate).to be_nil
+    end
+
+    it "lowers {cond ? X : null} with no alternate" do
+      ir = lower("function X({ open }) { return <div>{open ? <p /> : null}</div>; }")
+
+      cond = ir.body.children.first
+      expect(cond.alternate).to be_nil
+      expect(cond.consequent).to be_a(JsxRosetta::IR::Element)
+    end
+
+    it "lowers {cond ? X : Y} with both branches" do
+      ir = lower("function X({ open }) { return <div>{open ? <a /> : <b />}</div>; }")
+
+      cond = ir.body.children.first
+      expect(cond.consequent).to be_a(JsxRosetta::IR::Element)
+      expect(cond.consequent.tag).to eq("a")
+      expect(cond.alternate).to be_a(JsxRosetta::IR::Element)
+      expect(cond.alternate.tag).to eq("b")
+    end
+
+    it "leaves || and ?? logical expressions as opaque interpolations" do
+      ir = lower("function X({ a, b }) { return <div>{a || b}</div>; }")
+
+      expect(ir.body.children.first).to be_a(JsxRosetta::IR::Interpolation)
+    end
   end
 
   describe "fragments" do
@@ -170,7 +218,7 @@ RSpec.describe JsxRosetta::IR::Lowering do
             )
           ],
           children: [
-            JsxRosetta::IR::Interpolation.new(expression: "children")
+            JsxRosetta::IR::Slot.new(name: "children")
           ]
         )
       )

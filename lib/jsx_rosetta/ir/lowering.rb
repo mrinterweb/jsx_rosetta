@@ -13,11 +13,17 @@ module JsxRosetta
     #   - className attributes lower to IR::StyleBinding; everything else
     #     to IR::Attribute (event handlers like onClick are passed through
     #     as Attribute for now and will be re-lowered to EventBinding in
-    #     Phase 4).
+    #     a later phase).
     #   - JS expressions are preserved as opaque source text via
     #     IR::Interpolation. No JS-to-Ruby translation.
     #   - Pure-whitespace JSXText between elements is dropped (matches
     #     JSX runtime behavior); other text is preserved verbatim.
+    #
+    # Phase 4a additions:
+    #   - {children} where `children` is a prop lowers to IR::Slot.
+    #   - {cond && X}, {cond ? X : null}, and {cond ? X : Y} lower to
+    #     IR::Conditional. Other LogicalExpression operators (||, ??) are
+    #     left as opaque interpolations.
     class Lowering
       class LoweringError < JsxRosetta::Error; end
 
@@ -27,6 +33,7 @@ module JsxRosetta
 
       def initialize(source)
         @source = source
+        @prop_names = []
       end
 
       def lower_file(file)
@@ -52,9 +59,13 @@ module JsxRosetta
       end
 
       def lower_component(function)
+        name = function[:id]&.[](:name) || raise(LoweringError, "anonymous component functions are not supported")
+        props = lower_props(function[:params])
+        @prop_names = props.map(&:name)
+
         Component.new(
-          name: function[:id]&.[](:name) || raise(LoweringError, "anonymous component functions are not supported"),
-          props: lower_props(function[:params]),
+          name: name,
+          props: props,
           body: lower_component_body(function[:body])
         )
       end
@@ -67,7 +78,6 @@ module JsxRosetta
         when "ObjectPattern"
           first_param[:properties].map { |property| lower_prop(property) }
         when "Identifier"
-          # `function Button(props) { ... }` — props bag, opaque.
           [Prop.new(name: first_param[:name], default: nil)]
         else
           raise LoweringError, "unsupported parameter shape: #{first_param.type}"
@@ -79,7 +89,6 @@ module JsxRosetta
         when "ObjectProperty"
           lower_object_prop(property)
         when "RestElement"
-          # `function X({ a, ...rest })` — pass through as a single prop name
           Prop.new(name: source_of(property[:argument]), default: nil)
         else
           raise LoweringError, "unsupported prop pattern: #{property.type}"
@@ -154,7 +163,52 @@ module JsxRosetta
         expression = node.expression
         return nil if expression.is_a?(AST::JSXEmptyExpression)
 
-        Interpolation.new(expression: source_of(expression))
+        case expression.type
+        when "LogicalExpression" then lower_logical_expression(expression)
+        when "ConditionalExpression" then lower_ternary_expression(expression)
+        when "Identifier" then lower_identifier_expression(expression)
+        else
+          Interpolation.new(expression: source_of(expression))
+        end
+      end
+
+      def lower_logical_expression(expr)
+        if expr[:operator] == "&&"
+          Conditional.new(
+            test: Interpolation.new(expression: source_of(expr[:left])),
+            consequent: lower_jsx_or_value(expr[:right]),
+            alternate: nil
+          )
+        else
+          Interpolation.new(expression: source_of(expr))
+        end
+      end
+
+      def lower_ternary_expression(expr)
+        alternate_node = expr[:alternate]
+        alternate = alternate_node.type == "NullLiteral" ? nil : lower_jsx_or_value(alternate_node)
+
+        Conditional.new(
+          test: Interpolation.new(expression: source_of(expr[:test])),
+          consequent: lower_jsx_or_value(expr[:consequent]),
+          alternate: alternate
+        )
+      end
+
+      def lower_identifier_expression(identifier)
+        name = identifier[:name]
+        if name == "children" && @prop_names.include?("children")
+          Slot.new(name: "children")
+        else
+          Interpolation.new(expression: name)
+        end
+      end
+
+      def lower_jsx_or_value(node)
+        case node.type
+        when "JSXElement", "JSXFragment" then lower_jsx(node)
+        else Interpolation.new(expression: source_of(node))
+        end
       end
 
       def lower_attribute(attr)
@@ -162,8 +216,6 @@ module JsxRosetta
         when AST::JSXAttribute
           lower_jsx_attribute(attr)
         when AST::JSXSpreadAttribute
-          # Spread attributes (`<X {...rest} />`) need a dedicated IR node;
-          # surface as an Attribute marker for now so backends can flag.
           Attribute.new(name: "__spread__", value: Interpolation.new(expression: source_of(attr.argument)))
         end
       end
@@ -184,8 +236,6 @@ module JsxRosetta
         when AST::JSXExpressionContainer
           Interpolation.new(expression: source_of(value.expression))
         else
-          # Babel emits StringLiteral for `attr="literal"`. Read the raw
-          # value rather than slicing source so we get the unquoted string.
           value.raw["value"]
         end
       end
