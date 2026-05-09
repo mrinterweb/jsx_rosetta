@@ -1,43 +1,135 @@
-# JsxRosetta
+# jsx_rosetta
 
-TODO: Delete this and the text below, and describe your gem
+Translate React/JSX components into Rails [ViewComponent](https://viewcomponent.org/)
+classes paired with ERB templates.
 
-Welcome to your new gem! In this directory, you'll find the files you need to be able to package up your Ruby library into a gem. Put your Ruby code in the file `lib/jsx_rosetta`. To experiment with that code, run `bin/console` for an interactive prompt.
+`jsx_rosetta` parses JSX (and TSX) via Babel running in a Node sidecar, lowers
+the parsed AST into a framework-agnostic semantic IR, and emits target output
+through pluggable backends. The initial backend produces a `.rb` ViewComponent
+class plus a `.html.erb` template; the IR is designed so additional backends
+(Phlex, Slim, Phoenix LiveView, …) can be added without changing the frontend.
+
+```
+JSX text ──► Babel AST ──► Ruby AST ──► IR ──► ViewComponent backend ──► .rb + .html.erb
+            (Node + Babel) (typed tree)  (sema)  (string-built ERB + Ruby)
+```
 
 ## Installation
 
-TODO: Replace `UPDATE_WITH_YOUR_GEM_NAME_IMMEDIATELY_AFTER_RELEASE_TO_RUBYGEMS_ORG` with your gem name right after releasing it to RubyGems.org. Please do not do it earlier due to security reasons. Alternatively, replace this section with instructions to install your gem from git if you don't plan to release to RubyGems.org.
-
-Install the gem and add to the application's Gemfile by executing:
-
 ```bash
-bundle add UPDATE_WITH_YOUR_GEM_NAME_IMMEDIATELY_AFTER_RELEASE_TO_RUBYGEMS_ORG
+bundle add jsx_rosetta
+bundle exec jsx_rosetta install   # installs the gem's Node sidecar dependencies
 ```
 
-If bundler is not being used to manage dependencies, install the gem by executing:
+Requires:
+- Ruby ≥ 3.2
+- Node.js ≥ 18 (used in a subprocess for parsing)
+
+The Node sidecar's `node_modules` is **not** bundled in the gem — `jsx_rosetta install`
+runs `npm install` in the gem's vendored `node/` directory. Set
+`JSX_ROSETTA_NODE` if the `node` executable is in a non-standard location.
+
+## CLI
 
 ```bash
-gem install UPDATE_WITH_YOUR_GEM_NAME_IMMEDIATELY_AFTER_RELEASE_TO_RUBYGEMS_ORG
+jsx_rosetta translate path/to/Button.jsx -o app/components
+# wrote app/components/button_component.rb
+# wrote app/components/button_component.html.erb
+
+jsx_rosetta parse path/to/Button.jsx > button.ast.json
+jsx_rosetta install
+jsx_rosetta version
 ```
 
-## Usage
+`.tsx` files are auto-detected; pass `--tsx` to force TypeScript parsing on a
+`.jsx` file.
 
-TODO: Write usage instructions here
+## Library API
+
+```ruby
+require "jsx_rosetta"
+
+source = File.read("Button.jsx")
+
+# Just the parsed AST (Babel-shaped, typed Ruby objects).
+ast = JsxRosetta.parse(source)
+ast.walk.find { |n| n.is_a?(JsxRosetta::AST::JSXElement) }.tag_name
+# => "button"
+
+# Lowered IR (semantic, backend-agnostic).
+ir = JsxRosetta.lower(source)
+ir.props.map(&:name)
+# => ["children", "onClick", "variant"]
+
+# End-to-end translation. Returns an array of File value objects.
+files = JsxRosetta.translate(source, backend: :view_component)
+files.first.path     # => "button_component.rb"
+files.first.contents # => "# frozen_string_literal: true\n…"
+```
+
+### What translates today
+
+| JSX construct                        | Translation                                                |
+| ------------------------------------ | ---------------------------------------------------------- |
+| `<button type="x">`                  | Literal HTML attribute                                     |
+| `<a href={url}>`                     | `href="<%= @url %>"` (when `url` is a prop)                |
+| `className={`btn-${variant}`}`       | `class="btn-<%= @variant %>"` (template literal inlined)   |
+| `<Button variant="primary" />`       | `<%= render ButtonComponent.new(variant: "primary") %>`    |
+| `{children}` (when prop)             | `<%= content %>` (ViewComponent default slot)              |
+| `{cond && <X />}`, `{cond ? X : Y}`  | `<% if %>…<% end %>` / with `<% else %>` branch            |
+| `{items.map((item, i) => <X />)}`    | `<% @items.each do \|item, i\| %>…<% end %>`                |
+| `onClick={handler}`                  | `data-action="<%= @handler %>"` (Stimulus action descriptor)|
+| Default values (`x = "primary"`)     | Translated when literal/identifier; flagged otherwise      |
+| Bare prop identifiers                | `@snake_case_name`                                         |
+| `item.label` inside a loop           | `item.label` (loop binding stays local)                    |
+
+Anything the translator can't handle is emitted with a `<%# TODO %>` marker
+plus the verbatim JS source so the human reviewer can fix it.
+
+### What's deferred
+
+- React `useState`/`useEffect` — no introspection of component-internal state yet.
+- React data fetching, `react-query`, Suspense, `useContext`.
+- React Router.
+- Arbitrary JS expression translation (function calls, conditionals, subscripts).
+  Simple shapes (identifiers, literals, simple template literals, member chains)
+  are translated; everything else is flagged.
+- A Stimulus controller runtime (the gem emits `data-action="…"` references but
+  doesn't generate `*_controller.js` files yet).
+- Backends other than ViewComponent (Phlex, Slim, LiveView).
+
+See `PLAN.md` for the phased roadmap.
+
+## Architecture
+
+```
+lib/jsx_rosetta/
+  parser.rb              # public entry: JSX text → AST::Program
+  node_bridge.rb         # subprocess plumbing for the Node sidecar
+  ast/                   # typed Ruby classes mirroring Babel node shapes
+  ir/                    # semantic, framework-agnostic intermediate representation
+    lowering.rb          # AST → IR
+  backend/
+    base.rb              # backend interface
+    view_component.rb    # IR → { ruby:, erb: }
+  cli.rb                 # `exe/jsx_rosetta` dispatch
+node/
+  parse.js               # stdin (JSX request) → stdout (Babel JSON AST)
+  package.json           # @babel/parser dependency
+```
 
 ## Development
 
-After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake spec` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
+```bash
+bin/setup          # bundle install + npm install in node/
+bundle exec rspec  # run the full test suite
+bundle exec rubocop
+```
 
-To install this gem onto your local machine, run `bundle exec rake install`. To release a new version, update the version number in `version.rb`, and then run `bundle exec rake release`, which will create a git tag for the version, push git commits and the created tag, and push the `.gem` file to [rubygems.org](https://rubygems.org).
-
-## Contributing
-
-Bug reports and pull requests are welcome on GitHub at https://github.com/[USERNAME]/jsx_rosetta. This project is intended to be a safe, welcoming space for collaboration, and contributors are expected to adhere to the [code of conduct](https://github.com/[USERNAME]/jsx_rosetta/blob/master/CODE_OF_CONDUCT.md).
+Fixtures used by the golden-file tests live in `spec/fixtures/`:
+- `spec/fixtures/jsx/*.{jsx,tsx}` — input JSX
+- `spec/fixtures/expected/*` — hand-written expected output
 
 ## License
 
-The gem is available as open source under the terms of the [MIT License](https://opensource.org/licenses/MIT).
-
-## Code of Conduct
-
-Everyone interacting in the JsxRosetta project's codebases, issue trackers, chat rooms and mailing lists is expected to follow the [code of conduct](https://github.com/[USERNAME]/jsx_rosetta/blob/master/CODE_OF_CONDUCT.md).
+MIT.

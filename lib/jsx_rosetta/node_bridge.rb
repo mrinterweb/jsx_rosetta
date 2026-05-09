@@ -42,7 +42,7 @@ module JsxRosetta
 
       raise MissingDependencies, <<~MSG.strip
         Node dependencies for jsx_rosetta are not installed.
-        Run `cd #{SIDECAR_DIR} && npm install` (a `jsx_rosetta install` command will be added in a later phase).
+        Run `bundle exec jsx_rosetta install` (or `cd #{SIDECAR_DIR} && npm install`).
       MSG
     end
 

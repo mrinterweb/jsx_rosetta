@@ -2,3 +2,5 @@
 # frozen_string_literal: true
 
 require "jsx_rosetta"
+
+exit JsxRosetta::CLI.new(ARGV.dup).run

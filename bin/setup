@@ -5,4 +5,6 @@ set -vx
 
 bundle install
 
-# Do any other automated setup that you need to do here
+# Install the Node sidecar's npm dependencies so the JSX parser can run.
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+(cd "$script_dir/../node" && npm install)
