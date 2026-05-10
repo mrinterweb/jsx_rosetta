@@ -1,5 +1,90 @@
 # Changelog
 
+## [0.3.0] - 2026-05-10
+
+Driven by a 929-file stress run against the entire `reserv-web` codebase
+(`reserv-web/src/` + `reserv-web/pages/` + `packages/`). Baseline outcome
+on v0.2.0: 838/929 (90.2%) clean exit, 91 hard failures across 5 distinct
+error categories. This release ships fixes for all five plus a follow-up
+that opens up lowercase JSX-returning helpers as components, lifting the
+corpus to **887/929 (95.5%) clean exit**. The 42 remaining failures are
+non-component modules (utility/hook libraries, AG-Grid column
+descriptors, class-based ErrorBoundary components, side-effect
+initializers); each now reports a classifier-tagged error that explains
+*why* it didn't translate.
+
+### Fixed
+
+- **StringLiteral destructure keys no longer crash.**
+  `function X({ "data-testid": dataTestId })` previously surfaced as a
+  `bundler: failed to load command` after `Inflector.underscore(nil)` —
+  the v0.2.0 ObjectPattern fix only handled `Identifier` keys. The
+  lowering now reads `:value` from `StringLiteral` keys. Closes 11 files.
+- **Hyphenated prop names emit valid Ruby.** `Inflector.underscore` now
+  converts hyphens to underscores, so `data-testid` becomes `data_testid`
+  in Ruby identifiers (kwarg, ivar). HTML attribute names continue to
+  preserve hyphens — they're rendered from `Attribute.name` directly.
+
+### Added — return-shape lowering
+
+- **`return null;`, `return identifier;`, `return call();`** in return
+  position. Previously each raised "unexpected JSX node in lowering: …"
+  and crashed translation. The return-position dispatcher now accepts:
+  - `NullLiteral` → empty `IR::Text` (renders nothing in ERB; valid as a
+    Conditional alternate)
+  - `Identifier` → `IR::Interpolation`, with inlining when the identifier
+    is bound to a JSX local (`const card = <p/>; return card;`)
+  - `CallExpression` → `IR::Interpolation` of the verbatim source
+  Closes 20 files.
+- **Trailing `switch` and `try` body shapes.** Component bodies whose
+  only return path lives inside a trailing `switch (subject) { case A:
+  return X; default: return Y; }` or `try { return X; } catch …` now
+  lower cleanly. Switch fall-through groups (`case A: case B: return X;`)
+  emit a single Conditional with an OR-joined test
+  (`subject === A || subject === B`). Cases with multi-statement bodies
+  (other than a single block-wrapped return) bail and the gem still
+  raises "no return statement". Catch/finally handlers are dropped —
+  they typically encode JS-only error semantics. Closes ~5 files.
+- **Leading `if (X) return Y;` guards** wrap around any trailing return
+  structure (return / if-chain / switch / try). Previously a guard
+  before a trailing if-chain or switch was silently dropped (or caused
+  the surrounding structure to bail).
+
+### Added — what counts as a component
+
+- **Lowercase-named JSX-returning helpers** (`textRender`,
+  `booleanRender`, `cellFor`) now lower as components. The PascalCase
+  rule was tightened to "PascalCase OR (lowercase + body returns JSX,
+  excluding `use*` hook names)." A pre-lowering AST scan walks the
+  function body's return paths (recursing into BlockStatement,
+  IfStatement, SwitchStatement, TryStatement, ConditionalExpression,
+  LogicalExpression) to detect any reachable JSX value. Closes ~10
+  utility-renderer files.
+- **Permissive return-position dispatcher.** Function bodies that
+  return arbitrary non-JSX expressions (`return money.formattedValue;`,
+  `return computeValue();`, `` return `${name}` ``) now lower cleanly.
+  Member access, template literals, binary expressions, and other
+  bare-expression returns become `IR::Interpolation`; string and
+  numeric literals become `IR::Text`. This is what makes lowercase
+  JSX-helpers tractable — their guard returns are usually non-JSX.
+- **Implicit-return arrow bodies of any shape.** Previously
+  `const X = () => <div/>` worked but `const X = () => cond ? <a/> : <b/>`
+  raised "unsupported component body". The body dispatcher now routes
+  any non-block body through the return-position dispatcher.
+
+### Improved
+
+- **Module-shape classifier with eight labels and per-shape messages.**
+  Every `no component function found in module` error now appends a
+  specific label and a concrete suggestion: `:hoc_wrapped` (peel
+  `React.memo` / `forwardRef` / `lazy` / `observer`), `:class_component`
+  (rewrite as a function), `:hooks_only` (move behavior to Stimulus,
+  state to ivars), `:columns_data` (data lives in models or presenters),
+  `:types_only` (TypeScript types erase), `:utils_only` (only
+  JSX-returning helpers translate), `:mixed_exports` (split the file),
+  `:side_effects_only` (use a Rails initializer). Stress-test
+  validation: 42 remaining failures, 0 unlabeled.
+
 ## [0.2.0] - 2026-05-10
 
 Driven by an empirical probe of v0.1.0 against a 39-file Next.js production

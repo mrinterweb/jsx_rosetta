@@ -66,6 +66,41 @@ module JsxRosetta
         useReducer useImperativeHandle useLayoutEffect useDebugValue
       ].freeze
 
+      EXPORT_TYPES = %w[ExportNamedDeclaration ExportDefaultDeclaration].freeze
+      JSX_NODE_TYPES = %w[JSXElement JSXFragment JSXText JSXExpressionContainer].freeze
+      HOC_NAMES = %w[memo forwardRef lazy observer].freeze
+
+      # Pre-lowering AST scan: maps a node type to a callable returning the
+      # AST nodes that contribute return values. Used by body_returns_jsx?.
+      JSX_RETURN_PROBES = {
+        "ReturnStatement" => ->(n) { [n[:argument]] },
+        "BlockStatement" => ->(n) { n[:body] },
+        "IfStatement" => ->(n) { [n[:consequent], n[:alternate]] },
+        "TryStatement" => ->(n) { [n[:block]] },
+        "ConditionalExpression" => ->(n) { [n[:consequent], n[:alternate]] },
+        "LogicalExpression" => ->(n) { [n[:left], n[:right]] }
+      }.freeze
+
+      SHAPE_MESSAGES = {
+        hoc_wrapped: "looks like a HOC-wrapped component (React.memo / forwardRef / lazy / observer) — " \
+                     "this version doesn't peel HOC wrappers; remove the wrapper or upgrade when supported",
+        class_component: "looks like a class component — this version translates only function components " \
+                         "(rewrite as a function or wait for class-component support)",
+        hooks_only: "looks like a custom-hooks module — hooks encode behavior and state, not view markup; " \
+                    "translate behavior to a Stimulus controller and state to server-rendered ivars",
+        columns_data: "looks like a data export (top-level array literal) — not a component; " \
+                      "data lives in the model or a presenter, not a ViewComponent",
+        types_only: "looks like a types/constants module — no functions to translate; " \
+                    "TypeScript types erase, and Ruby constants belong elsewhere",
+        side_effects_only: "looks like a side-effect-only module (top-level calls, no exported functions) — " \
+                           "register the equivalent setup in a Rails initializer instead",
+        utils_only: "looks like a utility module — only function components and JSX-returning helpers translate; " \
+                    "pure-data helpers don't have a ViewComponent equivalent",
+        mixed_exports: "module mixes shapes (utilities + hooks + types + non-JSX helpers) — " \
+                       "split into separate files so each module has a single shape",
+        unknown: nil
+      }.freeze
+
       def initialize(source)
         @source = source
         @prop_names = []
@@ -80,7 +115,7 @@ module JsxRosetta
 
       def lower_file(file)
         candidates = find_component_functions(file.program)
-        raise lowering_error("no component function found in module") if candidates.empty?
+        raise no_component_error(file.program) if candidates.empty?
 
         name, function = candidates.first
         lower_component(name, function)
@@ -88,7 +123,7 @@ module JsxRosetta
 
       def lower_all_components(file)
         candidates = find_component_functions(file.program)
-        raise lowering_error("no component function found in module") if candidates.empty?
+        raise no_component_error(file.program) if candidates.empty?
 
         candidates.map { |name, function| lower_component(name, function) }
       end
@@ -99,20 +134,175 @@ module JsxRosetta
         LoweringError.new(message, node: node, source: @source)
       end
 
+      def no_component_error(program)
+        shape = classify_module_shape(program)
+        message = SHAPE_MESSAGES[shape]
+        suffix = message ? " — #{message}" : ""
+        lowering_error("no component function found in module#{suffix}")
+      end
+
+      # Heuristic classifier that labels a module whose top-level shape isn't
+      # a function component. Used only for the error message — does not
+      # affect what does or doesn't translate. Order matters: more specific
+      # shapes are checked first.
+      def classify_module_shape(program)
+        ast_shape = classify_ast_shape(program)
+        return ast_shape if ast_shape
+
+        classify_by_export_names(top_level_export_names(program), program)
+      end
+
+      def classify_ast_shape(program)
+        return :class_component if program.body.any? { |stmt| class_component?(stmt) }
+        return :hoc_wrapped if program.body.any? { |stmt| hoc_wrapped_export?(stmt) }
+        return :columns_data if program.body.any? { |stmt| array_literal_export?(stmt) }
+
+        nil
+      end
+
+      def classify_by_export_names(names, program)
+        export_label = classify_by_export_pattern(names)
+        return export_label if export_label
+
+        classify_non_export_module(program)
+      end
+
+      def classify_by_export_pattern(names)
+        any_hooks = names.any? { |n| hook_name?(n) }
+        any_helpers = names.any? { |n| /\A[a-z]/.match?(n) && !hook_name?(n) }
+        return :mixed_exports if any_hooks && any_helpers
+        return :hooks_only if any_hooks
+        return :utils_only if any_helpers
+
+        nil
+      end
+
+      # No function-shaped exports. Distinguish:
+      #   - side-effect-only (top-level calls like `LicenseManager.set(...)`)
+      #   - types-only       (TS types/interfaces and constants)
+      #   - unknown          (nothing top-level to look at)
+      def classify_non_export_module(program)
+        return :side_effects_only if program.body.any? { |s| side_effect_statement?(s) }
+        return :types_only if top_level_has_anything?(program)
+
+        :unknown
+      end
+
+      def side_effect_statement?(stmt)
+        stmt.is_a?(AST::Node) && stmt.type == "ExpressionStatement"
+      end
+
+      def hook_name?(name)
+        name.start_with?("use") && name.length > 3 && name[3] == name[3].upcase
+      end
+
+      def class_component?(stmt)
+        decl = EXPORT_TYPES.include?(stmt.type) ? stmt[:declaration] : stmt
+        decl.is_a?(AST::Node) && decl.type == "ClassDeclaration"
+      end
+
+      # Recognize `export const X = React.memo(...)` (export wrapper) or a
+      # top-level `const X = lazy(() => ...)` followed by `export default X`
+      # — a VariableDeclaration whose init is a CallExpression to a known HOC.
+      def hoc_wrapped_export?(stmt)
+        decl = EXPORT_TYPES.include?(stmt.type) ? stmt[:declaration] : stmt
+        return false unless decl.is_a?(AST::Node) && decl.type == "VariableDeclaration"
+
+        decl[:declarations].any? do |d|
+          init = d[:init]
+          init.is_a?(AST::Node) && init.type == "CallExpression" && hoc_callee?(init[:callee])
+        end
+      end
+
+      def hoc_callee?(callee)
+        return false unless callee.is_a?(AST::Node)
+
+        case callee.type
+        when "Identifier" then HOC_NAMES.include?(callee[:name])
+        when "MemberExpression"
+          property = callee[:property]
+          property.is_a?(AST::Node) && property.type == "Identifier" && HOC_NAMES.include?(property[:name])
+        else false
+        end
+      end
+
+      def array_literal_export?(stmt)
+        return false unless EXPORT_TYPES.include?(stmt.type)
+
+        decl = stmt[:declaration]
+        return true if decl.is_a?(AST::Node) && decl.type == "ArrayExpression"
+        return false unless decl.is_a?(AST::Node) && decl.type == "VariableDeclaration"
+
+        decl[:declarations].any? { |d| d[:init].is_a?(AST::Node) && d[:init].type == "ArrayExpression" }
+      end
+
+      # Does the program have any top-level non-import statements? Used to
+      # distinguish "types-only / empty module" from "mixed exports."
+      def top_level_has_anything?(program)
+        program.body.any? do |stmt|
+          stmt.is_a?(AST::Node) && stmt.type != "ImportDeclaration"
+        end
+      end
+
+      def top_level_export_names(program)
+        program.body.flat_map { |stmt| extract_top_level_names(stmt) }.compact
+      end
+
+      def extract_top_level_names(stmt)
+        case stmt.type
+        when "FunctionDeclaration"
+          [stmt[:id]&.[](:name)]
+        when "VariableDeclaration"
+          stmt[:declarations].map { |d| d[:id].is_a?(AST::Node) && d[:id].type == "Identifier" ? d[:id][:name] : nil }
+        when "ExportNamedDeclaration", "ExportDefaultDeclaration"
+          decl = stmt[:declaration]
+          decl.is_a?(AST::Node) ? extract_top_level_names(decl) : []
+        else
+          []
+        end
+      end
+
       def find_component_functions(program)
         program.body.flat_map { |stmt| extract_components(stmt) }
                     .compact
-                    .select { |(name, _)| component_name?(name) }
+                    .select { |(name, fn)| component_function?(name, fn) }
       end
 
-      # React convention: components are PascalCase, hooks are camelCase
-      # starting with `use`, plain helpers are lowercase. Only PascalCase
-      # names are treated as components.
-      def component_name?(name)
+      # A function is a component if it's PascalCase (the React convention),
+      # or if it's a lowercase-named helper whose body returns JSX. The
+      # latter catches files like `CellRenderers.tsx` that export
+      # `textRender`, `booleanRender`, etc. — JSX-returning by structure
+      # but lowercase by convention. `use*` names are excluded — those are
+      # hooks, which return data, not view markup.
+      def component_function?(name, function)
         return false if name.nil? || name.empty?
+        return true if pascal_case?(name)
+        return false if hook_name?(name)
 
+        body_returns_jsx?(function[:body])
+      end
+
+      def pascal_case?(name)
         first = name[0]
         first == first.upcase && first != first.downcase
+      end
+
+      # Pre-lowering AST scan: does any return path in this body produce a
+      # JSX value? Used only as a heuristic for component_function?, so a
+      # false positive is a translation attempt that may TODO out, while
+      # a false negative is a missed translation. Recursion follows return
+      # paths only — does not descend into nested function expressions.
+      def body_returns_jsx?(node)
+        return false unless node.is_a?(AST::Node)
+        return true if %w[JSXElement JSXFragment].include?(node.type)
+        return switch_returns_jsx?(node) if node.type == "SwitchStatement"
+
+        probe = JSX_RETURN_PROBES[node.type]
+        probe ? probe.call(node).any? { |child| body_returns_jsx?(child) } : false
+      end
+
+      def switch_returns_jsx?(node)
+        node[:cases].any? { |c| c[:consequent].any? { |s| body_returns_jsx?(s) } }
       end
 
       def extract_components(stmt)
@@ -208,50 +398,114 @@ module JsxRosetta
       end
 
       def lower_object_prop(property)
+        key = property[:key]
+        prop_name = key.type == "StringLiteral" ? key[:value] : key[:name]
         value = property[:value]
         default = (Interpolation.new(expression: source_of(value[:right])) if value.type == "AssignmentPattern")
-        Prop.new(name: property[:key][:name], default: default)
+        Prop.new(name: prop_name, default: default)
       end
 
       def lower_function_body(body)
-        case body.type
-        when "BlockStatement"
+        if body.type == "BlockStatement"
           collect_local_bindings(body[:body])
-          return_stmt = body[:body].find { |stmt| stmt.type == "ReturnStatement" }
-          return lower_return_value(return_stmt[:argument]) if return_stmt
-
-          chained = lower_if_return_chain_from_body(body[:body])
+          chained = lower_block_returns(body[:body])
           return chained if chained
 
           raise lowering_error("component function has no return statement", node: body)
-        when "JSXElement", "JSXFragment"
-          @local_jsx = {}
-          lower_jsx(body)
-        else
-          raise lowering_error("unsupported component body: #{body.type}", node: body)
         end
+
+        @local_jsx = {}
+        lower_return_value(body)
       end
 
-      # Dispatch a value in return position. Distinct from lower_jsx because
-      # `return cond ? <A/> : <B/>` and `return cond && <A/>` are valid return
-      # shapes that aren't JSX nodes and need to lower as Conditional.
+      # Dispatch a value in return position. JSX nodes lower via lower_jsx;
+      # everything else gets a sensible default — null becomes empty Text,
+      # ConditionalExpression / LogicalExpression lower to Conditional,
+      # Identifier inlines @local_jsx-bound JSX or emits an Interpolation,
+      # literal Strings/Numbers become Text, and any other expression
+      # (CallExpression, MemberExpression, BinaryExpression, TemplateLiteral,
+      # …) becomes a verbatim Interpolation. This permissive default is
+      # what lets lowercase JSX-returning helpers (`textRender`,
+      # `moneyRender`) lower cleanly when their guard returns are non-JSX.
       def lower_return_value(node)
         case node.type
         when "ConditionalExpression" then lower_ternary_expression(node)
         when "LogicalExpression" then lower_logical_expression(node)
-        else lower_jsx(node)
+        when "NullLiteral" then Text.new(value: "")
+        when *JSX_NODE_TYPES then lower_jsx(node)
+        when "Identifier" then lower_identifier_return(node)
+        when "StringLiteral" then Text.new(value: node[:value])
+        when "NumericLiteral" then Text.new(value: node[:value].to_s)
+        else Interpolation.new(expression: source_of(node))
         end
       end
 
-      # Recognize a body whose only return paths are inside an
-      # `if/else if/else` chain at the bottom (no unconditional return).
-      # Lowers the chain to nested IR::Conditional. Returns nil when the
-      # shape doesn't fit.
-      def lower_if_return_chain_from_body(statements)
-        if_stmt = statements.last
-        return nil unless if_stmt.is_a?(AST::Node) && if_stmt.type == "IfStatement"
+      def lower_identifier_return(node)
+        bound = @local_jsx[node[:name]]
+        bound ? lower_jsx(bound) : Interpolation.new(expression: source_of(node))
+      end
 
-        lower_if_return_chain(if_stmt)
+      # Lower a block-statement body into an IR value. Recognized shapes:
+      #   - first top-level `return X;` (everything after is dead code)
+      #   - trailing `if/else if/else` chain whose every branch returns
+      #   - trailing `switch (subject) { case A: return X; default: return Y; }`
+      #   - trailing `try { return X; } catch { ... }`
+      # Any preceding `if (X) return Y;` guard statements (no else) are wrapped
+      # around the base value as outer Conditionals. Returns nil when no shape
+      # matches; caller raises.
+      def lower_block_returns(statements)
+        return_idx = statements.index { |s| s.is_a?(AST::Node) && s.type == "ReturnStatement" }
+
+        if return_idx
+          return_arg = statements[return_idx][:argument]
+          return nil unless return_arg
+
+          base = lower_return_value(return_arg)
+          preceding = statements[0...return_idx]
+        else
+          last = statements.last
+          return nil unless last.is_a?(AST::Node)
+
+          base = lower_trailing_return_structure(last)
+          return nil unless base
+
+          preceding = statements[0...-1]
+        end
+
+        wrap_return_guards(preceding, base)
+      end
+
+      def lower_trailing_return_structure(stmt)
+        case stmt.type
+        when "IfStatement" then lower_if_return_chain(stmt)
+        when "SwitchStatement" then lower_switch_return(stmt)
+        when "TryStatement" then lower_try_return(stmt)
+        end
+      end
+
+      # Wrap `if (X) return Y;` guard statements (no else) around `base_value`
+      # as outer Conditionals. Preceding statements that we can't represent
+      # (const declarations, hook calls, multi-stmt guard bodies, if-else
+      # structures with multi-stmt branches) are skipped silently — they're
+      # either already absorbed by collect_local_bindings (consts/hooks) or
+      # they encode side effects we can't preserve. Matches the v0.2.0
+      # behavior of dropping unrepresentable preceding statements rather
+      # than failing the whole component.
+      def wrap_return_guards(preceding, base_value)
+        preceding.reverse.each do |stmt|
+          next unless stmt.is_a?(AST::Node) && stmt.type == "IfStatement"
+          next if stmt[:alternate]
+
+          branch_value = lower_return_branch(stmt[:consequent])
+          next unless branch_value
+
+          base_value = Conditional.new(
+            test: Interpolation.new(expression: source_of(stmt[:test])),
+            consequent: branch_value,
+            alternate: base_value
+          )
+        end
+        base_value
       end
 
       def lower_if_return_chain(if_stmt)
@@ -273,22 +527,123 @@ module JsxRosetta
         )
       end
 
-      # An if-chain branch lowers to a return value only when it is a
-      # single-statement block ending in `return X;` (or a bare `return X;`
-      # without braces). Multi-statement branches imply side effects we
-      # don't preserve, so we bail.
+      # An if-chain branch lowers to a return value via the same
+      # block-handling logic that powers the outer function body:
+      # variable declarations are absorbed into @local_bindings as TODOs,
+      # leading `if (X) return Y;` guards wrap as Conditionals, and any
+      # other preceding statements are silently dropped (since the gem
+      # can't preserve their side effects). Without this consistency,
+      # cases like `if (m) { const x = ...; return <X/>; } else { ... }`
+      # would bail mid-body.
       def lower_return_branch(branch)
         case branch.type
         when "ReturnStatement"
           branch[:argument] && lower_return_value(branch[:argument])
         when "BlockStatement"
-          return nil if branch[:body].size != 1
-
-          inner = branch[:body].first
-          return nil unless inner.type == "ReturnStatement" && inner[:argument]
-
-          lower_return_value(inner[:argument])
+          collect_nested_local_bindings(branch[:body])
+          lower_block_returns(branch[:body])
         end
+      end
+
+      def collect_nested_local_bindings(stmts)
+        stmts.each do |stmt|
+          next unless stmt.is_a?(AST::Node) && stmt.type == "VariableDeclaration"
+
+          seen = {}
+          stmt[:declarations].each { |declarator| classify_local_binding(stmt, declarator, seen) }
+        end
+      end
+
+      # Lower a `switch (subject) { case A: return X; default: return Y; }`
+      # to a right-nested chain of IR::Conditional. Each case must end in a
+      # returnable value (bare `return X;` or a single-stmt block-return).
+      # Fall-through groups (`case A: case B: return X;`) get a single
+      # Conditional with an OR-joined test. The default case (or no default)
+      # becomes the final alternate. Returns nil when any case has a shape
+      # we don't recognize.
+      def lower_switch_return(switch_stmt)
+        groups = build_switch_case_groups(switch_stmt[:cases])
+        return nil unless groups
+
+        subject_src = source_of(switch_stmt[:discriminant])
+        default_value, non_default = split_switch_default(groups)
+
+        non_default.reverse.reduce(default_value) do |alternate, group|
+          test_expr = group[:tests].map { |t| "#{subject_src} === #{source_of(t)}" }.join(" || ")
+          Conditional.new(
+            test: Interpolation.new(expression: test_expr),
+            consequent: group[:value],
+            alternate: alternate
+          )
+        end
+      end
+
+      def build_switch_case_groups(cases)
+        groups = []
+        pending_tests = []
+        pending_default = false
+
+        cases.each do |case_node|
+          if case_node[:test].nil?
+            pending_default = true
+          else
+            pending_tests << case_node[:test]
+          end
+
+          consequent_stmts = case_node[:consequent]
+          next if consequent_stmts.empty?
+
+          value = lower_switch_case_consequent(consequent_stmts)
+          return nil unless value
+
+          groups << {
+            tests: pending_default ? [] : pending_tests.dup,
+            is_default: pending_default,
+            value: value
+          }
+          pending_tests.clear
+          pending_default = false
+        end
+
+        return nil if pending_default || pending_tests.any?
+
+        groups
+      end
+
+      def split_switch_default(groups)
+        default_group = groups.find { |g| g[:is_default] }
+        default_value = default_group ? default_group[:value] : Text.new(value: "")
+        non_default = groups.reject { |g| g[:is_default] }
+        [default_value, non_default]
+      end
+
+      # A switch case body lowers when it returns from every reachable path.
+      # Recognized shapes:
+      #   case A: return X;                   (bare return)
+      #   case A: { return X; }               (block-wrapped return)
+      #   case A: { const y = ...; return X; } (leading vars + return)
+      #   case A: if (X) return Y; return Z;  (guard prefix + return)
+      # Trailing `break` statements are ignored.
+      def lower_switch_case_consequent(stmts)
+        filtered = stmts.reject { |s| s.is_a?(AST::Node) && s.type == "BreakStatement" }
+        return nil if filtered.empty?
+
+        if filtered.size == 1 && filtered.first.is_a?(AST::Node) && filtered.first.type == "BlockStatement"
+          return lower_switch_case_consequent(filtered.first[:body])
+        end
+
+        collect_nested_local_bindings(filtered)
+        lower_block_returns(filtered)
+      end
+
+      # Lower `try { ...; return X; } catch (e) { ... } [finally { ... }]` by
+      # treating the try block's body as the function body. Catch/finally
+      # handlers are dropped — they typically encode JS-only error semantics
+      # that won't translate. Returns nil when the try block has no
+      # recognizable return shape.
+      def lower_try_return(try_stmt)
+        block_body = try_stmt[:block][:body]
+        lower_block_returns(block_body)
       end
 
       def collect_local_bindings(statements)

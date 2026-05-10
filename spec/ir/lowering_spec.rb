@@ -499,9 +499,352 @@ RSpec.describe JsxRosetta::IR::Lowering do
       expect(ir.body.alternate.tag).to eq("b")
     end
 
-    it "still raises when a branch has side-effect statements before its return" do
+    it "silently drops side-effect statements preceding a branch's return (matches outer-block behavior)" do
       jsx = "function X({ kind }) { if (kind) { sideEffect(); return <a />; } else { return <b />; } }"
+      ir = lower(jsx)
+
+      expect(ir.body).to be_a(JsxRosetta::IR::Conditional)
+      expect(ir.body.consequent.tag).to eq("a")
+      expect(ir.body.alternate.tag).to eq("b")
+    end
+  end
+
+  describe "return shapes (NullLiteral, Identifier, CallExpression)" do
+    it "lowers `return null;` to an empty Text node" do
+      ir = lower("function X() { return null; }")
+
+      expect(ir.body).to eq(JsxRosetta::IR::Text.new(value: ""))
+    end
+
+    it "lowers `if (x) return <A/>; return null;` to a Conditional with empty alternate" do
+      ir = lower("function X({ loading }) { if (loading) return <Skeleton />; return null; }")
+
+      expect(ir.body).to be_a(JsxRosetta::IR::Conditional)
+      expect(ir.body.consequent).to be_a(JsxRosetta::IR::ComponentInvocation)
+      expect(ir.body.consequent.name).to eq("Skeleton")
+      expect(ir.body.alternate).to eq(JsxRosetta::IR::Text.new(value: ""))
+    end
+
+    it "lowers `return cardIdentifier;` to an Interpolation of the identifier" do
+      ir = lower("function X({ card }) { return card; }")
+
+      expect(ir.body).to eq(JsxRosetta::IR::Interpolation.new(expression: "card"))
+    end
+
+    it "inlines a JSX-bound local identifier in return position" do
+      ir = lower("function X() { const card = <p>hi</p>; return card; }")
+
+      expect(ir.body).to be_a(JsxRosetta::IR::Element)
+      expect(ir.body.tag).to eq("p")
+    end
+
+    it "lowers `return computeValue(row);` to an Interpolation of the call expression" do
+      ir = lower("function X({ row }) { return computeValue(row); }")
+
+      expect(ir.body).to eq(JsxRosetta::IR::Interpolation.new(expression: "computeValue(row)"))
+    end
+
+    it "lowers `if (href) return <Link>{children}</Link>; return children;` to a Conditional with Slot alternate" do
+      source = "function X({ href, children }) { if (href) return <Link>{children}</Link>; return children; }"
+      ir = lower(source)
+
+      expect(ir.body).to be_a(JsxRosetta::IR::Conditional)
+      expect(ir.body.consequent).to be_a(JsxRosetta::IR::ComponentInvocation)
+      # `children` in return position; @local_jsx isn't set up for params, so it falls through to Interpolation
+      expect(ir.body.alternate).to be_a(JsxRosetta::IR::Interpolation)
+    end
+  end
+
+  describe "switch return chains" do
+    it "lowers a switch with bare-return cases and a default to a nested Conditional" do
+      ir = lower(<<~JS)
+        function X({ kind }) {
+          switch (kind) {
+            case "a":
+              return <a />;
+            case "b":
+              return <b />;
+            default:
+              return <c />;
+          }
+        }
+      JS
+
+      cond = ir.body
+      expect(cond).to be_a(JsxRosetta::IR::Conditional)
+      expect(cond.test.expression).to eq('kind === "a"')
+      expect(cond.consequent.tag).to eq("a")
+
+      inner = cond.alternate
+      expect(inner).to be_a(JsxRosetta::IR::Conditional)
+      expect(inner.test.expression).to eq('kind === "b"')
+      expect(inner.consequent.tag).to eq("b")
+      expect(inner.alternate.tag).to eq("c")
+    end
+
+    it "lowers a switch without a default to a Conditional whose final alternate is empty Text" do
+      ir = lower(<<~JS)
+        function X({ kind }) {
+          switch (kind) {
+            case "a":
+              return <a />;
+          }
+        }
+      JS
+
+      cond = ir.body
+      expect(cond).to be_a(JsxRosetta::IR::Conditional)
+      expect(cond.alternate).to eq(JsxRosetta::IR::Text.new(value: ""))
+    end
+
+    it "lowers a switch with block-wrapped return cases" do
+      ir = lower(<<~JS)
+        function X({ kind }) {
+          switch (kind) {
+            case "a": { return <a />; }
+            default: { return <c />; }
+          }
+        }
+      JS
+
+      expect(ir.body).to be_a(JsxRosetta::IR::Conditional)
+      expect(ir.body.consequent.tag).to eq("a")
+      expect(ir.body.alternate.tag).to eq("c")
+    end
+
+    it "ORs the tests for fall-through cases sharing a return value" do
+      ir = lower(<<~JS)
+        function X({ kind }) {
+          switch (kind) {
+            case "a":
+            case "b":
+              return <ab />;
+            default:
+              return <c />;
+          }
+        }
+      JS
+
+      expect(ir.body.test.expression).to eq('kind === "a" || kind === "b"')
+      expect(ir.body.consequent.tag).to eq("ab")
+      expect(ir.body.alternate.tag).to eq("c")
+    end
+
+    it "silently drops preceding side-effect expressions in a case body (pragmatic match to outer-block behavior)" do
+      ir = lower(<<~JS)
+        function X({ kind }) {
+          switch (kind) {
+            case "a":
+              sideEffect();
+              return <a />;
+          }
+        }
+      JS
+
+      expect(ir.body).to be_a(JsxRosetta::IR::Conditional)
+      expect(ir.body.consequent.tag).to eq("a")
+    end
+
+    it "raises when a switch case has no return at all (only side effects + break)" do
+      jsx = <<~JS
+        function X({ kind }) {
+          switch (kind) {
+            case "a":
+              sideEffect();
+              break;
+          }
+        }
+      JS
       expect { lower(jsx) }.to raise_error(JsxRosetta::IR::Lowering::LoweringError, /no return statement/)
+    end
+
+    it "lowers a case with leading var-decls + return to a Conditional that absorbs the binding" do
+      ir = lower(<<~JS)
+        function X({ kind, record }) {
+          switch (kind) {
+            case "money": {
+              const money = record.money;
+              return <MoneyFormItem money={money} />;
+            }
+            default: return <p />;
+          }
+        }
+      JS
+
+      expect(ir.body).to be_a(JsxRosetta::IR::Conditional)
+      expect(ir.body.consequent).to be_a(JsxRosetta::IR::ComponentInvocation)
+      expect(ir.body.consequent.name).to eq("MoneyFormItem")
+      expect(ir.local_bindings.map(&:name)).to include("money")
+    end
+
+    it "wraps a leading `if (X) return Y;` guard around a trailing switch" do
+      ir = lower(<<~JS)
+        function X({ value, kind }) {
+          if (!value) return <NilValue />;
+          switch (kind) {
+            case "a": return <a />;
+            default: return <b />;
+          }
+        }
+      JS
+
+      expect(ir.body).to be_a(JsxRosetta::IR::Conditional)
+      expect(ir.body.test.expression).to eq("!value")
+      expect(ir.body.consequent).to be_a(JsxRosetta::IR::ComponentInvocation)
+      expect(ir.body.consequent.name).to eq("NilValue")
+      expect(ir.body.alternate).to be_a(JsxRosetta::IR::Conditional)
+    end
+  end
+
+  describe "try return chains" do
+    it "lowers a `try { return <X/>; }` to the try block's return value" do
+      ir = lower(<<~JS)
+        function X() {
+          try {
+            return <a />;
+          } catch (e) {
+            console.error(e);
+          }
+        }
+      JS
+
+      expect(ir.body).to be_a(JsxRosetta::IR::Element)
+      expect(ir.body.tag).to eq("a")
+    end
+
+    it "raises when the try block has no recognizable return" do
+      jsx = "function X() { try { sideEffect(); } catch (e) {} }"
+      expect { lower(jsx) }.to raise_error(JsxRosetta::IR::Lowering::LoweringError, /no return statement/)
+    end
+  end
+
+  describe "module-shape classifier (error-message UX)" do
+    it "labels a hooks-only module with a behavior-vs-state hint" do
+      expect { lower("export function useThing() { const [s, setS] = useState(0); return s; }") }
+        .to raise_error(JsxRosetta::IR::Lowering::LoweringError, /custom-hooks module.*Stimulus controller/)
+    end
+
+    it "labels a utility module that has no JSX-returning helpers" do
+      expect { lower("export function formatThing(x) { return x.toString(); }") }
+        .to raise_error(JsxRosetta::IR::Lowering::LoweringError, /utility module.*JSX-returning/)
+    end
+
+    it "labels a class-component module" do
+      expect { lower("export class MyComp extends React.Component { render() { return <div />; } }") }
+        .to raise_error(JsxRosetta::IR::Lowering::LoweringError, /class component.*function components/)
+    end
+
+    it "labels a columns/data module (top-level array literal export)" do
+      expect { lower("export const columns = [{ title: 'Name' }, { title: 'Age' }];") }
+        .to raise_error(JsxRosetta::IR::Lowering::LoweringError, /data export.*not a component/)
+    end
+
+    it "labels a HOC-wrapped component" do
+      expect { lower("export const X = React.memo(function X() { return foo; });") }
+        .to raise_error(JsxRosetta::IR::Lowering::LoweringError, /HOC-wrapped component/)
+    end
+
+    it "labels a types-only module" do
+      source = "export type Foo = { a: 1 };"
+      ast = JsxRosetta.parse(source, typescript: true)
+      expect { JsxRosetta::IR::Lowering.lower(ast, source: source) }
+        .to raise_error(JsxRosetta::IR::Lowering::LoweringError, %r{types/constants module})
+    end
+
+    it "labels a mixed-exports module (some hooks + some non-hook helpers)" do
+      source = <<~JS
+        export const splitExtension = (s) => s.split(".");
+        export const useFilenameEditor = ({}) => { return ""; };
+      JS
+      expect { lower(source) }.to raise_error(JsxRosetta::IR::Lowering::LoweringError, /mixes shapes/)
+    end
+
+    it "leaves the suffix off when nothing matches" do
+      expect { lower("import x from 'y';") }
+        .to raise_error(JsxRosetta::IR::Lowering::LoweringError) do |error|
+          expect(error.message).not_to include("looks like a")
+          expect(error.message).to include("no component function found in module")
+        end
+    end
+  end
+
+  describe "lowercase-named JSX-returning helpers" do
+    it "treats a lowercase function whose body returns JSX as a component" do
+      ir = lower("export const textRender = (value) => { if (!value) return value; return <NilValue />; };")
+
+      expect(ir).to be_a(JsxRosetta::IR::Component)
+      expect(ir.name).to eq("textRender")
+    end
+
+    it "treats a lowercase function with implicit JSX return as a component" do
+      ir = lower("export const renderTag = () => <Tag />;")
+
+      expect(ir).to be_a(JsxRosetta::IR::Component)
+      expect(ir.name).to eq("renderTag")
+      expect(ir.body).to be_a(JsxRosetta::IR::ComponentInvocation)
+    end
+
+    it "lifts a switch-with-JSX-cases lowercase function as a component" do
+      ir = lower(<<~JS)
+        export const cellFor = (kind) => {
+          switch (kind) {
+            case "name": return <NameCell />;
+            default: return <DefaultCell />;
+          }
+        };
+      JS
+
+      expect(ir).to be_a(JsxRosetta::IR::Component)
+      expect(ir.body).to be_a(JsxRosetta::IR::Conditional)
+    end
+
+    it "still rejects a lowercase function whose body returns no JSX" do
+      expect { lower("export const formatThing = (x) => x.toString();") }
+        .to raise_error(JsxRosetta::IR::Lowering::LoweringError, /no component function found/)
+    end
+
+    it "still rejects a `use*` hook even when the hook body would technically render JSX" do
+      # Defensive: prevents accidental component-translation of hooks whose
+      # name signals they return data, not view markup.
+      expect { lower("export const useThing = () => <p />;") }
+        .to raise_error(JsxRosetta::IR::Lowering::LoweringError, /no component function found/)
+    end
+
+    it "lowers a multi-helper file picking the first JSX-returning one" do
+      source = <<~JS
+        export const textRender = (v) => v ? v : <NilValue />;
+        export const booleanRender = (v) => v ? "Yes" : <NilValue />;
+      JS
+      ir = lower(source)
+
+      expect(ir).to be_a(JsxRosetta::IR::Component)
+      expect(ir.name).to eq("textRender")
+    end
+  end
+
+  describe "return shapes — non-JSX expressions" do
+    it "lowers `return memberExpr;` to an Interpolation of the verbatim source" do
+      ir = lower("function X({ money }) { return money.formattedValue; }")
+
+      expect(ir.body).to eq(JsxRosetta::IR::Interpolation.new(expression: "money.formattedValue"))
+    end
+
+    it "lowers `return 'literal';` to Text" do
+      ir = lower("function X() { return 'hello'; }")
+
+      expect(ir.body).to eq(JsxRosetta::IR::Text.new(value: "hello"))
+    end
+
+    it "lowers `return 42;` to Text of the stringified number" do
+      ir = lower("function X() { return 42; }")
+
+      expect(ir.body).to eq(JsxRosetta::IR::Text.new(value: "42"))
+    end
+
+    it "lowers `return template literals` to Interpolation" do
+      ir = lower("function X({ name }) { return `hello ${name}`; }")
+
+      expect(ir.body).to be_a(JsxRosetta::IR::Interpolation)
     end
   end
 
@@ -604,6 +947,33 @@ RSpec.describe JsxRosetta::IR::Lowering do
       ir = lower("function X({ outer: inner }) { return <div />; }")
 
       expect(ir.props).to eq([JsxRosetta::IR::Prop.new(name: "outer", default: nil)])
+    end
+
+    it "lowers a StringLiteral destructure key (e.g. `data-testid`)" do
+      ir = lower('function X({ "data-testid": testId }) { return <div data-testid={testId} />; }')
+
+      expect(ir.props).to eq([JsxRosetta::IR::Prop.new(name: "data-testid", default: nil)])
+    end
+
+    it "lowers a StringLiteral destructure key with a default" do
+      ir = lower('function X({ "data-testid": testId = "x" }) { return <div />; }')
+
+      expect(ir.props).to eq([
+                               JsxRosetta::IR::Prop.new(
+                                 name: "data-testid",
+                                 default: JsxRosetta::IR::Interpolation.new(expression: '"x"')
+                               )
+                             ])
+    end
+
+    it "round-trips a StringLiteral destructure key through the backend as a snake_case kwarg" do
+      source = 'function FlashyHeader({ "data-testid": dataTestId }) { return <h1 data-testid={dataTestId}>x</h1>; }'
+      backend = JsxRosetta::Backend::ViewComponent.new(layout: :flat)
+      files = backend.emit(lower(source)).to_h { |f| [f.path, f.contents] }
+
+      expect(files["flashy_header_component.rb"]).to include("data_testid: nil")
+      expect(files["flashy_header_component.rb"]).to include("@data_testid = data_testid")
+      expect(files["flashy_header_component.html.erb"]).to include("data-testid=")
     end
   end
 
