@@ -34,10 +34,46 @@ module JsxRosetta
         translator = ExpressionTranslator.new(prop_names: prop_names)
 
         base_name = "#{AST::Inflector.underscore(component.name)}_component"
+        @stimulus_identifier = component.stimulus_methods.any? ? stimulus_identifier(component) : nil
 
-        [
+        files = [
           File.new(path: "#{base_name}.rb", contents: render_ruby_class(component, translator)),
           File.new(path: "#{base_name}.html.erb", contents: render_erb_template(component, translator))
+        ]
+        if component.stimulus_methods.any?
+          files << File.new(
+            path: "#{AST::Inflector.underscore(component.name)}_controller.js",
+            contents: render_stimulus_controller_js(component)
+          )
+        end
+        files
+      end
+
+      def stimulus_identifier(component)
+        AST::Inflector.underscore(component.name).tr("_", "-")
+      end
+
+      def render_stimulus_controller_js(component)
+        lines = [
+          'import { Controller } from "@hotwired/stimulus";',
+          "",
+          "export default class extends Controller {"
+        ]
+        component.stimulus_methods.each_with_index do |method, idx|
+          lines << "" if idx.positive?
+          lines.concat(stimulus_method_lines(method))
+        end
+        lines << "}"
+        "#{lines.join("\n")}\n"
+      end
+
+      def stimulus_method_lines(method)
+        body_lines = method.body_source.strip.split("\n")
+        commented = body_lines.map { |line| "  //   #{line}" }
+        ["  // TODO: translate from the original JSX handler:"] + commented + [
+          "  #{method.name}(event) {",
+          "    // ...",
+          "  }"
         ]
       end
 
@@ -98,10 +134,17 @@ module JsxRosetta
       end
 
       def render_erb_template(component, translator)
-        body = render_ir_node(component.body, translator, indent: 0)
+        root = component.body
+        root = decorate_with_stimulus_controller(root) if component.stimulus_methods.any? && root.is_a?(IR::Element)
+        body = render_ir_node(root, translator, indent: 0)
         body = "#{body}\n" unless body.end_with?("\n")
         prefix = render_local_bindings_todo(component.local_bindings)
         prefix.empty? ? body : "#{prefix}#{body}"
+      end
+
+      def decorate_with_stimulus_controller(element)
+        attr = IR::Attribute.new(name: "data-controller", value: @stimulus_identifier)
+        IR::Element.new(tag: element.tag, attributes: [attr] + element.attributes, children: element.children)
       end
 
       def render_local_bindings_todo(bindings)
@@ -181,7 +224,7 @@ module JsxRosetta
       end
 
       def render_tag_builder_args(attributes, translator)
-        events, others = attributes.partition { |attr| attr.is_a?(IR::EventBinding) }
+        events, others = attributes.partition { |attr| attr.is_a?(IR::EventBinding) || attr.is_a?(IR::StimulusBinding) }
         spreads, plain = others.partition { |attr| attr.is_a?(IR::SpreadAttribute) }
 
         pieces = plain.filter_map { |attr| tag_builder_kwarg(attr, translator) }
@@ -221,12 +264,34 @@ module JsxRosetta
       end
 
       def tag_builder_data_action(events, translator)
-        rubies = events.map do |event|
+        descriptors = events.map { |event| tag_builder_event_descriptor(event, translator) }
+        all_literal = descriptors.all? { |d| d.start_with?('"') && d.end_with?('"') }
+        joined = if descriptors.size == 1
+                   descriptors.first
+                 elsif all_literal
+                   %("#{descriptors.map { |d| d[1..-2] }.join(" ")}")
+                 else
+                   %("#{descriptors.map { |d| literal_to_interpolated(d) }.join(" ")}")
+                 end
+        %("data-action" => #{joined})
+      end
+
+      def tag_builder_event_descriptor(event, translator)
+        case event
+        when IR::EventBinding
           translated = translator.translate(event.handler.expression)
           translated ? translated.ruby : event.handler.expression.inspect
+        when IR::StimulusBinding
+          %("#{event.event}->#{@stimulus_identifier}##{event.method_name}")
         end
-        joined = rubies.size == 1 ? rubies.first : %("#{rubies.map { |r| "\#{#{r}}" }.join(" ")}")
-        %("data-action" => #{joined})
+      end
+
+      def literal_to_interpolated(descriptor)
+        if descriptor.start_with?('"') && descriptor.end_with?('"')
+          descriptor[1..-2]
+        else
+          "\#{#{descriptor}}"
+        end
       end
 
       def tag_builder_spread(expression, translator)
@@ -284,7 +349,7 @@ module JsxRosetta
       end
 
       def render_attributes(attributes, translator)
-        events, others = attributes.partition { |attr| attr.is_a?(IR::EventBinding) }
+        events, others = attributes.partition { |attr| attr.is_a?(IR::EventBinding) || attr.is_a?(IR::StimulusBinding) }
         rendered = others.filter_map { |attr| render_attribute(attr, translator) }
         rendered << render_data_action(events, translator) if events.any?
         rendered.join(" ")
@@ -355,10 +420,15 @@ module JsxRosetta
         %(data-action="#{parts.join(" ")}")
       end
 
-      def render_event_handler(event_binding, translator)
-        translated = translator.translate(event_binding.handler.expression)
-        ruby = translated ? translated.ruby : event_binding.handler.expression
-        "<%= #{ruby} %>"
+      def render_event_handler(event, translator)
+        case event
+        when IR::EventBinding
+          translated = translator.translate(event.handler.expression)
+          ruby = translated ? translated.ruby : event.handler.expression
+          "<%= #{ruby} %>"
+        when IR::StimulusBinding
+          "#{event.event}->#{@stimulus_identifier}##{event.method_name}"
+        end
       end
 
       def render_plain_attribute(attribute, translator)

@@ -20,7 +20,11 @@ module JsxRosetta
     #                  the component body. Backends typically render these as
     #                  a TODO comment block since arbitrary JS-to-Ruby
     #                  translation isn't attempted.
-    Component = Data.define(:name, :props, :body, :rest_prop_name, :local_bindings) do
+    # stimulus_methods : [StimulusMethod] — event handlers extracted from
+    #                  inline arrows / const-bound arrows used in onX={...}.
+    #                  When non-empty, backends should emit a sibling
+    #                  Stimulus controller file alongside the .rb/.erb pair.
+    Component = Data.define(:name, :props, :body, :rest_prop_name, :local_bindings, :stimulus_methods) do
       include Node
     end
 
@@ -193,6 +197,27 @@ module JsxRosetta
     #           (e.g. "click->my-controller#handleClick"); the component
     #           just renders it through.
     EventBinding = Data.define(:event, :handler) do
+      include Node
+    end
+
+    # An event handler routed through a generated Stimulus controller.
+    #
+    # event       : String — lowercased DOM event name.
+    # method_name : String — Stimulus controller method (camelCase per
+    #               Stimulus convention).
+    StimulusBinding = Data.define(:event, :method_name) do
+      include Node
+    end
+
+    # A handler method to be emitted on the generated Stimulus controller.
+    # Body translation is deferred to the human reviewer; we preserve the
+    # original JS body verbatim.
+    #
+    # name        : String — camelCase Stimulus method name.
+    # body_source : String — verbatim JS body (the entire arrow function or
+    #               the function expression body), preserved as a comment in
+    #               the emitted controller skeleton.
+    StimulusMethod = Data.define(:name, :body_source) do
       include Node
     end
 

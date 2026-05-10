@@ -66,6 +66,9 @@ module JsxRosetta
         @prop_names = []
         @local_jsx = {}
         @local_bindings = []
+        @local_arrows = {}
+        @stimulus_methods = []
+        @stimulus_seen_names = {}
       end
 
       def lower_file(file)
@@ -137,6 +140,9 @@ module JsxRosetta
         props, rest_prop_name = lower_params(function[:params])
         @prop_names = props.map(&:name)
         @local_bindings = []
+        @local_arrows = {}
+        @stimulus_methods = []
+        @stimulus_seen_names = {}
 
         body = lower_function_body(function[:body])
 
@@ -145,7 +151,8 @@ module JsxRosetta
           props: props,
           body: body,
           rest_prop_name: rest_prop_name,
-          local_bindings: @local_bindings
+          local_bindings: @local_bindings,
+          stimulus_methods: @stimulus_methods
         )
       end
 
@@ -210,6 +217,7 @@ module JsxRosetta
 
       def collect_local_bindings(statements)
         @local_jsx = {}
+        @local_arrows = {}
         seen_other_stmts = {}
 
         statements.each do |stmt|
@@ -222,8 +230,11 @@ module JsxRosetta
             name = declarator[:id]&.[](:name)
             next unless name
 
-            if %w[JSXElement JSXFragment].include?(init.type)
+            case init.type
+            when "JSXElement", "JSXFragment"
               @local_jsx[name] = init
+            when "ArrowFunctionExpression", "FunctionExpression"
+              @local_arrows[name] = init
             else
               record_local_other_binding(stmt, name, seen_other_stmts)
             end
@@ -543,10 +554,50 @@ module JsxRosetta
       end
 
       def lower_event_attribute(name, value)
+        event = name.sub(/\Aon/, "").downcase
+        expression = value.expression
+
+        stimulus = try_promote_to_stimulus(name, event, expression)
+        return stimulus if stimulus
+
         EventBinding.new(
-          event: name.sub(/\Aon/, "").downcase,
-          handler: Interpolation.new(expression: source_of(value.expression))
+          event: event,
+          handler: Interpolation.new(expression: source_of(expression))
         )
+      end
+
+      def try_promote_to_stimulus(attr_name, event, expression)
+        arrow_node, name_hint = stimulus_arrow_for(expression)
+        return nil unless arrow_node
+
+        method_name = stimulus_method_name(name_hint || default_stimulus_method_name(attr_name))
+        body_source = source_of(arrow_node[:body])
+        @stimulus_methods << StimulusMethod.new(name: method_name, body_source: body_source)
+        @local_arrows.delete(name_hint) if name_hint
+
+        StimulusBinding.new(event: event, method_name: method_name)
+      end
+
+      def stimulus_arrow_for(expression)
+        case expression.type
+        when "ArrowFunctionExpression", "FunctionExpression"
+          [expression, nil]
+        when "Identifier"
+          arrow = @local_arrows[expression[:name]]
+          arrow ? [arrow, expression[:name]] : nil
+        end
+      end
+
+      def default_stimulus_method_name(attr_name)
+        # `onClick` → `clickHandler`
+        event = attr_name.sub(/\Aon/, "")
+        "#{event[0].downcase}#{event[1..]}Handler"
+      end
+
+      def stimulus_method_name(base)
+        @stimulus_seen_names[base] ||= 0
+        @stimulus_seen_names[base] += 1
+        @stimulus_seen_names[base] == 1 ? base : "#{base}#{@stimulus_seen_names[base]}"
       end
 
       def lower_attribute_value(value)

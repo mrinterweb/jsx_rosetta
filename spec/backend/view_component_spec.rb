@@ -309,6 +309,31 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(erb).to include(%(style: "font-size: \#{@size};"))
     end
 
+    it "emits a Stimulus controller file when stimulus_methods is non-empty" do
+      files = files_for("function CopyButton() { return <button onClick={() => copy()}>Copy</button>; }")
+
+      expect(files).to have_key("copy_button_controller.js")
+      controller = files["copy_button_controller.js"]
+      expect(controller).to include('import { Controller } from "@hotwired/stimulus";')
+      expect(controller).to include("export default class extends Controller")
+      expect(controller).to include("clickHandler(event)")
+      expect(controller).to include("//   copy()")
+    end
+
+    it "wires data-controller and data-action on the root element when Stimulus methods exist" do
+      files = files_for("function CopyButton() { return <button onClick={() => copy()}>Copy</button>; }")
+
+      erb = files["copy_button_component.html.erb"]
+      expect(erb).to include('data-controller="copy-button"')
+      expect(erb).to include('data-action="click->copy-button#clickHandler"')
+    end
+
+    it "does not emit a controller file when there are no Stimulus methods" do
+      files = files_for("function X() { return <p />; }")
+
+      expect(files.keys).not_to include(a_string_matching(/_controller\.js\z/))
+    end
+
     it "prepends a TODO comment listing non-JSX local bindings" do
       files = files_for(<<~JSX)
         function X({ raw }) {

@@ -265,6 +265,58 @@ RSpec.describe JsxRosetta::IR::Lowering do
     end
   end
 
+  describe "Stimulus handler promotion" do
+    it "promotes inline arrow handlers to StimulusBinding + StimulusMethod" do
+      ir = lower("function X() { return <button onClick={() => doStuff()}>x</button>; }")
+
+      attr = ir.body.attributes.first
+      expect(attr).to be_a(JsxRosetta::IR::StimulusBinding)
+      expect(attr.event).to eq("click")
+      expect(attr.method_name).to eq("clickHandler")
+      expect(ir.stimulus_methods.size).to eq(1)
+      expect(ir.stimulus_methods.first.name).to eq("clickHandler")
+      expect(ir.stimulus_methods.first.body_source).to eq("doStuff()")
+    end
+
+    it "promotes a const-bound arrow when referenced as an event handler" do
+      ir = lower(<<~JSX)
+        function X() {
+          const handleClick = () => doStuff();
+          return <button onClick={handleClick}>x</button>;
+        }
+      JSX
+
+      attr = ir.body.attributes.first
+      expect(attr).to be_a(JsxRosetta::IR::StimulusBinding)
+      expect(attr.method_name).to eq("handleClick")
+      expect(ir.stimulus_methods.first.name).to eq("handleClick")
+    end
+
+    it "leaves prop-bound event handlers as EventBinding (no Stimulus promotion)" do
+      ir = lower("function X({ onClick }) { return <button onClick={onClick}>x</button>; }")
+
+      attr = ir.body.attributes.first
+      expect(attr).to be_a(JsxRosetta::IR::EventBinding)
+      expect(ir.stimulus_methods).to eq([])
+    end
+
+    it "uniquifies method names when multiple inline handlers share an event" do
+      ir = lower(<<~JSX)
+        function X() {
+          return (
+            <div>
+              <button onClick={() => a()}>a</button>
+              <button onClick={() => b()}>b</button>
+            </div>
+          );
+        }
+      JSX
+
+      method_names = ir.stimulus_methods.map(&:name)
+      expect(method_names).to eq(%w[clickHandler clickHandler2])
+    end
+  end
+
   describe "conditionals" do
     it "lowers {cond && X} to IR::Conditional with no alternate" do
       ir = lower("function X({ open }) { return <div>{open && <p>shown</p>}</div>; }")
@@ -558,7 +610,8 @@ RSpec.describe JsxRosetta::IR::Lowering do
           ]
         ),
         rest_prop_name: nil,
-        local_bindings: []
+        local_bindings: [],
+        stimulus_methods: []
       )
 
       expect(ir).to eq(expected)
