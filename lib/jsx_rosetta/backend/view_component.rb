@@ -169,8 +169,11 @@ module JsxRosetta
         root = decorate_with_stimulus_controller(root) if component.stimulus_methods.any? && root.is_a?(IR::Element)
         body = render_ir_node(root, translator, indent: 0)
         body = "#{body}\n" unless body.end_with?("\n")
-        prefix = render_local_bindings_todo(component.local_bindings)
-        prefix.empty? ? body : "#{prefix}#{body}"
+
+        prefix = String.new
+        prefix << render_react_hooks_todo(component.react_hooks)
+        prefix << render_local_bindings_todo(component.local_bindings)
+        "#{prefix}#{body}"
       end
 
       def decorate_with_stimulus_controller(element)
@@ -184,6 +187,19 @@ module JsxRosetta
         unique_sources = bindings.map(&:source).uniq
         lines = ["<%# TODO: translate JS to Ruby — original:"]
         unique_sources.each { |src| lines << "    #{src}" }
+        lines << "%>"
+        "#{lines.join("\n")}\n"
+      end
+
+      def render_react_hooks_todo(hooks)
+        return "" if hooks.empty?
+
+        lines = [
+          "<%# TODO: React hooks detected. None translate automatically. Hotwire/Stimulus",
+          "    handles behavior; controllers/views handle state; turbo-frames handle async",
+          "    loading. Original source:"
+        ]
+        hooks.each { |hook| lines << "    #{hook.source}" }
         lines << "%>"
         "#{lines.join("\n")}\n"
       end

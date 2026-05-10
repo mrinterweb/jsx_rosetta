@@ -61,14 +61,21 @@ module JsxRosetta
         new(source).lower_all_components(file)
       end
 
+      REACT_HOOKS = %w[
+        useState useEffect useRef useContext useMemo useCallback
+        useReducer useImperativeHandle useLayoutEffect useDebugValue
+      ].freeze
+
       def initialize(source)
         @source = source
         @prop_names = []
         @local_jsx = {}
         @local_bindings = []
         @local_arrows = {}
+        @local_polymorphic_tags = {}
         @stimulus_methods = []
         @stimulus_seen_names = {}
+        @react_hooks = []
       end
 
       def lower_file(file)
@@ -141,8 +148,10 @@ module JsxRosetta
         @prop_names = props.map(&:name)
         @local_bindings = []
         @local_arrows = {}
+        @local_polymorphic_tags = {}
         @stimulus_methods = []
         @stimulus_seen_names = {}
+        @react_hooks = []
 
         body = lower_function_body(function[:body])
 
@@ -152,7 +161,8 @@ module JsxRosetta
           body: body,
           rest_prop_name: rest_prop_name,
           local_bindings: @local_bindings,
-          stimulus_methods: @stimulus_methods
+          stimulus_methods: @stimulus_methods,
+          react_hooks: @react_hooks
         )
       end
 
@@ -218,27 +228,78 @@ module JsxRosetta
       def collect_local_bindings(statements)
         @local_jsx = {}
         @local_arrows = {}
+        @local_polymorphic_tags = {}
         seen_other_stmts = {}
 
         statements.each do |stmt|
-          next unless stmt.type == "VariableDeclaration"
-
-          stmt[:declarations].each do |declarator|
-            init = declarator[:init]
-            next unless init.is_a?(AST::Node)
-
-            name = declarator[:id]&.[](:name)
-            next unless name
-
-            case init.type
-            when "JSXElement", "JSXFragment"
-              @local_jsx[name] = init
-            when "ArrowFunctionExpression", "FunctionExpression"
-              @local_arrows[name] = init
-            else
-              record_local_other_binding(stmt, name, seen_other_stmts)
-            end
+          case stmt.type
+          when "VariableDeclaration"
+            stmt[:declarations].each { |declarator| classify_local_binding(stmt, declarator, seen_other_stmts) }
+          when "ExpressionStatement"
+            detect_bare_hook_call(stmt)
           end
+        end
+      end
+
+      def classify_local_binding(stmt, declarator, seen)
+        init = declarator[:init]
+        return unless init.is_a?(AST::Node)
+
+        if hook_call?(init)
+          @react_hooks << ReactHookCall.new(hook: init[:callee][:name], source: source_of(stmt).strip)
+          return
+        end
+
+        name = declarator[:id]&.[](:name)
+        return unless name
+
+        case init.type
+        when "JSXElement", "JSXFragment"
+          @local_jsx[name] = init
+        when "ArrowFunctionExpression", "FunctionExpression"
+          @local_arrows[name] = init
+        when "ConditionalExpression"
+          poly = lower_polymorphic_tag(init)
+          poly ? (@local_polymorphic_tags[name] = poly) : record_local_other_binding(stmt, name, seen)
+        else
+          record_local_other_binding(stmt, name, seen)
+        end
+      end
+
+      def detect_bare_hook_call(stmt)
+        expr = stmt[:expression]
+        return unless expr.is_a?(AST::Node) && expr.type == "CallExpression"
+        return unless hook_call?(expr)
+
+        @react_hooks << ReactHookCall.new(hook: expr[:callee][:name], source: source_of(stmt).strip)
+      end
+
+      def hook_call?(call_expression)
+        return false unless call_expression.type == "CallExpression"
+
+        callee = call_expression[:callee]
+        callee.is_a?(AST::Node) && callee.type == "Identifier" && REACT_HOOKS.include?(callee[:name])
+      end
+
+      # Recognize the asChild-style polymorphic tag pattern:
+      #   const Comp = condition ? <BranchA> : <BranchB>;
+      # where each branch is a JSX-renderable thing — a string-literal HTML
+      # tag name (`"button"`), an Identifier (`Slot`), or a MemberExpression
+      # (`Slot.Root`). Returns nil when the shape isn't recognized so the
+      # caller can fall back to the verbatim TODO-comment behavior.
+      def lower_polymorphic_tag(conditional)
+        true_branch = polymorphic_tag_branch(conditional[:consequent])
+        false_branch = polymorphic_tag_branch(conditional[:alternate])
+        return nil unless true_branch && false_branch
+
+        { test: conditional[:test], true_branch: true_branch, false_branch: false_branch }
+      end
+
+      def polymorphic_tag_branch(node)
+        case node.type
+        when "StringLiteral" then { kind: :element, tag: node[:value] }
+        when "Identifier" then { kind: :component, tag: node[:name] }
+        when "MemberExpression" then { kind: :component, tag: source_of(node) }
         end
       end
 
@@ -266,10 +327,29 @@ module JsxRosetta
         attributes = attributes.reject { |attr| attr.is_a?(Attribute) && attr.name == "key" }
         children = lower_children(element.jsx_children)
 
-        if html_element?(tag)
+        if (poly = @local_polymorphic_tags[tag])
+          lower_polymorphic_tag_use(poly, attributes, children)
+        elsif html_element?(tag)
           Element.new(tag: tag, attributes: attributes, children: children)
         else
           ComponentInvocation.new(name: tag, props: attributes, children: children)
+        end
+      end
+
+      def lower_polymorphic_tag_use(poly, attributes, children)
+        Conditional.new(
+          test: Interpolation.new(expression: source_of(poly[:test])),
+          consequent: build_polymorphic_branch(poly[:true_branch], attributes, children),
+          alternate: build_polymorphic_branch(poly[:false_branch], attributes, children)
+        )
+      end
+
+      def build_polymorphic_branch(branch, attributes, children)
+        case branch[:kind]
+        when :element
+          Element.new(tag: branch[:tag], attributes: attributes, children: children)
+        when :component
+          ComponentInvocation.new(name: branch[:tag], props: attributes, children: children)
         end
       end
 

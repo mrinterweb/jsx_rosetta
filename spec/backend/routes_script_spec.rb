@@ -22,10 +22,46 @@ RSpec.describe JsxRosetta::Backend::RoutesScript do
     expect(output).to include('{ path: "/posts/:id", element: "PostShow" },')
   end
 
-  it "emits commented-out `rails generate controller` calls" do
-    output = emit([JsxRosetta::IR::RouteEntry.new(path: "/posts", element_name: "PostsIndex")])
+  it "emits commented-out `rails generate controller` calls for ungrouped routes" do
+    output = emit([JsxRosetta::IR::RouteEntry.new(path: "/about", element_name: "About")])
 
-    expect(output).to include('# system "rails", "generate", "controller", "posts_index", "index", "--skip-routes"')
+    expect(output).to include('# system "rails", "generate", "controller", "about"')
+    expect(output).to include('"index", "--skip-routes"')
+  end
+
+  it "consolidates /xs and /xs/:id pairs into resources :xs" do
+    output = emit([
+                    JsxRosetta::IR::RouteEntry.new(path: "/posts", element_name: "PostsIndex"),
+                    JsxRosetta::IR::RouteEntry.new(path: "/posts/:id", element_name: "PostShow")
+                  ])
+
+    expect(output).to include("resources :posts, only: %i[index show]")
+    expect(output).not_to include('get "/posts"')
+    expect(output).not_to include('get "/posts/:id"')
+  end
+
+  it "emits a single rails-generate-controller line for a consolidated resource" do
+    output = emit([
+                    JsxRosetta::IR::RouteEntry.new(path: "/posts", element_name: "PostsIndex"),
+                    JsxRosetta::IR::RouteEntry.new(path: "/posts/:id", element_name: "PostShow")
+                  ])
+
+    expect(output).to include('"controller", "posts", "index", "show"')
+  end
+
+  it "emits `match \"*path\", via: :all` for catch-all routes" do
+    output = emit([JsxRosetta::IR::RouteEntry.new(path: "*", element_name: "NotFound")])
+
+    expect(output).to include('match "*path", to: "not_found#')
+    expect(output).to include("via: :all")
+    expect(output).not_to include('get "*"')
+  end
+
+  it "warns when a generated controller name collides with a Rails reserved term" do
+    output = emit([JsxRosetta::IR::RouteEntry.new(path: "/admin", element_name: "Application")])
+
+    expect(output).to include("WARNING")
+    expect(output).to include("application")
   end
 
   it "infers `show` for path segments containing a parameter" do

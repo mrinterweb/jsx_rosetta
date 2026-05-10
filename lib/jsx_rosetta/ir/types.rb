@@ -24,7 +24,14 @@ module JsxRosetta
     #                  inline arrows / const-bound arrows used in onX={...}.
     #                  When non-empty, backends should emit a sibling
     #                  Stimulus controller file alongside the .rb/.erb pair.
-    Component = Data.define(:name, :props, :body, :rest_prop_name, :local_bindings, :stimulus_methods) do
+    # react_hooks    : [ReactHookCall] — calls to React hooks (useState,
+    #                  useEffect, useRef, useContext, useMemo, useCallback,
+    #                  useReducer, useImperativeHandle, useLayoutEffect).
+    #                  Surfaced as a distinct TODO block so the human
+    #                  reviewer knows to translate behavior to Stimulus
+    #                  and state to server-side rendering.
+    Component = Data.define(:name, :props, :body, :rest_prop_name,
+                            :local_bindings, :stimulus_methods, :react_hooks) do
       include Node
     end
 
@@ -35,6 +42,17 @@ module JsxRosetta
     # name   : String
     # source : String — verbatim JS of the entire VariableDeclaration statement.
     LocalBinding = Data.define(:name, :source) do
+      include Node
+    end
+
+    # A React hook invocation detected in the component body (`useState`,
+    # `useEffect`, …). Surfaced separately from local_bindings so backends
+    # can emit a more specific TODO that points at the Stimulus / Hotwire
+    # / server-render alternative, instead of a generic "translate this JS".
+    #
+    # hook   : String — hook function name (`"useState"`, `"useEffect"`, …)
+    # source : String — verbatim JS of the entire statement.
+    ReactHookCall = Data.define(:hook, :source) do
       include Node
     end
 

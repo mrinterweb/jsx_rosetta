@@ -265,6 +265,101 @@ RSpec.describe JsxRosetta::IR::Lowering do
     end
   end
 
+  describe "React hook detection" do
+    it "captures `const [x, setX] = useState(...)` calls into react_hooks" do
+      ir = lower(<<~JSX)
+        function X() {
+          const [open, setOpen] = useState(false);
+          return <div />;
+        }
+      JSX
+
+      expect(ir.react_hooks.size).to eq(1)
+      expect(ir.react_hooks.first.hook).to eq("useState")
+      expect(ir.react_hooks.first.source).to include("useState(false)")
+    end
+
+    it "captures bare `useEffect(() => {})` expression statements" do
+      ir = lower(<<~JSX)
+        function X() {
+          useEffect(() => { console.log("mounted"); });
+          return <div />;
+        }
+      JSX
+
+      expect(ir.react_hooks.map(&:hook)).to eq(["useEffect"])
+    end
+
+    it "captures multiple hooks in source order" do
+      ir = lower(<<~JSX)
+        function X() {
+          const [a, setA] = useState(0);
+          const ref = useRef(null);
+          const ctx = useContext(MyContext);
+          return <div />;
+        }
+      JSX
+
+      expect(ir.react_hooks.map(&:hook)).to eq(%w[useState useRef useContext])
+    end
+
+    it "does not record hook calls in local_bindings (so the human gets one TODO, not two)" do
+      ir = lower(<<~JSX)
+        function X() {
+          const [open, setOpen] = useState(false);
+          return <div />;
+        }
+      JSX
+
+      expect(ir.local_bindings).to eq([])
+    end
+  end
+
+  describe "polymorphic tag (asChild pattern) synthesis" do
+    it "lowers `const C = cond ? Slot : \"button\"; <C {...x}>` to a Conditional" do
+      ir = lower(<<~JSX)
+        function Button({ asChild, rest }) {
+          const Comp = asChild ? Slot.Root : "button";
+          return <Comp {...rest}>x</Comp>;
+        }
+      JSX
+
+      expect(ir.body).to be_a(JsxRosetta::IR::Conditional)
+      expect(ir.body.test.expression).to eq("asChild")
+      expect(ir.body.consequent).to be_a(JsxRosetta::IR::ComponentInvocation)
+      expect(ir.body.consequent.name).to eq("Slot.Root")
+      expect(ir.body.alternate).to be_a(JsxRosetta::IR::Element)
+      expect(ir.body.alternate.tag).to eq("button")
+    end
+
+    it "carries spread props and children through to both branches" do
+      ir = lower(<<~JSX)
+        function X({ asChild, rest }) {
+          const Comp = asChild ? Span : "div";
+          return <Comp {...rest}>hi</Comp>;
+        }
+      JSX
+
+      consequent = ir.body.consequent
+      alternate = ir.body.alternate
+      expect(consequent.props).to include(JsxRosetta::IR::SpreadAttribute.new(expression: "rest"))
+      expect(alternate.attributes).to include(JsxRosetta::IR::SpreadAttribute.new(expression: "rest"))
+      expect(consequent.children).to include(JsxRosetta::IR::Text.new(value: "hi"))
+      expect(alternate.children).to include(JsxRosetta::IR::Text.new(value: "hi"))
+    end
+
+    it "does not record a polymorphic-tag binding in local_bindings (no double TODO)" do
+      ir = lower(<<~JSX)
+        function X({ asChild }) {
+          const Comp = asChild ? Slot : "div";
+          return <Comp />;
+        }
+      JSX
+
+      expect(ir.local_bindings).to eq([])
+    end
+  end
+
   describe "Stimulus handler promotion" do
     it "promotes inline arrow handlers to StimulusBinding + StimulusMethod" do
       ir = lower("function X() { return <button onClick={() => doStuff()}>x</button>; }")
@@ -611,7 +706,8 @@ RSpec.describe JsxRosetta::IR::Lowering do
         ),
         rest_prop_name: nil,
         local_bindings: [],
-        stimulus_methods: []
+        stimulus_methods: [],
+        react_hooks: []
       )
 
       expect(ir).to eq(expected)

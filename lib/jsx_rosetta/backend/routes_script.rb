@@ -12,6 +12,8 @@ module JsxRosetta
     # script, uncomment the commands they want to run, and execute it with
     # `ruby <output>.rb`.
     class RoutesScript
+      RESERVED_CONTROLLER_NAMES = %w[application action rails].freeze
+
       def initialize(source_path: nil, generated_at: Time.now.utc.strftime("%Y-%m-%d"))
         @source_path = source_path
         @generated_at = generated_at
@@ -40,13 +42,55 @@ module JsxRosetta
       def body_lines(route_tree)
         return ["puts 'No <Route> entries were recognized.'"] if route_tree.routes.empty?
 
+        groups = group_routes(route_tree.routes)
         routes_array_lines(route_tree.routes) +
           [""] +
           report_lines +
           [""] +
-          generator_lines(route_tree.routes) +
+          generator_lines(groups) +
           [""] +
-          routes_dsl_lines(route_tree.routes)
+          routes_dsl_lines(groups)
+      end
+
+      # Group routes that share a resource shape so they can be emitted as
+      # `resources :plural, only: %i[index show]` instead of two siloed
+      # `get` lines. Returns an array where each element is either a Hash
+      # `{ kind: :resource, plural:, actions: }` or `{ kind: :route, route: }`.
+      def group_routes(routes)
+        buckets, ungrouped = bucket_routes_by_resource(routes)
+        groups = []
+        buckets.each do |plural, by_action|
+          if resource_pair?(by_action)
+            groups << { kind: :resource, plural: plural, actions: by_action.keys }
+          else
+            by_action.each_value { |route| ungrouped << route }
+          end
+        end
+        ungrouped.each { |route| groups << { kind: :route, route: route } }
+        groups
+      end
+
+      def bucket_routes_by_resource(routes)
+        # Build buckets keyed by plural noun (`/posts` and `/posts/:id` both map to `posts`).
+        buckets = Hash.new { |h, k| h[k] = {} }
+        ungrouped = []
+        routes.each do |route|
+          shape = resource_shape(route.path)
+          shape ? (buckets[shape[:plural]][shape[:action]] = route) : ungrouped << route
+        end
+        [buckets, ungrouped]
+      end
+
+      def resource_pair?(by_action)
+        by_action.size >= 2 && (by_action.keys & %w[index show]).size == 2
+      end
+
+      def resource_shape(path)
+        if (m = %r{\A/(?<plural>[a-z][a-z0-9_-]*)\z}.match(path))
+          { plural: m[:plural], action: "index" }
+        elsif (m = %r{\A/(?<plural>[a-z][a-z0-9_-]*)/:(?<param>[a-z_][a-z0-9_]*)\z}.match(path))
+          { plural: m[:plural], action: "show" }
+        end
       end
 
       def routes_array_lines(routes)
@@ -62,20 +106,29 @@ module JsxRosetta
         ]
       end
 
-      def generator_lines(routes)
-        ["# Run these by uncommenting the lines you want:"] + routes.map do |r|
-          controller = AST::Inflector.underscore(r.element_name)
-          action = action_for_path(r.path)
+      def generator_lines(groups)
+        controllers = collect_controller_names(groups)
+        warning = collision_warning(controllers)
+        lines = ["# Run these by uncommenting the lines you want:"]
+        lines << warning if warning
+        groups.each { |group| lines << generator_line_for(group) }
+        lines
+      end
+
+      def generator_line_for(group)
+        if group[:kind] == :resource
+          plural = group[:plural]
+          %(# system "rails", "generate", "controller", "#{plural}", "index", "show", "--skip-routes")
+        else
+          route = group[:route]
+          controller = AST::Inflector.underscore(route.element_name)
+          action = action_for_path(route.path)
           %(# system "rails", "generate", "controller", "#{controller}", "#{action}", "--skip-routes")
         end
       end
 
-      def routes_dsl_lines(routes)
-        body = routes.map do |r|
-          controller = AST::Inflector.underscore(r.element_name)
-          action = action_for_path(r.path)
-          "      get #{r.path.inspect}, to: \"#{controller}##{action}\""
-        end
+      def routes_dsl_lines(groups)
+        body = groups.flat_map { |group| group_to_dsl_lines(group) }
         [
           "puts <<~RB",
           "",
@@ -87,10 +140,51 @@ module JsxRosetta
         ]
       end
 
+      def group_to_dsl_lines(group)
+        if group[:kind] == :resource
+          ["      resources :#{group[:plural]}, only: %i[#{group[:actions].sort.join(" ")}]"]
+        else
+          [route_to_dsl_line(group[:route])]
+        end
+      end
+
+      def route_to_dsl_line(route)
+        controller = AST::Inflector.underscore(route.element_name)
+        action = action_for_path(route.path)
+        path = normalize_catch_all(route.path)
+        if catch_all?(route.path)
+          %(      match #{path.inspect}, to: "#{controller}##{action}", via: :all)
+        else
+          %(      get #{path.inspect}, to: "#{controller}##{action}")
+        end
+      end
+
       def action_for_path(path)
-        # Heuristic: paths that capture an `:id`-style segment look like a
-        # show action; everything else defaults to index. The user can edit.
         path.match?(/:[a-zA-Z_]/) ? "show" : "index"
+      end
+
+      def catch_all?(path)
+        path.start_with?("*")
+      end
+
+      # Rails routing requires a name for splat segments. A bare `*` from
+      # JSX (`<Route path="*" />`) is illegal; normalize to `*path`.
+      def normalize_catch_all(path)
+        path == "*" ? "*path" : path
+      end
+
+      def collect_controller_names(groups)
+        groups.flat_map do |group|
+          group[:kind] == :resource ? [group[:plural]] : [AST::Inflector.underscore(group[:route].element_name)]
+        end
+      end
+
+      def collision_warning(controllers)
+        collisions = controllers & RESERVED_CONTROLLER_NAMES
+        return nil if collisions.empty?
+
+        "# WARNING: these controller names collide with Rails reserved terms; " \
+          "rename before running: #{collisions.join(", ")}"
       end
     end
   end

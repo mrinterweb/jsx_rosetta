@@ -429,6 +429,22 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(files.keys).not_to include(a_string_matching(/_controller\.js\z/))
     end
 
+    it "prepends a distinct TODO comment block when React hooks are detected" do
+      files = files_for(<<~JSX)
+        function X() {
+          const [open, setOpen] = useState(false);
+          useEffect(() => {});
+          return <div />;
+        }
+      JSX
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include("React hooks detected")
+      expect(erb).to include("useState(false)")
+      expect(erb).to include("useEffect")
+      expect(erb).to include("Hotwire/Stimulus")
+    end
+
     it "prepends a TODO comment listing non-JSX local bindings" do
       files = files_for(<<~JSX)
         function X({ raw }) {
