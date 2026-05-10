@@ -225,6 +225,12 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(files["x_component.html.erb"]).to include("<%# TODO: translate")
     end
 
+    it "renders a JSX block comment as an ERB comment" do
+      files = files_for("function X() { return <p>{/* note: be careful */}body</p>; }")
+
+      expect(files["x_component.html.erb"]).to include("<%# note: be careful %>")
+    end
+
     it "flags an interpolation whose identifier is neither a prop nor a local" do
       files = files_for(<<~JSX)
         import { CMS_NAME } from "@/lib/constants";

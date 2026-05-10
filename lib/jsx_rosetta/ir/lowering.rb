@@ -25,7 +25,33 @@ module JsxRosetta
     #     IR::Conditional. Other LogicalExpression operators (||, ??) are
     #     left as opaque interpolations.
     class Lowering
-      class LoweringError < JsxRosetta::Error; end
+      # A failure during AST → IR lowering. Carries optional line/column
+      # information when the failure can be tied to an AST node.
+      class LoweringError < JsxRosetta::Error
+        attr_reader :line, :column
+
+        def initialize(message, node: nil, source: nil)
+          @line = nil
+          @column = nil
+
+          if node && source && node.start_pos
+            @line, @column = compute_line_column(source, node.start_pos)
+            message = "#{message} (at line #{@line}, column #{@column})"
+          end
+
+          super(message)
+        end
+
+        private
+
+        def compute_line_column(source, position)
+          prefix = source[0...position] || ""
+          line = prefix.count("\n") + 1
+          last_newline = prefix.rindex("\n")
+          column = last_newline ? position - last_newline - 1 : position
+          [line, column + 1]
+        end
+      end
 
       def self.lower(file, source:)
         new(source).lower_file(file)
@@ -39,13 +65,17 @@ module JsxRosetta
 
       def lower_file(file)
         candidate = find_component_function(file.program)
-        raise LoweringError, "no component function found in module" unless candidate
+        raise lowering_error("no component function found in module") unless candidate
 
         name, function = candidate
         lower_component(name, function)
       end
 
       private
+
+      def lowering_error(message, node: nil)
+        LoweringError.new(message, node: node, source: @source)
+      end
 
       def find_component_function(program)
         program.body.each do |stmt|
@@ -83,7 +113,9 @@ module JsxRosetta
       end
 
       def lower_component(name, function)
-        raise LoweringError, "anonymous component functions are not supported" if name.nil? || name.empty?
+        if name.nil? || name.empty?
+          raise lowering_error("anonymous component functions are not supported", node: function)
+        end
 
         props = lower_props(function[:params])
         @prop_names = props.map(&:name)
@@ -105,7 +137,7 @@ module JsxRosetta
         when "Identifier"
           [Prop.new(name: first_param[:name], default: nil)]
         else
-          raise LoweringError, "unsupported parameter shape: #{first_param.type}"
+          raise lowering_error("unsupported parameter shape: #{first_param.type}", node: first_param)
         end
       end
 
@@ -116,7 +148,7 @@ module JsxRosetta
         when "RestElement"
           Prop.new(name: source_of(property[:argument]), default: nil)
         else
-          raise LoweringError, "unsupported prop pattern: #{property.type}"
+          raise lowering_error("unsupported prop pattern: #{property.type}", node: property)
         end
       end
 
@@ -137,14 +169,14 @@ module JsxRosetta
         when "BlockStatement"
           @local_jsx = collect_local_jsx_bindings(body[:body])
           return_stmt = body[:body].find { |stmt| stmt.type == "ReturnStatement" }
-          raise LoweringError, "component function has no return statement" unless return_stmt
+          raise lowering_error("component function has no return statement", node: body) unless return_stmt
 
           lower_jsx(return_stmt[:argument])
         when "JSXElement", "JSXFragment"
           @local_jsx = {}
           lower_jsx(body)
         else
-          raise LoweringError, "unsupported component body: #{body.type}"
+          raise lowering_error("unsupported component body: #{body.type}", node: body)
         end
       end
 
@@ -172,7 +204,7 @@ module JsxRosetta
         when AST::JSXText then lower_jsx_text(node)
         when AST::JSXExpressionContainer then lower_jsx_expression(node)
         else
-          raise LoweringError, "unexpected JSX node in lowering: #{node.type}"
+          raise lowering_error("unexpected JSX node in lowering: #{node.type}", node: node)
         end
       end
 
@@ -184,7 +216,8 @@ module JsxRosetta
         if html_element?(tag)
           Element.new(tag: tag, attributes: attributes, children: children)
         else
-          ComponentInvocation.new(name: tag, props: attributes, children: children)
+          props = attributes.reject { |attr| attr.is_a?(Attribute) && attr.name == "key" }
+          ComponentInvocation.new(name: tag, props: props, children: children)
         end
       end
 
@@ -238,9 +271,12 @@ module JsxRosetta
 
       def lower_jsx_expression(node)
         expression = node.expression
-        return nil if expression.is_a?(AST::JSXEmptyExpression)
+        return lower_jsx_comment(expression) if expression.is_a?(AST::JSXEmptyExpression)
 
         case expression.type
+        when "StringLiteral" then Text.new(value: expression[:value])
+        when "NumericLiteral" then Text.new(value: expression[:value].to_s)
+        when "BooleanLiteral", "NullLiteral" then nil
         when "LogicalExpression" then lower_logical_expression(expression)
         when "ConditionalExpression" then lower_ternary_expression(expression)
         when "Identifier" then lower_identifier_expression(expression)
@@ -248,6 +284,13 @@ module JsxRosetta
         else
           Interpolation.new(expression: source_of(expression))
         end
+      end
+
+      def lower_jsx_comment(empty_expression)
+        comments = empty_expression.raw["innerComments"]
+        return nil if comments.nil? || comments.empty?
+
+        Comment.new(text: comments.map { |c| c["value"] }.join("\n").strip)
       end
 
       def lower_call_expression(expression)

@@ -107,6 +107,7 @@ module JsxRosetta
         when IR::Slot then render_slot(node, indent: indent)
         when IR::Text then "#{spaces(indent)}#{node.value}"
         when IR::Interpolation then "#{spaces(indent)}#{interpolation_to_erb(node, translator)}"
+        when IR::Comment then "#{spaces(indent)}<%# #{node.text} %>"
         end
       end
 

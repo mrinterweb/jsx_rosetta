@@ -5,6 +5,23 @@ RSpec.describe JsxRosetta::IR::Lowering do
     described_class.lower(JsxRosetta.parse(source), source: source)
   end
 
+  describe "key prop" do
+    it "drops `key` from a ComponentInvocation's props" do
+      ir = lower("function X() { return <Inner key={id} title={t} />; }")
+
+      expect(ir.body).to be_a(JsxRosetta::IR::ComponentInvocation)
+      expect(ir.body.props.map { |p| p.respond_to?(:name) ? p.name : nil }).not_to include("key")
+      expect(ir.body.props.map { |p| p.respond_to?(:name) ? p.name : nil }).to include("title")
+    end
+
+    it "preserves `key` on an HTML Element" do
+      ir = lower("function X() { return <li key={id} />; }")
+
+      expect(ir.body).to be_a(JsxRosetta::IR::Element)
+      expect(ir.body.attributes.map(&:name)).to include("key")
+    end
+  end
+
   describe "html elements vs component invocations" do
     it "lowers a lowercase tag to IR::Element" do
       ir = lower("function X() { return <div />; }")
@@ -85,6 +102,39 @@ RSpec.describe JsxRosetta::IR::Lowering do
       ir = lower("function X() { return <p>{name}</p>; }")
 
       expect(ir.body.children).to eq([JsxRosetta::IR::Interpolation.new(expression: "name")])
+    end
+
+    it "lowers a string-literal expression container to Text" do
+      ir = lower('function X() { return <p>a{" "}b</p>; }')
+
+      expect(ir.body.children).to include(JsxRosetta::IR::Text.new(value: " "))
+      expect(ir.body.children).not_to include(a_kind_of(JsxRosetta::IR::Interpolation))
+    end
+
+    it "lowers a numeric-literal expression container to Text" do
+      ir = lower("function X() { return <p>{42}</p>; }")
+
+      expect(ir.body.children).to eq([JsxRosetta::IR::Text.new(value: "42")])
+    end
+
+    it "drops boolean-literal and null-literal expression containers" do
+      ir = lower("function X() { return <p>{true}{null}{false}</p>; }")
+
+      expect(ir.body.children).to eq([])
+    end
+
+    it "lowers a JSX block comment to IR::Comment" do
+      ir = lower("function X() { return <p>{/* hello */}</p>; }")
+
+      expect(ir.body.children).to eq([JsxRosetta::IR::Comment.new(text: "hello")])
+    end
+
+    it "joins multiple inner comments inside one expression container" do
+      ir = lower("function X() { return <p>{/* a */ /* b */}</p>; }")
+
+      expect(ir.body.children.first).to be_a(JsxRosetta::IR::Comment)
+      expect(ir.body.children.first.text).to include("a")
+      expect(ir.body.children.first.text).to include("b")
     end
 
     it "lowers a {children} reference to IR::Slot when children is a prop" do
@@ -392,7 +442,17 @@ RSpec.describe JsxRosetta::IR::Lowering do
     it "raises a LoweringError when the function has no return statement" do
       expect do
         lower("function X() { console.log('hi'); }")
-      end.to raise_error(JsxRosetta::IR::Lowering::LoweringError)
+      end.to raise_error(JsxRosetta::IR::Lowering::LoweringError, /line \d+/)
+    end
+
+    it "includes line and column on the error when a node anchors the failure" do
+      source = "function X(...weird) {\n  return <p />;\n}"
+      expect { described_class.lower(JsxRosetta.parse(source), source: source) }
+        .to raise_error(JsxRosetta::IR::Lowering::LoweringError) do |error|
+          expect(error.line).to eq(1)
+          expect(error.column).to be > 0
+          expect(error.message).to match(/line 1, column \d+/)
+        end
     end
   end
 end

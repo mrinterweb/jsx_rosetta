@@ -81,6 +81,15 @@ module JsxRosetta
       include Node
     end
 
+    # A comment lifted from JSX (`{/* … */}`). Backends decide how to
+    # surface it (ERB `<%# … %>`, HTML `<!-- -->`, etc.).
+    #
+    # text : String — comment body verbatim, including any leading/trailing
+    #                 whitespace from the JSX source.
+    Comment = Data.define(:text) do
+      include Node
+    end
+
     # A JSX fragment (`<>...</>`).
     #
     # children : [Element | ComponentInvocation | Text | Interpolation | Fragment]
