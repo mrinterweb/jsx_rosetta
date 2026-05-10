@@ -440,6 +440,36 @@ RSpec.describe JsxRosetta::IR::Lowering do
     end
   end
 
+  describe "inline styles" do
+    it "lowers `style={{ fontSize: 12, color: \"red\" }}` to IR::Style" do
+      ir = lower('function X() { return <div style={{ fontSize: 12, color: "red" }} />; }')
+
+      expect(ir.body.attributes).to eq([
+                                         JsxRosetta::IR::Style.new(
+                                           declarations: [
+                                             JsxRosetta::IR::StyleDeclaration.new(property: "font-size", value: "12"),
+                                             JsxRosetta::IR::StyleDeclaration.new(property: "color", value: "red")
+                                           ]
+                                         )
+                                       ])
+    end
+
+    it "lowers identifier values to IR::Interpolation in StyleDeclaration" do
+      ir = lower("function X({ size }) { return <div style={{ fontSize: size }} />; }")
+
+      decl = ir.body.attributes.first.declarations.first
+      expect(decl.property).to eq("font-size")
+      expect(decl.value).to eq(JsxRosetta::IR::Interpolation.new(expression: "size"))
+    end
+
+    it "falls back to a plain Attribute when an inline-style value shape is unsupported" do
+      ir = lower("function X() { return <div style={{ fontSize: computeSize() }} />; }")
+
+      expect(ir.body.attributes.first).to be_a(JsxRosetta::IR::Attribute)
+      expect(ir.body.attributes.first.name).to eq("style")
+    end
+  end
+
   describe "spread attributes" do
     it "lowers `{...rest}` to IR::SpreadAttribute on an Element" do
       ir = lower("function X({ rest }) { return <div {...rest} />; }")

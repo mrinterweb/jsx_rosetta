@@ -111,6 +111,24 @@ module JsxRosetta
       include Node
     end
 
+    # A decomposed inline-style expression (JSX `style={{ ... }}`).
+    #
+    # declarations : [StyleDeclaration] — one per property in the source order
+    Style = Data.define(:declarations) do
+      include Node
+    end
+
+    # A single CSS property/value pair, with the property already converted
+    # from JSX camelCase to CSS kebab-case.
+    #
+    # property : String — kebab-case CSS property (e.g. "font-size")
+    # value    : String | Interpolation — String for literal CSS values
+    #            already quoted ready for output, Interpolation for runtime
+    #            values to be ERB-interpolated.
+    StyleDeclaration = Data.define(:property, :value) do
+      include Node
+    end
+
     # An opaque JS expression embedded in JSX (between curlies). The
     # expression text is preserved verbatim so the backend can emit it
     # into `<%= %>` (or its target equivalent) for human review.

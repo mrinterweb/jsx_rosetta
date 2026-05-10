@@ -295,6 +295,20 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(ruby).to include("@rest = rest")
     end
 
+    it "renders inline styles as a style=\"...\" attribute on an Element" do
+      files = files_for("function X({ size }) { return <div style={{ fontSize: size, color: \"red\" }} />; }")
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include('style="font-size: <%= @size %>; color: red;"')
+    end
+
+    it "renders inline styles as a Ruby string on a ComponentInvocation" do
+      files = files_for("function X({ size }) { return <Inner style={{ fontSize: size }} />; }")
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include(%(style: "font-size: \#{@size};"))
+    end
+
     it "prepends a TODO comment listing non-JSX local bindings" do
       files = files_for(<<~JSX)
         function X({ raw }) {

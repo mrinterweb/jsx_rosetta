@@ -198,6 +198,8 @@ module JsxRosetta
           "class: #{ruby}"
         when IR::ClassList
           "class: #{class_list_to_ruby_string(attribute, translator)}"
+        when IR::Style
+          "style: #{style_to_ruby_string(attribute, translator)}"
         when IR::Attribute
           tag_builder_plain_kwarg(attribute, translator)
         end
@@ -292,8 +294,24 @@ module JsxRosetta
         case attribute
         when IR::StyleBinding then render_style_binding(attribute, translator)
         when IR::ClassList then render_class_list_attribute(attribute, translator)
+        when IR::Style then render_style(attribute, translator)
         when IR::Attribute then render_plain_attribute(attribute, translator)
         end
+      end
+
+      def render_style(style, translator)
+        rendered = style.declarations.map { |decl| render_style_declaration(decl, translator) }.join(" ")
+        %(style="#{rendered}")
+      end
+
+      def render_style_declaration(decl, translator)
+        value = case decl.value
+                when String then decl.value
+                when IR::Interpolation
+                  translated = translator.translate(decl.value.expression)
+                  "<%= #{translated&.ruby || decl.value.expression} %>"
+                end
+        "#{decl.property}: #{value};"
       end
 
       def render_class_list_attribute(class_list, translator)
@@ -401,7 +419,22 @@ module JsxRosetta
           "class: #{ruby}"
         when IR::ClassList
           "class: #{class_list_to_ruby_string(attribute, translator)}"
+        when IR::Style
+          "style: #{style_to_ruby_string(attribute, translator)}"
         end
+      end
+
+      def style_to_ruby_string(style, translator)
+        parts = style.declarations.map do |decl|
+          value = case decl.value
+                  when String then decl.value
+                  when IR::Interpolation
+                    translated = translator.translate(decl.value.expression)
+                    "\#{#{translated&.ruby || decl.value.expression}}"
+                  end
+          "#{decl.property}: #{value};"
+        end
+        %("#{parts.join(" ")}")
       end
 
       def component_attribute_kwarg(attribute, translator)

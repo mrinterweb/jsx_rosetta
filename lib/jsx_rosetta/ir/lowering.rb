@@ -438,11 +438,57 @@ module JsxRosetta
         name = attr.attribute_name
 
         return lower_class_name(attr.value) if name == "className"
+        return lower_style_attribute_or_fallback(attr.value) if name == "style"
         if event_attribute?(name) && attr.value.is_a?(AST::JSXExpressionContainer)
           return lower_event_attribute(name, attr.value)
         end
 
         Attribute.new(name: name, value: lower_attribute_value(attr.value))
+      end
+
+      def lower_style_attribute_or_fallback(value)
+        lower_style_attribute(value) || Attribute.new(name: "style", value: lower_attribute_value(value))
+      end
+
+      def lower_style_attribute(value)
+        return nil unless value.is_a?(AST::JSXExpressionContainer)
+
+        expression = value.expression
+        return nil unless expression.is_a?(AST::Node) && expression.type == "ObjectExpression"
+
+        declarations = expression[:properties].map { |prop| lower_style_property(prop) }
+        return nil if declarations.any?(&:nil?)
+
+        Style.new(declarations: declarations)
+      end
+
+      def lower_style_property(property)
+        return nil unless property.type == "ObjectProperty"
+
+        property_name =
+          case property[:key].type
+          when "Identifier" then css_property_from_camel(property[:key][:name])
+          when "StringLiteral" then property[:key][:value]
+          end
+        return nil if property_name.nil?
+
+        value = lower_style_value(property[:value])
+        return nil if value.nil?
+
+        StyleDeclaration.new(property: property_name, value: value)
+      end
+
+      def lower_style_value(value)
+        case value.type
+        when "StringLiteral" then value[:value]
+        when "NumericLiteral" then value[:value].to_s
+        when "Identifier", "MemberExpression"
+          Interpolation.new(expression: source_of(value))
+        end
+      end
+
+      def css_property_from_camel(name)
+        name.gsub(/([a-z\d])([A-Z])/, '\1-\2').downcase
       end
 
       def lower_class_name(value)
