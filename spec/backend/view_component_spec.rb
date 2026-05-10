@@ -236,6 +236,48 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(files["x_component.html.erb"]).to include("<%= render InnerComponent.new(foo: bar) %>")
     end
 
+    it "emits link_to instead of LinkComponent.new for the default Link mapping" do
+      files = files_for('function X() { return <Link href="/posts">Read</Link>; }')
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include('<%= link_to("/posts") do %>')
+      expect(erb).not_to include("LinkComponent")
+    end
+
+    it "emits image_tag (no block) for the default Image mapping" do
+      files = files_for('function X() { return <Image src="/a.png" alt="x" />; }')
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include('<%= image_tag("/a.png", alt: "x") %>')
+      expect(erb).not_to include("ImageComponent")
+    end
+
+    it "passes spread and hyphenated kwargs through to a mapped helper" do
+      files = files_for('function X({ rest, label }) { return <Link href="/" aria-label={label} {...rest}>Hi</Link>; }')
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include('<%= link_to("/", "aria-label" => @label, **@rest) do %>')
+    end
+
+    it "respects an explicit helpers map override" do
+      files = JsxRosetta.translate(
+        'function X() { return <Btn href="/" />; }',
+        helpers: { "Btn" => { method: :button_to, positional: :href } }
+      ).to_h { |f| [f.path, f.contents] }
+
+      expect(files["x_component.html.erb"]).to include('<%= button_to("/") %>')
+    end
+
+    it "disables helper mapping entirely when helpers: false is passed" do
+      files = JsxRosetta.translate(
+        'function X() { return <Link href="/">Hi</Link>; }',
+        helpers: false
+      ).to_h { |f| [f.path, f.contents] }
+
+      expect(files["x_component.html.erb"]).to include("LinkComponent.new")
+      expect(files["x_component.html.erb"]).not_to include("link_to")
+    end
+
     it "snake_cases camelCase identifiers within a member chain" do
       files = files_for("function X({ post }) { return <p>{post.coverImage}</p>; }")
 

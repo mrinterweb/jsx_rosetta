@@ -28,6 +28,23 @@ module JsxRosetta
       DEFAULT_SLOT_NAME = "children"
       VOID_ELEMENTS = %w[area base br col embed hr img input link meta param source track wbr].freeze
 
+      # JSX component names that have a direct Rails view-helper analog.
+      # Override per-instance via `ViewComponent.new(helpers: {...})`, or
+      # disable by passing `helpers: false`.
+      DEFAULT_HELPERS = {
+        "Link" => { method: :link_to, positional: :href }.freeze,
+        "Image" => { method: :image_tag, positional: :src }.freeze
+      }.freeze
+
+      def initialize(helpers: nil)
+        super()
+        @helpers = case helpers
+                   when nil then DEFAULT_HELPERS
+                   when false then {}
+                   else helpers
+                   end
+      end
+
       def emit(component)
         prop_names = component.props.map(&:name)
         prop_names << component.rest_prop_name if component.rest_prop_name
@@ -300,6 +317,9 @@ module JsxRosetta
       end
 
       def render_component_invocation(invocation, translator, indent:)
+        helper = @helpers[invocation.name]
+        return render_helper_call(invocation, translator, helper, indent: indent) if helper
+
         kwargs = component_invocation_kwargs(invocation.props, translator)
         new_call = kwargs.empty? ? "#{invocation.name}Component.new" : "#{invocation.name}Component.new(#{kwargs})"
 
@@ -309,6 +329,35 @@ module JsxRosetta
           inner = invocation.children.map { |child| render_ir_node(child, translator, indent: indent + 2) }.join("\n")
           "#{spaces(indent)}<%= render #{new_call} do %>\n#{inner}\n#{spaces(indent)}<% end %>"
         end
+      end
+
+      def render_helper_call(invocation, translator, helper, indent:)
+        call = build_helper_call(invocation, translator, helper)
+        if invocation.children.empty?
+          "#{spaces(indent)}<%= #{call} %>"
+        else
+          inner = invocation.children.map { |child| render_ir_node(child, translator, indent: indent + 2) }.join("\n")
+          "#{spaces(indent)}<%= #{call} do %>\n#{inner}\n#{spaces(indent)}<% end %>"
+        end
+      end
+
+      def build_helper_call(invocation, translator, helper)
+        positional_attr = find_positional_attr(invocation.props, helper[:positional])
+        remaining = positional_attr ? invocation.props.reject { |p| p.equal?(positional_attr) } : invocation.props
+
+        parts = []
+        parts << component_kwarg_value(positional_attr.value, translator) if positional_attr
+        kwargs = component_invocation_kwargs(remaining, translator)
+        parts << kwargs unless kwargs.empty?
+
+        parts.empty? ? helper[:method].to_s : "#{helper[:method]}(#{parts.join(", ")})"
+      end
+
+      def find_positional_attr(props, positional)
+        return nil unless positional
+
+        name = positional.to_s
+        props.find { |p| p.is_a?(IR::Attribute) && p.name == name }
       end
 
       def component_invocation_kwargs(props, translator)
