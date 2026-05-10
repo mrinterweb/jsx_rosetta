@@ -291,6 +291,14 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(files["x_component.html.erb"]).not_to include("coverImage")
     end
 
+    it "translates member-chain interpolations inside template literals" do
+      files = files_for("function X({ post }) { return <a href={`/posts/${post.id}`}>x</a>; }")
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include(%("/posts/\#{@post.id}"))
+      expect(erb).not_to include("TODO")
+    end
+
     it "passes a spread argument as **rest in a component invocation" do
       files = files_for("function X({ rest }) { return <Inner title=\"x\" {...rest} />; }")
 

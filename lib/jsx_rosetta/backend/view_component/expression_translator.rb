@@ -28,7 +28,7 @@ module JsxRosetta
         STRING_LITERAL = /\A(['"])(.*)\1\z/m
         NUMBER_LITERAL = /\A-?\d+(\.\d+)?\z/
         TEMPLATE_LITERAL = /\A`(.*)`\z/m
-        TEMPLATE_INTERPOLATION = /\$\{([a-zA-Z_$][a-zA-Z_$0-9]*)\}/
+        TEMPLATE_INTERPOLATION = /\$\{([a-zA-Z_$][a-zA-Z_$0-9]*(?:\.[a-zA-Z_$][a-zA-Z_$0-9]*)*)\}/
         MEMBER_CHAIN = /\A(?<root>[a-zA-Z_$][a-zA-Z_$0-9]*)(?<rest>(?:\.[a-zA-Z_$][a-zA-Z_$0-9]*)+)\z/
         SIMPLE_LITERALS = { "null" => "nil", "undefined" => "nil", "true" => "true", "false" => "false" }.freeze
 
@@ -96,8 +96,12 @@ module JsxRosetta
           return nil if content.scan("${").size != content.scan(TEMPLATE_INTERPOLATION).size
 
           ruby_content = content.gsub(TEMPLATE_INTERPOLATION) do |_match|
-            ident = ::Regexp.last_match(1)
-            translated = translate_identifier(ident, unresolved)
+            captured = ::Regexp.last_match(1)
+            translated = if (m = MEMBER_CHAIN.match(captured))
+                           translate_member_chain(m[:root], m[:rest], unresolved)
+                         else
+                           translate_identifier(captured, unresolved)
+                         end
             "\#{#{translated}}"
           end
           %("#{ruby_content}")

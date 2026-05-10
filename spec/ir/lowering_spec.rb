@@ -14,11 +14,11 @@ RSpec.describe JsxRosetta::IR::Lowering do
       expect(ir.body.props.map { |p| p.respond_to?(:name) ? p.name : nil }).to include("title")
     end
 
-    it "preserves `key` on an HTML Element" do
+    it "drops `key` on an HTML Element too (React-only hint, not a DOM attribute)" do
       ir = lower("function X() { return <li key={id} />; }")
 
       expect(ir.body).to be_a(JsxRosetta::IR::Element)
-      expect(ir.body.attributes.map(&:name)).to include("key")
+      expect(ir.body.attributes.map(&:name)).not_to include("key")
     end
   end
 

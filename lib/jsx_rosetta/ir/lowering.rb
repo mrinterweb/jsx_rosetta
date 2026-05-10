@@ -261,13 +261,15 @@ module JsxRosetta
       def lower_jsx_element(element)
         tag = element.tag_name
         attributes = element.opening_element.attributes.filter_map { |attr| lower_attribute(attr) }
+        # `key` is a React-only reconciliation hint; never emit it to the DOM
+        # or to ViewComponent invocations.
+        attributes = attributes.reject { |attr| attr.is_a?(Attribute) && attr.name == "key" }
         children = lower_children(element.jsx_children)
 
         if html_element?(tag)
           Element.new(tag: tag, attributes: attributes, children: children)
         else
-          props = attributes.reject { |attr| attr.is_a?(Attribute) && attr.name == "key" }
-          ComponentInvocation.new(name: tag, props: props, children: children)
+          ComponentInvocation.new(name: tag, props: attributes, children: children)
         end
       end
 
