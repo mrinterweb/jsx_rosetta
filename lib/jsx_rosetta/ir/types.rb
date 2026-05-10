@@ -78,6 +78,25 @@ module JsxRosetta
       include Node
     end
 
+    # A decomposed className expression — the result of recognizing a
+    # `cn(...)` / `clsx(...)` / `classnames(...)` call at lowering time.
+    # Each segment is one of:
+    #   String                 — literal class chunk like "btn btn-primary"
+    #   Interpolation          — variable reference (translated by backend)
+    #   ConditionalSegment     — `{ "active": isActive }` style entry
+    ClassList = Data.define(:segments) do
+      include Node
+    end
+
+    # A conditional class entry (`{ "active": isActive }` from cn-style
+    # helpers). Renders the class_name when the condition is truthy.
+    #
+    # class_name : String — literal class string to emit when condition is truthy.
+    # condition  : Interpolation — verbatim JS source of the condition.
+    ConditionalSegment = Data.define(:class_name, :condition) do
+      include Node
+    end
+
     # An opaque JS expression embedded in JSX (between curlies). The
     # expression text is preserved verbatim so the backend can emit it
     # into `<%= %>` (or its target equivalent) for human review.

@@ -184,6 +184,8 @@ module JsxRosetta
           translated = translator.translate(attribute.expression)
           ruby = translated ? translated.ruby : attribute.expression.inspect
           "class: #{ruby}"
+        when IR::ClassList
+          "class: #{class_list_to_ruby_string(attribute, translator)}"
         when IR::Attribute
           tag_builder_plain_kwarg(attribute, translator)
         end
@@ -277,7 +279,44 @@ module JsxRosetta
       def render_attribute(attribute, translator)
         case attribute
         when IR::StyleBinding then render_style_binding(attribute, translator)
+        when IR::ClassList then render_class_list_attribute(attribute, translator)
         when IR::Attribute then render_plain_attribute(attribute, translator)
+        end
+      end
+
+      def render_class_list_attribute(class_list, translator)
+        parts = class_list.segments.map { |seg| class_segment_for_html(seg, translator) }
+        %(class="#{parts.join(" ")}")
+      end
+
+      def class_segment_for_html(segment, translator)
+        case segment
+        when String then segment
+        when IR::Interpolation
+          translated = translator.translate(segment.expression)
+          "<%= #{translated&.ruby || segment.expression} %>"
+        when IR::ConditionalSegment
+          cond_translated = translator.translate(segment.condition.expression)
+          cond_ruby = cond_translated&.ruby || segment.condition.expression
+          "<%= #{cond_ruby} ? #{segment.class_name.inspect} : '' %>"
+        end
+      end
+
+      def class_list_to_ruby_string(class_list, translator)
+        parts = class_list.segments.map { |seg| class_segment_for_ruby(seg, translator) }
+        %("#{parts.join(" ")}")
+      end
+
+      def class_segment_for_ruby(segment, translator)
+        case segment
+        when String then segment
+        when IR::Interpolation
+          translated = translator.translate(segment.expression)
+          "\#{#{translated&.ruby || segment.expression}}"
+        when IR::ConditionalSegment
+          cond_translated = translator.translate(segment.condition.expression)
+          cond_ruby = cond_translated&.ruby || segment.condition.expression
+          %(\#{#{cond_ruby} ? #{segment.class_name.inspect} : ""})
         end
       end
 
@@ -348,6 +387,8 @@ module JsxRosetta
           translated = translator.translate(attribute.expression)
           ruby = translated ? translated.ruby : attribute.expression.inspect
           "class: #{ruby}"
+        when IR::ClassList
+          "class: #{class_list_to_ruby_string(attribute, translator)}"
         end
       end
 

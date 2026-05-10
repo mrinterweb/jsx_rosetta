@@ -251,6 +251,20 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(erb).not_to match(/\*\*props(?!\w)/) # bare `**props` would mean an undefined local
     end
 
+    it "renders cn() className as inline ERB on an Element" do
+      files = files_for('function X({ extra }) { return <div className={cn("base", extra, { "active": extra })} />; }')
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include('class="base <%= @extra %> <%= @extra ? "active" : \'\' %>"')
+    end
+
+    it "renders cn() className as a Ruby string on a ComponentInvocation" do
+      files = files_for('function X({ flag }) { return <Inner className={cn("base", { "on": flag })} />; }')
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include(%(class: "base \#{@flag ? "on" : ""}"))
+    end
+
     it "uses a quoted-key hash entry for hyphenated component-invocation kwargs" do
       files = files_for("function X({ label }) { return <Inner aria-label={label} />; }")
 

@@ -405,12 +405,59 @@ module JsxRosetta
       def lower_jsx_attribute(attr)
         name = attr.attribute_name
 
-        return StyleBinding.new(expression: style_binding_expression(attr.value)) if name == "className"
+        return lower_class_name(attr.value) if name == "className"
         if event_attribute?(name) && attr.value.is_a?(AST::JSXExpressionContainer)
           return lower_event_attribute(name, attr.value)
         end
 
         Attribute.new(name: name, value: lower_attribute_value(attr.value))
+      end
+
+      def lower_class_name(value)
+        if value.is_a?(AST::JSXExpressionContainer)
+          decomposed = try_lower_class_helper(value.expression)
+          return decomposed if decomposed
+        end
+        StyleBinding.new(expression: style_binding_expression(value))
+      end
+
+      def try_lower_class_helper(expression)
+        return nil unless expression.is_a?(AST::Node) && expression.type == "CallExpression"
+
+        callee = expression[:callee]
+        return nil unless callee.is_a?(AST::Node) && callee.type == "Identifier"
+        return nil unless %w[cn clsx classnames].include?(callee[:name])
+
+        segments = expression[:arguments].flat_map { |arg| lower_class_helper_arg(arg) }
+        return nil if segments.any?(&:nil?)
+
+        ClassList.new(segments: segments)
+      end
+
+      def lower_class_helper_arg(arg)
+        case arg.type
+        when "StringLiteral" then arg[:value]
+        when "Identifier", "MemberExpression" then Interpolation.new(expression: source_of(arg))
+        when "ObjectExpression" then lower_class_helper_object(arg)
+        end
+      end
+
+      def lower_class_helper_object(object_expression)
+        object_expression[:properties].map do |prop|
+          break [nil] unless prop.type == "ObjectProperty"
+
+          class_name =
+            case prop[:key].type
+            when "StringLiteral" then prop[:key][:value]
+            when "Identifier" then prop[:key][:name]
+            end
+          break [nil] if class_name.nil?
+
+          ConditionalSegment.new(
+            class_name: class_name,
+            condition: Interpolation.new(expression: source_of(prop[:value]))
+          )
+        end
       end
 
       def event_attribute?(name)

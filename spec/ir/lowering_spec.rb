@@ -75,12 +75,12 @@ RSpec.describe JsxRosetta::IR::Lowering do
       expect(style.expression).to eq('"btn primary"')
     end
 
-    it "lowers className with an expression to IR::StyleBinding" do
-      ir = lower("function X() { return <a className={cn('btn', { active })} />; }")
+    it "lowers className with a non-helper expression to IR::StyleBinding" do
+      ir = lower('function X() { return <a className={ternary ? "a" : "b"} />; }')
 
       style = ir.body.attributes.first
       expect(style).to be_a(JsxRosetta::IR::StyleBinding)
-      expect(style.expression).to eq("cn('btn', { active })")
+      expect(style.expression).to eq('ternary ? "a" : "b"')
     end
   end
 
@@ -365,6 +365,58 @@ RSpec.describe JsxRosetta::IR::Lowering do
       ir = lower("function X({ a }) { return <div />; }")
 
       expect(ir.rest_prop_name).to be_nil
+    end
+  end
+
+  describe "cn / clsx className lowering" do
+    it "lowers `className={cn(\"a\", \"b\")}` to a ClassList of literal segments" do
+      ir = lower('function X() { return <div className={cn("a", "b")} />; }')
+
+      expect(ir.body.attributes).to eq([JsxRosetta::IR::ClassList.new(segments: %w[a b])])
+    end
+
+    it "lowers identifier arguments to IR::Interpolation segments" do
+      ir = lower("function X({ extra }) { return <div className={cn(\"base\", extra)} />; }")
+
+      class_list = ir.body.attributes.first
+      expect(class_list).to be_a(JsxRosetta::IR::ClassList)
+      expect(class_list.segments).to eq([
+                                          "base",
+                                          JsxRosetta::IR::Interpolation.new(expression: "extra")
+                                        ])
+    end
+
+    it "lowers object-literal arguments to ConditionalSegment entries" do
+      ir = lower('function X({ on }) { return <div className={cn("base", { "active": on, "done": !on })} />; }')
+
+      class_list = ir.body.attributes.first
+      expect(class_list).to be_a(JsxRosetta::IR::ClassList)
+      expect(class_list.segments[1]).to eq(
+        JsxRosetta::IR::ConditionalSegment.new(
+          class_name: "active",
+          condition: JsxRosetta::IR::Interpolation.new(expression: "on")
+        )
+      )
+      expect(class_list.segments[2]).to eq(
+        JsxRosetta::IR::ConditionalSegment.new(
+          class_name: "done",
+          condition: JsxRosetta::IR::Interpolation.new(expression: "!on")
+        )
+      )
+    end
+
+    it "recognizes clsx and classnames callers as well" do
+      ir = lower('function X() { return <div className={clsx("a")} />; }')
+      expect(ir.body.attributes.first).to be_a(JsxRosetta::IR::ClassList)
+
+      ir = lower('function X() { return <div className={classnames("a")} />; }')
+      expect(ir.body.attributes.first).to be_a(JsxRosetta::IR::ClassList)
+    end
+
+    it "falls back to StyleBinding when an argument shape is unsupported" do
+      ir = lower('function X() { return <div className={cn("a", computeOther())} />; }')
+
+      expect(ir.body.attributes.first).to be_a(JsxRosetta::IR::StyleBinding)
     end
   end
 
