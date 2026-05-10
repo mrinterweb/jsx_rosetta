@@ -15,8 +15,10 @@ module JsxRosetta
   end
 
   def self.translate(source, backend: :view_component, typescript: false, source_filename: nil)
-    component = lower(source, typescript: typescript, source_filename: source_filename)
-    backend_for(backend).emit(component)
+    ast = parse(source, typescript: typescript, source_filename: source_filename)
+    components = IR.lower_all(ast, source: source)
+    backend_instance = backend_for(backend)
+    components.flat_map { |component| backend_instance.emit(component) }
   end
 
   def self.backend_for(name)

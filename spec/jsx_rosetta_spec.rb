@@ -13,4 +13,28 @@ RSpec.describe JsxRosetta do
       expect(file.type).to eq("File")
     end
   end
+
+  describe ".translate" do
+    it "emits one .rb / .html.erb pair for a single-component file" do
+      files = described_class.translate("function X() { return <div />; }")
+
+      expect(files.map(&:path)).to contain_exactly("x_component.rb", "x_component.html.erb")
+    end
+
+    it "emits one pair per component for multi-component files" do
+      source = <<~JSX
+        export function Card({ children }) { return <div className="card">{children}</div>; }
+        export function CardHeader({ title }) { return <h2>{title}</h2>; }
+        export function CardBody({ children }) { return <div>{children}</div>; }
+      JSX
+
+      files = described_class.translate(source)
+
+      expect(files.map(&:path)).to contain_exactly(
+        "card_component.rb", "card_component.html.erb",
+        "card_header_component.rb", "card_header_component.html.erb",
+        "card_body_component.rb", "card_body_component.html.erb"
+      )
+    end
+  end
 end

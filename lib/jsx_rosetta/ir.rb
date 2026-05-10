@@ -8,5 +8,9 @@ module JsxRosetta
     def self.lower(ast_file, source:)
       Lowering.lower(ast_file, source: source)
     end
+
+    def self.lower_all(ast_file, source:)
+      Lowering.lower_all(ast_file, source: source)
+    end
   end
 end

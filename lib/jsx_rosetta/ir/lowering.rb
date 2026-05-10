@@ -57,6 +57,10 @@ module JsxRosetta
         new(source).lower_file(file)
       end
 
+      def self.lower_all(file, source:)
+        new(source).lower_all_components(file)
+      end
+
       def initialize(source)
         @source = source
         @prop_names = []
@@ -64,11 +68,18 @@ module JsxRosetta
       end
 
       def lower_file(file)
-        candidate = find_component_function(file.program)
-        raise lowering_error("no component function found in module") unless candidate
+        candidates = find_component_functions(file.program)
+        raise lowering_error("no component function found in module") if candidates.empty?
 
-        name, function = candidate
+        name, function = candidates.first
         lower_component(name, function)
+      end
+
+      def lower_all_components(file)
+        candidates = find_component_functions(file.program)
+        raise lowering_error("no component function found in module") if candidates.empty?
+
+        candidates.map { |name, function| lower_component(name, function) }
       end
 
       private
@@ -77,39 +88,44 @@ module JsxRosetta
         LoweringError.new(message, node: node, source: @source)
       end
 
-      def find_component_function(program)
-        program.body.each do |stmt|
-          candidate =
-            case stmt.type
-            when "FunctionDeclaration" then [stmt[:id]&.[](:name), stmt]
-            when "VariableDeclaration" then extract_arrow_component(stmt)
-            when "ExportNamedDeclaration", "ExportDefaultDeclaration"
-              extract_exported_component(stmt[:declaration])
-            end
-          return candidate if candidate
-        end
-        nil
+      def find_component_functions(program)
+        program.body.flat_map do |stmt|
+          extract_components(stmt)
+        end.compact
       end
 
-      def extract_exported_component(declaration)
-        return nil unless declaration.is_a?(AST::Node)
+      def extract_components(stmt)
+        case stmt.type
+        when "FunctionDeclaration"
+          [[stmt[:id]&.[](:name), stmt]]
+        when "VariableDeclaration"
+          extract_arrow_components(stmt)
+        when "ExportNamedDeclaration", "ExportDefaultDeclaration"
+          extract_exported_components(stmt[:declaration])
+        else
+          []
+        end
+      end
+
+      def extract_exported_components(declaration)
+        return [] unless declaration.is_a?(AST::Node)
 
         case declaration.type
-        when "FunctionDeclaration" then [declaration[:id]&.[](:name), declaration]
-        when "VariableDeclaration" then extract_arrow_component(declaration)
+        when "FunctionDeclaration" then [[declaration[:id]&.[](:name), declaration]]
+        when "VariableDeclaration" then extract_arrow_components(declaration)
+        else []
         end
       end
 
-      def extract_arrow_component(variable_declaration)
-        variable_declaration[:declarations].each do |declarator|
+      def extract_arrow_components(variable_declaration)
+        variable_declaration[:declarations].filter_map do |declarator|
           init = declarator[:init]
-          next unless init.is_a?(AST::Node)
-          next unless %w[ArrowFunctionExpression FunctionExpression].include?(init.type)
+          next nil unless init.is_a?(AST::Node)
+          next nil unless %w[ArrowFunctionExpression FunctionExpression].include?(init.type)
 
           name = declarator[:id]&.[](:name)
-          return [name, init] if name
+          name ? [name, init] : nil
         end
-        nil
       end
 
       def lower_component(name, function)
