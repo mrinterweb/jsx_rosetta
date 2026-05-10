@@ -57,6 +57,22 @@ RSpec.describe JsxRosetta::CLI do
       expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_USAGE)
       expect(result[:stderr]).to include("missing required argument")
     end
+
+    it "emits a Rails view (no .rb, no sidecar) when --as=view is passed" do
+      Dir.mktmpdir do |dir|
+        Tempfile.create(["home", ".tsx"]) do |f|
+          f.write("export function Home() { return <h1>Welcome</h1>; }")
+          f.flush
+
+          result = run("translate", f.path, "--as=view", "-o", dir)
+
+          expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_OK)
+          expect(File).to exist(File.join(dir, "home.html.erb"))
+          expect(File).not_to exist(File.join(dir, "home_component.rb"))
+          expect(File).not_to exist(File.join(dir, "home_component"))
+        end
+      end
+    end
   end
 
   describe "routes" do

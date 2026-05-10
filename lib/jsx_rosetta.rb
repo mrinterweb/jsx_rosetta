@@ -25,6 +25,7 @@ module JsxRosetta
   def self.backend_for(name, helpers: nil, layout: :sidecar)
     case name
     when :view_component then Backend::ViewComponent.new(helpers: helpers, layout: layout)
+    when :rails_view then Backend::RailsView.new(helpers: helpers, layout: layout)
     else
       raise Error, "unknown backend: #{name.inspect}"
     end

@@ -63,11 +63,12 @@ module JsxRosetta
 
       out_dir = options[:out] || "."
       typescript = options[:tsx] || input_path.end_with?(".tsx")
+      backend = options[:as] == "view" ? :rails_view : :view_component
 
       source = File.read(input_path)
       files = JsxRosetta.translate(
         source,
-        backend: :view_component,
+        backend: backend,
         typescript: typescript,
         source_filename: input_path
       )
@@ -139,6 +140,8 @@ module JsxRosetta
         case arg
         when "-o", "--out" then options[:out] = @argv.shift
         when "--tsx", "--typescript" then options[:tsx] = true
+        when "--as" then options[:as] = @argv.shift
+        when /\A--as=(.+)\z/ then options[:as] = ::Regexp.last_match(1)
         else positional << arg
         end
       end
@@ -160,6 +163,9 @@ module JsxRosetta
           install                    Install the gem's Node sidecar dependencies (runs `npm install`).
           translate FILE [-o DIR]    Translate JSX/TSX into ViewComponent files in DIR (default: ".").
                                      Pass --tsx to force TypeScript parsing if the input is .jsx.
+                                     Pass --as=view to emit a Rails view template (`<snake>.html.erb`)
+                                     instead of a ViewComponent class + sidecar template — appropriate
+                                     for pages tied to a route.
           routes FILE [-o OUT.rb]    Parse <Route path=... element={<X/>} /> patterns from FILE
                                      and emit a reviewable Ruby script that calls `rails generate
                                      controller` and prints suggested config/routes.rb additions.
