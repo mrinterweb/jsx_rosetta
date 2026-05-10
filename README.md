@@ -5,7 +5,7 @@ classes (or plain Rails view templates) — and lift React Router config into a
 runnable `rails generate controller` script.
 
 `jsx_rosetta` parses JSX/TSX via Babel running in a Node sidecar, lowers the
-parsed AST into a framework-agnostic semantic IR, and emits target output
+parsed AST into a framework-agnostic semantic intermediate representation (IR), and emits target output
 through pluggable backends. The pipeline is end-to-end working: a real React
 app's components and routes can be translated, dropped into a fresh Rails 8.1
 app, and rendered with only a handful of human edits at the TODO markers the
