@@ -209,14 +209,8 @@ module JsxRosetta
 
       def lower_object_prop(property)
         value = property[:value]
-        if value.type == "AssignmentPattern"
-          Prop.new(
-            name: value[:left][:name],
-            default: Interpolation.new(expression: source_of(value[:right]))
-          )
-        else
-          Prop.new(name: value[:name], default: nil)
-        end
+        default = (Interpolation.new(expression: source_of(value[:right])) if value.type == "AssignmentPattern")
+        Prop.new(name: property[:key][:name], default: default)
       end
 
       def lower_function_body(body)

@@ -533,6 +533,21 @@ RSpec.describe JsxRosetta::IR::Lowering do
 
       expect(ir.rest_prop_name).to be_nil
     end
+
+    it "lowers a nested-destructured prop using the outer key as the prop name" do
+      ir = lower("function X({ record: { claimNumber, claim }, accountSlug }) { return <div />; }")
+
+      expect(ir.props).to eq([
+                               JsxRosetta::IR::Prop.new(name: "record", default: nil),
+                               JsxRosetta::IR::Prop.new(name: "accountSlug", default: nil)
+                             ])
+    end
+
+    it "lowers a renamed-destructured prop using the source-side key" do
+      ir = lower("function X({ outer: inner }) { return <div />; }")
+
+      expect(ir.props).to eq([JsxRosetta::IR::Prop.new(name: "outer", default: nil)])
+    end
   end
 
   describe "cn / clsx className lowering" do
