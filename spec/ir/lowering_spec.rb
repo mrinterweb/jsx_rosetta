@@ -217,6 +217,26 @@ RSpec.describe JsxRosetta::IR::Lowering do
 
       expect(ir.body.children).to eq([JsxRosetta::IR::Interpolation.new(expression: "computed")])
     end
+
+    it "captures non-JSX local bindings on Component#local_bindings" do
+      ir = lower(<<~JSX)
+        function X({ raw }) {
+          const date = parseISO(raw);
+          const total = items.reduce((s, i) => s + i.price, 0);
+          return <time>{date}</time>;
+        }
+      JSX
+
+      expect(ir.local_bindings.map(&:name)).to eq(%w[date total])
+      expect(ir.local_bindings.first.source).to eq("const date = parseISO(raw);")
+      expect(ir.local_bindings.last.source).to eq("const total = items.reduce((s, i) => s + i.price, 0);")
+    end
+
+    it "leaves local_bindings empty when there are no non-JSX bindings" do
+      ir = lower("function X() { return <p />; }")
+
+      expect(ir.local_bindings).to eq([])
+    end
   end
 
   describe "event bindings" do
@@ -507,7 +527,8 @@ RSpec.describe JsxRosetta::IR::Lowering do
             JsxRosetta::IR::Slot.new(name: "children")
           ]
         ),
-        rest_prop_name: nil
+        rest_prop_name: nil,
+        local_bindings: []
       )
 
       expect(ir).to eq(expected)

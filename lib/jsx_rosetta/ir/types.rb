@@ -16,7 +16,21 @@ module JsxRosetta
     #                  (`function X({ a, ...rest })`). When non-nil, the
     #                  backend should generate a `**rest` initializer kwarg
     #                  and make it available via `@rest_prop_name`.
-    Component = Data.define(:name, :props, :body, :rest_prop_name) do
+    # local_bindings : [LocalBinding] — non-JSX local `const` bindings inside
+    #                  the component body. Backends typically render these as
+    #                  a TODO comment block since arbitrary JS-to-Ruby
+    #                  translation isn't attempted.
+    Component = Data.define(:name, :props, :body, :rest_prop_name, :local_bindings) do
+      include Node
+    end
+
+    # A non-JSX local binding declared inside the component body
+    # (`const date = parseISO(dateString)`). The verbatim source is
+    # preserved so the human reviewer can translate it.
+    #
+    # name   : String
+    # source : String — verbatim JS of the entire VariableDeclaration statement.
+    LocalBinding = Data.define(:name, :source) do
       include Node
     end
 

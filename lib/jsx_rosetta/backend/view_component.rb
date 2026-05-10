@@ -99,7 +99,19 @@ module JsxRosetta
 
       def render_erb_template(component, translator)
         body = render_ir_node(component.body, translator, indent: 0)
-        body.end_with?("\n") ? body : "#{body}\n"
+        body = "#{body}\n" unless body.end_with?("\n")
+        prefix = render_local_bindings_todo(component.local_bindings)
+        prefix.empty? ? body : "#{prefix}#{body}"
+      end
+
+      def render_local_bindings_todo(bindings)
+        return "" if bindings.empty?
+
+        unique_sources = bindings.map(&:source).uniq
+        lines = ["<%# TODO: translate JS to Ruby — original:"]
+        unique_sources.each { |src| lines << "    #{src}" }
+        lines << "%>"
+        "#{lines.join("\n")}\n"
       end
 
       def render_ir_node(node, translator, indent:)

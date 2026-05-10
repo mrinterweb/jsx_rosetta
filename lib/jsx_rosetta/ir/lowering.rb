@@ -65,6 +65,7 @@ module JsxRosetta
         @source = source
         @prop_names = []
         @local_jsx = {}
+        @local_bindings = []
       end
 
       def lower_file(file)
@@ -135,12 +136,16 @@ module JsxRosetta
 
         props, rest_prop_name = lower_params(function[:params])
         @prop_names = props.map(&:name)
+        @local_bindings = []
+
+        body = lower_function_body(function[:body])
 
         Component.new(
           name: name,
           props: props,
-          body: lower_function_body(function[:body]),
-          rest_prop_name: rest_prop_name
+          body: body,
+          rest_prop_name: rest_prop_name,
+          local_bindings: @local_bindings
         )
       end
 
@@ -190,7 +195,7 @@ module JsxRosetta
       def lower_function_body(body)
         case body.type
         when "BlockStatement"
-          @local_jsx = collect_local_jsx_bindings(body[:body])
+          collect_local_bindings(body[:body])
           return_stmt = body[:body].find { |stmt| stmt.type == "ReturnStatement" }
           raise lowering_error("component function has no return statement", node: body) unless return_stmt
 
@@ -203,21 +208,32 @@ module JsxRosetta
         end
       end
 
-      def collect_local_jsx_bindings(statements)
-        bindings = {}
+      def collect_local_bindings(statements)
+        @local_jsx = {}
+        seen_other_stmts = {}
+
         statements.each do |stmt|
           next unless stmt.type == "VariableDeclaration"
 
           stmt[:declarations].each do |declarator|
             init = declarator[:init]
             next unless init.is_a?(AST::Node)
-            next unless %w[JSXElement JSXFragment].include?(init.type)
 
             name = declarator[:id]&.[](:name)
-            bindings[name] = init if name
+            next unless name
+
+            if %w[JSXElement JSXFragment].include?(init.type)
+              @local_jsx[name] = init
+            else
+              record_local_other_binding(stmt, name, seen_other_stmts)
+            end
           end
         end
-        bindings
+      end
+
+      def record_local_other_binding(stmt, name, seen)
+        seen[stmt.start_pos] ||= source_of(stmt).strip
+        @local_bindings << LocalBinding.new(name: name, source: seen[stmt.start_pos])
       end
 
       def lower_jsx(node)

@@ -295,6 +295,19 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(ruby).to include("@rest = rest")
     end
 
+    it "prepends a TODO comment listing non-JSX local bindings" do
+      files = files_for(<<~JSX)
+        function X({ raw }) {
+          const date = parseISO(raw);
+          return <time>{date}</time>;
+        }
+      JSX
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include("<%# TODO: translate JS to Ruby")
+      expect(erb).to include("const date = parseISO(raw);")
+    end
+
     it "renders a JSX block comment as an ERB comment" do
       files = files_for("function X() { return <p>{/* note: be careful */}body</p>; }")
 
