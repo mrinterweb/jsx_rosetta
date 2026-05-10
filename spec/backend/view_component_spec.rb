@@ -199,10 +199,18 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(files["x_component.html.erb"]).to include("<p>\n  Hello there\n</p>")
     end
 
-    it "renders a self-closing element with no children inline" do
+    it "renders a void element as self-closing" do
       files = files_for("function X() { return <hr />; }")
 
-      expect(files["x_component.html.erb"]).to include("<hr></hr>")
+      expect(files["x_component.html.erb"]).to include("<hr />")
+      expect(files["x_component.html.erb"]).not_to include("</hr>")
+    end
+
+    it "renders a void element with attributes as self-closing" do
+      files = files_for('function X() { return <img src="/a.png" alt="x" />; }')
+
+      expect(files["x_component.html.erb"]).to include('<img src="/a.png" alt="x" />')
+      expect(files["x_component.html.erb"]).not_to include("</img>")
     end
 
     it "renders nested component invocations as `render`" do
@@ -215,6 +223,18 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       files = files_for("function X() { return <p>{a + b}</p>; }")
 
       expect(files["x_component.html.erb"]).to include("<%# TODO: translate")
+    end
+
+    it "flags an interpolation whose identifier is neither a prop nor a local" do
+      files = files_for(<<~JSX)
+        import { CMS_NAME } from "@/lib/constants";
+        function X() { return <p>{CMS_NAME}</p>; }
+      JSX
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include("TODO: unresolved identifier")
+      expect(erb).to include('"CMS_NAME"')
+      expect(erb).to include("<%= cms_name %>")
     end
   end
 

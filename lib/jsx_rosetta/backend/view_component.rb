@@ -26,6 +26,7 @@ module JsxRosetta
     #   - IR::Conditional renders as `<% if %>...<% else %>...<% end %>`.
     class ViewComponent < Base
       DEFAULT_SLOT_NAME = "children"
+      VOID_ELEMENTS = %w[area base br col embed hr img input link meta param source track wbr].freeze
 
       def emit(component)
         prop_names = component.props.map(&:name)
@@ -129,6 +130,9 @@ module JsxRosetta
       def render_element(element, translator, indent:)
         attrs = render_attributes(element.attributes, translator)
         attrs_segment = attrs.empty? ? "" : " #{attrs}"
+
+        return "#{spaces(indent)}<#{element.tag}#{attrs_segment} />" if VOID_ELEMENTS.include?(element.tag)
+
         opening = "<#{element.tag}#{attrs_segment}>"
         closing = "</#{element.tag}>"
 
@@ -245,11 +249,16 @@ module JsxRosetta
 
       def interpolation_to_erb(interpolation, translator)
         translated = translator.translate(interpolation.expression)
-        if translated
-          "<%= #{translated.ruby} %>"
-        else
-          "<%# TODO: translate #{interpolation.expression.inspect} %><%= #{interpolation.expression} %>"
+        unless translated
+          return "<%# TODO: translate #{interpolation.expression.inspect} %>" \
+                 "<%= #{interpolation.expression} %>"
         end
+
+        unresolved = translated.unresolved_identifiers
+        return "<%= #{translated.ruby} %>" if unresolved.empty?
+
+        names = unresolved.map(&:inspect).join(", ")
+        "<%# TODO: unresolved identifier #{names} %><%= #{translated.ruby} %>"
       end
 
       def component_kwarg(attribute, translator)

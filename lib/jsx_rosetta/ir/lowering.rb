@@ -34,39 +34,64 @@ module JsxRosetta
       def initialize(source)
         @source = source
         @prop_names = []
+        @local_jsx = {}
       end
 
       def lower_file(file)
-        function = find_component_function(file.program)
-        raise LoweringError, "no component function found in module" unless function
+        candidate = find_component_function(file.program)
+        raise LoweringError, "no component function found in module" unless candidate
 
-        lower_component(function)
+        name, function = candidate
+        lower_component(name, function)
       end
 
       private
 
       def find_component_function(program)
         program.body.each do |stmt|
-          case stmt.type
-          when "FunctionDeclaration"
-            return stmt
-          when "ExportNamedDeclaration", "ExportDefaultDeclaration"
-            decl = stmt[:declaration]
-            return decl if decl.is_a?(AST::Node) && decl.type == "FunctionDeclaration"
-          end
+          candidate =
+            case stmt.type
+            when "FunctionDeclaration" then [stmt[:id]&.[](:name), stmt]
+            when "VariableDeclaration" then extract_arrow_component(stmt)
+            when "ExportNamedDeclaration", "ExportDefaultDeclaration"
+              extract_exported_component(stmt[:declaration])
+            end
+          return candidate if candidate
         end
         nil
       end
 
-      def lower_component(function)
-        name = function[:id]&.[](:name) || raise(LoweringError, "anonymous component functions are not supported")
+      def extract_exported_component(declaration)
+        return nil unless declaration.is_a?(AST::Node)
+
+        case declaration.type
+        when "FunctionDeclaration" then [declaration[:id]&.[](:name), declaration]
+        when "VariableDeclaration" then extract_arrow_component(declaration)
+        end
+      end
+
+      def extract_arrow_component(variable_declaration)
+        variable_declaration[:declarations].each do |declarator|
+          init = declarator[:init]
+          next unless init.is_a?(AST::Node)
+          next unless %w[ArrowFunctionExpression FunctionExpression].include?(init.type)
+
+          name = declarator[:id]&.[](:name)
+          return [name, init] if name
+        end
+        nil
+      end
+
+      def lower_component(name, function)
+        raise LoweringError, "anonymous component functions are not supported" if name.nil? || name.empty?
+
         props = lower_props(function[:params])
         @prop_names = props.map(&:name)
 
         Component.new(
           name: name,
           props: props,
-          body: lower_component_body(function[:body])
+          body: lower_function_body(function[:body])
         )
       end
 
@@ -107,11 +132,37 @@ module JsxRosetta
         end
       end
 
-      def lower_component_body(block_statement)
-        return_stmt = block_statement[:body].find { |stmt| stmt.type == "ReturnStatement" }
-        raise LoweringError, "component function has no return statement" unless return_stmt
+      def lower_function_body(body)
+        case body.type
+        when "BlockStatement"
+          @local_jsx = collect_local_jsx_bindings(body[:body])
+          return_stmt = body[:body].find { |stmt| stmt.type == "ReturnStatement" }
+          raise LoweringError, "component function has no return statement" unless return_stmt
 
-        lower_jsx(return_stmt[:argument])
+          lower_jsx(return_stmt[:argument])
+        when "JSXElement", "JSXFragment"
+          @local_jsx = {}
+          lower_jsx(body)
+        else
+          raise LoweringError, "unsupported component body: #{body.type}"
+        end
+      end
+
+      def collect_local_jsx_bindings(statements)
+        bindings = {}
+        statements.each do |stmt|
+          next unless stmt.type == "VariableDeclaration"
+
+          stmt[:declarations].each do |declarator|
+            init = declarator[:init]
+            next unless init.is_a?(AST::Node)
+            next unless %w[JSXElement JSXFragment].include?(init.type)
+
+            name = declarator[:id]&.[](:name)
+            bindings[name] = init if name
+          end
+        end
+        bindings
       end
 
       def lower_jsx(node)
@@ -153,10 +204,36 @@ module JsxRosetta
       end
 
       def lower_jsx_text(node)
-        value = node.value
-        return nil if value.strip.empty?
+        value = normalize_jsx_text(node.value)
+        return nil if value.empty?
 
         Text.new(value: value)
+      end
+
+      # Apply JSX whitespace rules (matching Babel's cleanJSXElementLiteralChild):
+      #   - tabs are converted to spaces
+      #   - leading whitespace on every line except the first is stripped
+      #   - trailing whitespace on every line except the last is stripped
+      #   - non-empty lines are joined; each non-final non-empty line gets a
+      #     trailing space appended
+      #   - all-whitespace text becomes empty (caller drops it)
+      def normalize_jsx_text(value)
+        lines = value.split(/\r\n|\n|\r/)
+        last_non_empty = nil
+        lines.each_with_index { |line, i| last_non_empty = i if line.match?(/[^ \t]/) }
+        return "" if last_non_empty.nil?
+
+        result = String.new
+        lines.each_with_index do |line, i|
+          trimmed = line.tr("\t", " ")
+          trimmed = trimmed.sub(/\A +/, "") unless i.zero?
+          trimmed = trimmed.sub(/ +\z/, "") unless i == lines.length - 1
+          next if trimmed.empty?
+
+          trimmed += " " unless i == last_non_empty
+          result << trimmed
+        end
+        result
       end
 
       def lower_jsx_expression(node)
@@ -247,6 +324,8 @@ module JsxRosetta
         name = identifier[:name]
         if name == "children" && @prop_names.include?("children")
           Slot.new(name: "children")
+        elsif (jsx = @local_jsx[name])
+          lower_jsx(jsx)
         else
           Interpolation.new(expression: name)
         end
@@ -254,8 +333,13 @@ module JsxRosetta
 
       def lower_jsx_or_value(node)
         case node.type
-        when "JSXElement", "JSXFragment" then lower_jsx(node)
-        else Interpolation.new(expression: source_of(node))
+        when "JSXElement", "JSXFragment"
+          lower_jsx(node)
+        when "Identifier"
+          jsx = @local_jsx[node[:name]]
+          jsx ? lower_jsx(jsx) : Interpolation.new(expression: source_of(node))
+        else
+          Interpolation.new(expression: source_of(node))
         end
       end
 

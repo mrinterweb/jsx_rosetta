@@ -98,6 +98,75 @@ RSpec.describe JsxRosetta::IR::Lowering do
 
       expect(ir.body.children).to eq([JsxRosetta::IR::Interpolation.new(expression: "children")])
     end
+
+    it "normalizes JSX whitespace (Babel rules) for inline text with surrounding indentation" do
+      ir = lower(<<~JSX)
+        function X() {
+          return (
+            <h3>
+              Statically Generated with Next.js.
+            </h3>
+          );
+        }
+      JSX
+
+      expect(ir.body.children).to eq([JsxRosetta::IR::Text.new(value: "Statically Generated with Next.js.")])
+    end
+
+    it "joins multi-line inline text with single spaces" do
+      ir = lower(<<~JSX)
+        function X() {
+          return (
+            <p>
+              line one
+              line two
+            </p>
+          );
+        }
+      JSX
+
+      expect(ir.body.children).to eq([JsxRosetta::IR::Text.new(value: "line one line two")])
+    end
+  end
+
+  describe "local JSX bindings" do
+    it "inlines a `const x = <jsx />` binding when referenced as `{x}`" do
+      ir = lower(<<~JSX)
+        function X({ src }) {
+          const image = <img src={src} />;
+          return <div>{image}</div>;
+        }
+      JSX
+
+      child = ir.body.children.first
+      expect(child).to be_a(JsxRosetta::IR::Element)
+      expect(child.tag).to eq("img")
+    end
+
+    it "inlines a JSX binding into a ternary alternate" do
+      ir = lower(<<~JSX)
+        function X({ on }) {
+          const fallback = <span />;
+          return <div>{on ? <strong /> : fallback}</div>;
+        }
+      JSX
+
+      conditional = ir.body.children.first
+      expect(conditional).to be_a(JsxRosetta::IR::Conditional)
+      expect(conditional.alternate).to be_a(JsxRosetta::IR::Element)
+      expect(conditional.alternate.tag).to eq("span")
+    end
+
+    it "leaves a non-JSX local binding's identifier as a bare Interpolation" do
+      ir = lower(<<~JSX)
+        function X({ raw }) {
+          const computed = parse(raw);
+          return <p>{computed}</p>;
+        }
+      JSX
+
+      expect(ir.body.children).to eq([JsxRosetta::IR::Interpolation.new(expression: "computed")])
+    end
   end
 
   describe "event bindings" do
@@ -245,6 +314,35 @@ RSpec.describe JsxRosetta::IR::Lowering do
 
     it "finds a function inside an ExportDefaultDeclaration" do
       ir = lower("export default function Greeting() { return <p>Hi</p>; }")
+
+      expect(ir.name).to eq("Greeting")
+    end
+  end
+
+  describe "arrow-function components" do
+    it "lowers `const X = () => { return <jsx>; }`" do
+      ir = lower("const Greeting = () => { return <p>Hi</p>; };")
+
+      expect(ir.name).to eq("Greeting")
+      expect(ir.body.tag).to eq("p")
+    end
+
+    it "lowers `const X = () => <jsx>` (implicit return)" do
+      ir = lower("const Greeting = () => <p>Hi</p>;")
+
+      expect(ir.name).to eq("Greeting")
+      expect(ir.body.tag).to eq("p")
+    end
+
+    it "lowers an exported arrow-function component" do
+      ir = lower("export const Greeting = ({ who }) => <p>Hi {who}</p>;")
+
+      expect(ir.name).to eq("Greeting")
+      expect(ir.props.map(&:name)).to eq(["who"])
+    end
+
+    it "lowers a function-expression assigned to a const" do
+      ir = lower("const Greeting = function () { return <p>Hi</p>; };")
 
       expect(ir.name).to eq("Greeting")
     end
