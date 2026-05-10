@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.2.0] - 2026-05-10
+
+Driven by an empirical probe of v0.1.0 against a 39-file Next.js production
+slice (`reserv-web/src/components/rolloverbook`). The slice exposed three
+return-shape gaps and a crash on nested destructure; this release fixes all
+four. Probe outcome: 33/39 → **39/39 emit**.
+
+### Fixed
+
+- **Nested-destructured props no longer crash the lowering.**
+  `function X({ outer: { inner } })` previously surfaced as
+  `Inflector.underscore(nil)` in the backend. The lowering now uses the
+  outer key as the prop name. Renamed destructures (`{ outer: inner }`)
+  similarly use the source-side key (the prop name the parent passes),
+  not the renamed local.
+
+### Added — return-shape lowering
+
+- **Top-level conditional / short-circuit returns** —
+  `return cond ? <A/> : <B/>` and `return cond && <A/>` now lower to
+  IR::Conditional via a new return-position dispatcher. Previously raised
+  "unexpected JSX node in lowering: ConditionalExpression".
+- **Multi-branch `if/else if/else` all-return bodies** — components
+  whose every return path lives inside an if-chain (no top-level
+  unconditional return) lower to a chained IR::Conditional. Branches
+  may be braced single-statement blocks (`if (x) { return <A/>; }`) or
+  bare returns (`if (x) return <A/>;`). Branches with side-effect
+  statements before the return still raise — those imply behavior we
+  can't preserve.
+
 ## [Unreleased]
 
 ### Added — translator (lowering)
