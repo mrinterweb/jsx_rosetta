@@ -83,7 +83,12 @@ module JsxRosetta
 
         def translate_member_chain(root, rest, unresolved)
           translated_root = translate_identifier(root, unresolved)
-          "#{translated_root}#{rest}"
+          # Underscore each chain segment so JS camelCase identifiers map to
+          # Ruby snake_case (`post.coverImage` → `post.cover_image`).
+          ruby_rest = rest.gsub(/\.([a-zA-Z_$][a-zA-Z_$0-9]*)/) do
+            ".#{AST::Inflector.underscore(::Regexp.last_match(1))}"
+          end
+          "#{translated_root}#{ruby_rest}"
         end
 
         def translate_template_literal(content, unresolved)

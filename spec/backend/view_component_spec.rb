@@ -236,6 +236,13 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(files["x_component.html.erb"]).to include("<%= render InnerComponent.new(foo: bar) %>")
     end
 
+    it "snake_cases camelCase identifiers within a member chain" do
+      files = files_for("function X({ post }) { return <p>{post.coverImage}</p>; }")
+
+      expect(files["x_component.html.erb"]).to include("@post.cover_image")
+      expect(files["x_component.html.erb"]).not_to include("coverImage")
+    end
+
     it "passes a spread argument as **rest in a component invocation" do
       files = files_for("function X({ rest }) { return <Inner title=\"x\" {...rest} />; }")
 
