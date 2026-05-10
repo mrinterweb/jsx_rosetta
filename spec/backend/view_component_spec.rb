@@ -240,6 +240,16 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(files["x_component.html.erb"]).to include("<%= render InnerComponent.new(foo: bar) %>")
     end
 
+    it "translates compound component tags `<Foo.Bar>` to `Foo::BarComponent`" do
+      files = files_for("function X() { return <Tabs.List><Tabs.Trigger value=\"a\" /></Tabs.List>; }")
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include("Tabs::ListComponent")
+      expect(erb).to include('Tabs::TriggerComponent.new(value: "a")')
+      expect(erb).not_to include("Tabs.ListComponent")
+      expect(erb).not_to include("Tabs.TriggerComponent")
+    end
+
     it "emits link_to instead of LinkComponent.new for the default Link mapping" do
       files = files_for('function X() { return <Link href="/posts">Read</Link>; }')
 
@@ -291,12 +301,34 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(files["x_component.html.erb"]).not_to include("coverImage")
     end
 
-    it "translates member-chain interpolations inside template literals" do
+    it "inlines a template-literal href and translates member chains within it" do
       files = files_for("function X({ post }) { return <a href={`/posts/${post.id}`}>x</a>; }")
 
       erb = files["x_component.html.erb"]
-      expect(erb).to include(%("/posts/\#{@post.id}"))
+      expect(erb).to include('href="/posts/<%= @post.id %>"')
       expect(erb).not_to include("TODO")
+      expect(erb).not_to include('href="<%= ')
+    end
+
+    it "inlines plain identifier interpolation in attribute values" do
+      files = files_for("function X({ slug }) { return <a href={`/posts/${slug}`}>x</a>; }")
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include('href="/posts/<%= @slug %>"')
+    end
+
+    it "translates `!preview` to `!@preview` (unary negation on a prop)" do
+      files = files_for("function X({ preview }) { return <p>{!preview}</p>; }")
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include("<%= !@preview %>")
+    end
+
+    it "translates `!member.chain` correctly" do
+      files = files_for("function X({ post }) { return <p>{!post.published}</p>; }")
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include("<%= !@post.published %>")
     end
 
     it "passes a spread argument as **rest in a component invocation" do

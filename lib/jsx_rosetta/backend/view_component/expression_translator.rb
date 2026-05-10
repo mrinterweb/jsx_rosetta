@@ -30,6 +30,7 @@ module JsxRosetta
         TEMPLATE_LITERAL = /\A`(.*)`\z/m
         TEMPLATE_INTERPOLATION = /\$\{([a-zA-Z_$][a-zA-Z_$0-9]*(?:\.[a-zA-Z_$][a-zA-Z_$0-9]*)*)\}/
         MEMBER_CHAIN = /\A(?<root>[a-zA-Z_$][a-zA-Z_$0-9]*)(?<rest>(?:\.[a-zA-Z_$][a-zA-Z_$0-9]*)+)\z/
+        UNARY = /\A(?<op>!+|-|\+)(?<operand>.+)\z/m
         SIMPLE_LITERALS = { "null" => "nil", "undefined" => "nil", "true" => "true", "false" => "false" }.freeze
 
         Result = Data.define(:ruby, :unresolved_identifiers)
@@ -62,7 +63,14 @@ module JsxRosetta
           elsif source.match?(IDENTIFIER) then translate_identifier(source, unresolved)
           elsif (m = MEMBER_CHAIN.match(source)) then translate_member_chain(m[:root], m[:rest], unresolved)
           elsif (m = TEMPLATE_LITERAL.match(source)) then translate_template_literal(m[1], unresolved)
+          elsif (m = UNARY.match(source))
+            translate_unary(m[:op], m[:operand], unresolved)
           end
+        end
+
+        def translate_unary(operator, operand, unresolved)
+          inner = translate_ruby(operand.strip, unresolved)
+          inner && "#{operator}#{inner}"
         end
 
         def in_local_scope?(name)

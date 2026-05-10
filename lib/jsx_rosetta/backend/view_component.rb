@@ -335,7 +335,8 @@ module JsxRosetta
         return render_helper_call(invocation, translator, helper, indent: indent) if helper
 
         kwargs = component_invocation_kwargs(invocation.props, translator)
-        new_call = kwargs.empty? ? "#{invocation.name}Component.new" : "#{invocation.name}Component.new(#{kwargs})"
+        class_name = component_class_name(invocation.name)
+        new_call = kwargs.empty? ? "#{class_name}.new" : "#{class_name}.new(#{kwargs})"
 
         if invocation.children.empty?
           "#{spaces(indent)}<%= render #{new_call} %>"
@@ -343,6 +344,16 @@ module JsxRosetta
           inner = invocation.children.map { |child| render_ir_node(child, translator, indent: indent + 2) }.join("\n")
           "#{spaces(indent)}<%= render #{new_call} do %>\n#{inner}\n#{spaces(indent)}<% end %>"
         end
+      end
+
+      # JSX `<Foo.Bar>` → Ruby `Foo::BarComponent`. Plain `<Card>` stays as
+      # `CardComponent`. Each member-expression segment joins with `::`,
+      # and `Component` suffixes the leaf so the result is a constant path
+      # the host app can autoload.
+      def component_class_name(jsx_tag)
+        return "#{jsx_tag}Component" unless jsx_tag.include?(".")
+
+        "#{jsx_tag.split(".").join("::")}Component"
       end
 
       def render_helper_call(invocation, translator, helper, indent:)
@@ -499,14 +510,27 @@ module JsxRosetta
         when true then attribute.name
         when String then %(#{attribute.name}="#{attribute.value}")
         when IR::Interpolation
-          %(#{attribute.name}="#{interpolation_to_erb(attribute.value, translator)}")
+          %(#{attribute.name}="#{plain_attribute_value_erb(attribute.value, translator)}")
+        end
+      end
+
+      # Try to inline the attribute value rather than wrapping it in `<%= %>`.
+      # If the translator produces a Ruby double-quoted string with `#{…}`
+      # interpolations (typical for template-literal hrefs etc.), emit the
+      # literal portions literally and the interpolations as ERB tags.
+      def plain_attribute_value_erb(interpolation, translator)
+        translated = translator.translate(interpolation.expression)
+        if double_quoted_ruby_string?(translated&.ruby) && translated.unresolved_identifiers.empty?
+          inlined_ruby_string(translated.ruby)
+        else
+          interpolation_to_erb(interpolation, translator)
         end
       end
 
       def render_style_binding(binding, translator)
         translated = translator.translate(binding.expression)
         if double_quoted_ruby_string?(translated&.ruby)
-          %(class="#{inlined_class_string(translated.ruby)}")
+          %(class="#{inlined_ruby_string(translated.ruby)}")
         elsif translated
           %(class="<%= #{translated.ruby} %>")
         else
@@ -523,7 +547,7 @@ module JsxRosetta
       # interpolation becomes an ERB tag.
       #
       # `"btn btn-#{@variant}"` → `btn btn-<%= @variant %>`
-      def inlined_class_string(ruby_string)
+      def inlined_ruby_string(ruby_string)
         inner = ruby_string[1..-2]
         inner.gsub(/\#\{([^}]+)\}/) { "<%= #{::Regexp.last_match(1)} %>" }
       end
