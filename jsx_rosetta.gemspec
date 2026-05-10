@@ -19,6 +19,7 @@ Gem::Specification.new do |spec|
   DESC
   spec.license = "MIT"
   spec.required_ruby_version = ">= 3.2.0"
+  spec.homepage = "https://github.com/mrinterweb/jsx_rosetta"
 
   # Specify which files should be added to the gem when it is released.
   # The `git ls-files -z` loads the files in the RubyGem that have been added into git.
@@ -32,5 +33,10 @@ Gem::Specification.new do |spec|
   spec.bindir = "exe"
   spec.executables = spec.files.grep(%r{\Aexe/}) { |f| File.basename(f) }
   spec.require_paths = ["lib"]
+
+  spec.metadata["homepage_uri"] = spec.homepage
+  spec.metadata["source_code_uri"] = "https://github.com/mrinterweb/jsx_rosetta"
+  spec.metadata["bug_tracker_uri"] = "https://github.com/mrinterweb/jsx_rosetta/issues"
+  spec.metadata["changelog_uri"] = "https://github.com/mrinterweb/jsx_rosetta/blob/main/CHANGELOG.md"
   spec.metadata["rubygems_mfa_required"] = "true"
 end
