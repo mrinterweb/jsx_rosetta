@@ -1,5 +1,12 @@
 # jsx_rosetta — Implementation Plan
 
+> **Status (2026-05-10):** Phases 0–6 below are all shipped. Work after
+> Phase 6 (arrow components, spread props, cn/clsx, Stimulus extraction,
+> sidecar layout, helper mappings, RailsView backend, routes subcommand,
+> compound components, asChild polymorphism, React hooks detection, …)
+> is described in [CHANGELOG.md](CHANGELOG.md) — preserved here as
+> historical context for the original v0.1.0 design.
+
 `jsx_rosetta` is a Ruby gem that translates JSX into Rails ViewComponent
 (Ruby class + ERB template) via a three-stage pipeline. Other output
 formats (Phlex, Slim, Phoenix LiveView, etc.) are anticipated by design
