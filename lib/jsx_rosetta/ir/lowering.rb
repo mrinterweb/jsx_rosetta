@@ -220,12 +220,23 @@ module JsxRosetta
           return_stmt = body[:body].find { |stmt| stmt.type == "ReturnStatement" }
           raise lowering_error("component function has no return statement", node: body) unless return_stmt
 
-          lower_jsx(return_stmt[:argument])
+          lower_return_value(return_stmt[:argument])
         when "JSXElement", "JSXFragment"
           @local_jsx = {}
           lower_jsx(body)
         else
           raise lowering_error("unsupported component body: #{body.type}", node: body)
+        end
+      end
+
+      # Dispatch a value in return position. Distinct from lower_jsx because
+      # `return cond ? <A/> : <B/>` and `return cond && <A/>` are valid return
+      # shapes that aren't JSX nodes and need to lower as Conditional.
+      def lower_return_value(node)
+        case node.type
+        when "ConditionalExpression" then lower_ternary_expression(node)
+        when "LogicalExpression" then lower_logical_expression(node)
+        else lower_jsx(node)
         end
       end
 

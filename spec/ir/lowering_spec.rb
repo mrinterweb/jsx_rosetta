@@ -446,6 +446,25 @@ RSpec.describe JsxRosetta::IR::Lowering do
 
       expect(ir.body.children.first).to be_a(JsxRosetta::IR::Interpolation)
     end
+
+    it "lowers a top-level ternary return to IR::Conditional" do
+      ir = lower("function X({ open }) { return open ? <a /> : <b />; }")
+
+      expect(ir.body).to be_a(JsxRosetta::IR::Conditional)
+      expect(ir.body.test).to eq(JsxRosetta::IR::Interpolation.new(expression: "open"))
+      expect(ir.body.consequent).to be_a(JsxRosetta::IR::Element)
+      expect(ir.body.consequent.tag).to eq("a")
+      expect(ir.body.alternate).to be_a(JsxRosetta::IR::Element)
+      expect(ir.body.alternate.tag).to eq("b")
+    end
+
+    it "lowers a top-level `cond && JSX` return to IR::Conditional with no alternate" do
+      ir = lower("function X({ visible }) { return visible && <p />; }")
+
+      expect(ir.body).to be_a(JsxRosetta::IR::Conditional)
+      expect(ir.body.alternate).to be_nil
+      expect(ir.body.consequent).to be_a(JsxRosetta::IR::Element)
+    end
   end
 
   describe "loops" do
