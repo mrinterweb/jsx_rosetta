@@ -1,7 +1,11 @@
 # frozen_string_literal: true
 
 RSpec.describe JsxRosetta::Backend::ViewComponent do
-  subject(:backend) { described_class.new }
+  # Default to flat layout in these tests — the sidecar layout has its own
+  # describe block below. Most existing assertions index by flat paths
+  # (e.g. "x_component.html.erb"), and rewriting them all is churn that
+  # adds no signal beyond what the sidecar describe block covers.
+  subject(:backend) { described_class.new(layout: :flat) }
 
   def files_for(jsx_source)
     component = JsxRosetta.lower(jsx_source)
@@ -262,7 +266,8 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
     it "respects an explicit helpers map override" do
       files = JsxRosetta.translate(
         'function X() { return <Btn href="/" />; }',
-        helpers: { "Btn" => { method: :button_to, positional: :href } }
+        helpers: { "Btn" => { method: :button_to, positional: :href } },
+        layout: :flat
       ).to_h { |f| [f.path, f.contents] }
 
       expect(files["x_component.html.erb"]).to include('<%= button_to("/") %>')
@@ -271,7 +276,8 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
     it "disables helper mapping entirely when helpers: false is passed" do
       files = JsxRosetta.translate(
         'function X() { return <Link href="/">Hi</Link>; }',
-        helpers: false
+        helpers: false,
+        layout: :flat
       ).to_h { |f| [f.path, f.contents] }
 
       expect(files["x_component.html.erb"]).to include("LinkComponent.new")
@@ -420,6 +426,38 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       files = files_for("function MyButton() { return <div />; }")
 
       expect(files.keys).to contain_exactly("my_button_component.rb", "my_button_component.html.erb")
+    end
+  end
+
+  describe "sidecar layout (default)" do
+    let(:sidecar_backend) { described_class.new }
+
+    def sidecar_files_for(jsx_source)
+      component = JsxRosetta.lower(jsx_source)
+      sidecar_backend.emit(component).to_h { |file| [file.path, file.contents] }
+    end
+
+    it "puts the .rb at the top level and the .html.erb in a sidecar subdirectory" do
+      files = sidecar_files_for("function X() { return <p>Hi</p>; }")
+
+      expect(files.keys).to contain_exactly(
+        "x_component.rb",
+        "x_component/x_component.html.erb"
+      )
+    end
+
+    it "puts the Stimulus controller in the sidecar subdirectory alongside the template" do
+      files = sidecar_files_for("function CopyButton() { return <button onClick={() => copy()}>x</button>; }")
+
+      expect(files.keys).to contain_exactly(
+        "copy_button_component.rb",
+        "copy_button_component/copy_button_component.html.erb",
+        "copy_button_component/copy_button_controller.js"
+      )
+    end
+
+    it "raises ArgumentError on an unknown layout" do
+      expect { described_class.new(layout: :nested) }.to raise_error(ArgumentError, /unknown layout/)
     end
   end
 end

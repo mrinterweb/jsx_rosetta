@@ -36,13 +36,18 @@ module JsxRosetta
         "Image" => { method: :image_tag, positional: :src }.freeze
       }.freeze
 
-      def initialize(helpers: nil)
+      def initialize(helpers: nil, layout: :sidecar)
         super()
         @helpers = case helpers
                    when nil then DEFAULT_HELPERS
                    when false then {}
                    else helpers
                    end
+        unless %i[sidecar flat].include?(layout)
+          raise ArgumentError, "unknown layout: #{layout.inspect} (expected :sidecar or :flat)"
+        end
+
+        @layout = layout
       end
 
       def emit(component)
@@ -55,15 +60,24 @@ module JsxRosetta
 
         files = [
           File.new(path: "#{base_name}.rb", contents: render_ruby_class(component, translator)),
-          File.new(path: "#{base_name}.html.erb", contents: render_erb_template(component, translator))
+          File.new(path: erb_path(base_name), contents: render_erb_template(component, translator))
         ]
         if component.stimulus_methods.any?
           files << File.new(
-            path: "#{AST::Inflector.underscore(component.name)}_controller.js",
+            path: stimulus_path(component, base_name),
             contents: render_stimulus_controller_js(component)
           )
         end
         files
+      end
+
+      def erb_path(base_name)
+        @layout == :sidecar ? "#{base_name}/#{base_name}.html.erb" : "#{base_name}.html.erb"
+      end
+
+      def stimulus_path(component, base_name)
+        controller_filename = "#{AST::Inflector.underscore(component.name)}_controller.js"
+        @layout == :sidecar ? "#{base_name}/#{controller_filename}" : controller_filename
       end
 
       def stimulus_identifier(component)

@@ -75,6 +75,7 @@ module JsxRosetta
       FileUtils.mkdir_p(out_dir)
       files.each do |file|
         target = File.join(out_dir, file.path)
+        FileUtils.mkdir_p(File.dirname(target))
         File.write(target, file.contents)
         @stdout.puts "wrote #{target}"
       end

@@ -33,3 +33,6 @@ Metrics/CyclomaticComplexity:
 
 Metrics/PerceivedComplexity:
   Max: 10
+
+Metrics/ParameterLists:
+  Max: 6

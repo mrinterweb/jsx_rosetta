@@ -40,13 +40,13 @@ RSpec.describe JsxRosetta::CLI do
   end
 
   describe "translate" do
-    it "writes the translated files to the output directory" do
+    it "writes the translated files to the output directory (sidecar layout)" do
       Dir.mktmpdir do |dir|
         result = run("translate", fixture_path("jsx", "button.jsx"), "-o", dir)
 
         expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_OK)
         expect(File).to exist(File.join(dir, "button_component.rb"))
-        expect(File).to exist(File.join(dir, "button_component.html.erb"))
+        expect(File).to exist(File.join(dir, "button_component", "button_component.html.erb"))
         expect(result[:stdout]).to include("wrote")
       end
     end

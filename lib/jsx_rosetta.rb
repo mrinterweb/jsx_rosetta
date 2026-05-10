@@ -14,16 +14,17 @@ module JsxRosetta
     IR.lower(ast, source: source)
   end
 
-  def self.translate(source, backend: :view_component, helpers: nil, typescript: false, source_filename: nil)
+  def self.translate(source, backend: :view_component, helpers: nil, layout: :sidecar,
+                     typescript: false, source_filename: nil)
     ast = parse(source, typescript: typescript, source_filename: source_filename)
     components = IR.lower_all(ast, source: source)
-    backend_instance = backend_for(backend, helpers: helpers)
+    backend_instance = backend_for(backend, helpers: helpers, layout: layout)
     components.flat_map { |component| backend_instance.emit(component) }
   end
 
-  def self.backend_for(name, helpers: nil)
+  def self.backend_for(name, helpers: nil, layout: :sidecar)
     case name
-    when :view_component then Backend::ViewComponent.new(helpers: helpers)
+    when :view_component then Backend::ViewComponent.new(helpers: helpers, layout: layout)
     else
       raise Error, "unknown backend: #{name.inspect}"
     end
