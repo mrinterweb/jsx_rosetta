@@ -33,6 +33,7 @@ module JsxRosetta
       case command
       when "install" then run_install
       when "translate" then run_translate
+      when "routes" then run_routes
       when "parse" then run_parse
       when "version", "-v", "--version" then run_version
       when nil, "help", "-h", "--help" then print_help(EXIT_OK)
@@ -80,6 +81,29 @@ module JsxRosetta
       EXIT_OK
     rescue ParseError, IR::Lowering::LoweringError => e
       @stderr.puts "jsx_rosetta translate: #{e.message}"
+      EXIT_FAILURE
+    end
+
+    def run_routes
+      options, positional = parse_translate_options
+      input_path = positional.first
+      return missing_argument("routes FILE [-o OUT.rb]", "routes") unless input_path
+
+      typescript = options[:tsx] || input_path.end_with?(".tsx")
+      source = File.read(input_path)
+      ast = JsxRosetta.parse(source, typescript: typescript, source_filename: input_path)
+      route_tree = Routes.lower(ast)
+      script = Backend::RoutesScript.new(source_path: input_path).emit(route_tree)
+
+      if options[:out]
+        File.write(options[:out], script)
+        @stdout.puts "wrote #{options[:out]}"
+      else
+        @stdout.print(script)
+      end
+      EXIT_OK
+    rescue ParseError => e
+      @stderr.puts "jsx_rosetta routes: #{e.message}"
       EXIT_FAILURE
     end
 
@@ -135,6 +159,9 @@ module JsxRosetta
           install                    Install the gem's Node sidecar dependencies (runs `npm install`).
           translate FILE [-o DIR]    Translate JSX/TSX into ViewComponent files in DIR (default: ".").
                                      Pass --tsx to force TypeScript parsing if the input is .jsx.
+          routes FILE [-o OUT.rb]    Parse <Route path=... element={<X/>} /> patterns from FILE
+                                     and emit a reviewable Ruby script that calls `rails generate
+                                     controller` and prints suggested config/routes.rb additions.
           parse FILE                 Parse the input and print the Babel AST as JSON.
           version                    Print the gem version.
           help                       Show this help.

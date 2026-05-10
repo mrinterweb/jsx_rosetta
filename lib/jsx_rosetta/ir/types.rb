@@ -209,6 +209,25 @@ module JsxRosetta
       include Node
     end
 
+    # A flat list of React Router routes parsed from a router file.
+    # Distinct from Component — RouteTree is the top-level result of
+    # `JsxRosetta::Routes.lower(file)`, not part of a translated component.
+    #
+    # routes : [RouteEntry]
+    RouteTree = Data.define(:routes) do
+      include Node
+    end
+
+    # A single React Router route entry.
+    #
+    # path         : String — the JSX path attribute verbatim (e.g. "/posts/:id").
+    # element_name : String — the JSX element name from element={<X />}
+    #                (e.g. "PostShow"). Member-expression forms ("Layout.Index")
+    #                are flattened to the rightmost name.
+    RouteEntry = Data.define(:path, :element_name) do
+      include Node
+    end
+
     # A handler method to be emitted on the generated Stimulus controller.
     # Body translation is deferred to the human reviewer; we preserve the
     # original JS body verbatim.
