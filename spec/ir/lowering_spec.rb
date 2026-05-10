@@ -353,6 +353,33 @@ RSpec.describe JsxRosetta::IR::Lowering do
 
       expect(ir.props).to eq([JsxRosetta::IR::Prop.new(name: "props", default: nil)])
     end
+
+    it "captures the rest-binding name into rest_prop_name and excludes it from props" do
+      ir = lower("function X({ a, ...rest }) { return <div />; }")
+
+      expect(ir.props).to eq([JsxRosetta::IR::Prop.new(name: "a", default: nil)])
+      expect(ir.rest_prop_name).to eq("rest")
+    end
+
+    it "leaves rest_prop_name nil when there is no rest binding" do
+      ir = lower("function X({ a }) { return <div />; }")
+
+      expect(ir.rest_prop_name).to be_nil
+    end
+  end
+
+  describe "spread attributes" do
+    it "lowers `{...rest}` to IR::SpreadAttribute on an Element" do
+      ir = lower("function X({ rest }) { return <div {...rest} />; }")
+
+      expect(ir.body.attributes).to eq([JsxRosetta::IR::SpreadAttribute.new(expression: "rest")])
+    end
+
+    it "lowers `{...rest}` to IR::SpreadAttribute on a ComponentInvocation" do
+      ir = lower("function X({ rest }) { return <Inner {...rest} />; }")
+
+      expect(ir.body.props).to eq([JsxRosetta::IR::SpreadAttribute.new(expression: "rest")])
+    end
   end
 
   describe "exported components" do
@@ -427,7 +454,8 @@ RSpec.describe JsxRosetta::IR::Lowering do
           children: [
             JsxRosetta::IR::Slot.new(name: "children")
           ]
-        )
+        ),
+        rest_prop_name: nil
       )
 
       expect(ir).to eq(expected)

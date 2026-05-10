@@ -30,6 +30,7 @@ module JsxRosetta
 
       def emit(component)
         prop_names = component.props.map(&:name)
+        prop_names << component.rest_prop_name if component.rest_prop_name
         translator = ExpressionTranslator.new(prop_names: prop_names)
 
         base_name = "#{AST::Inflector.underscore(component.name)}_component"
@@ -48,8 +49,9 @@ module JsxRosetta
 
       def render_ruby_class(component, translator)
         props = initializable_props(component)
+        rest_name = component.rest_prop_name
 
-        if props.empty?
+        if props.empty? && rest_name.nil?
           <<~RUBY
             # frozen_string_literal: true
 
@@ -57,23 +59,26 @@ module JsxRosetta
             end
           RUBY
         else
-          render_ruby_class_with_props(component, props, translator)
+          render_ruby_class_with_props(component, props, rest_name, translator)
         end
       end
 
-      def render_ruby_class_with_props(component, props, translator)
-        kwargs = props.map { |prop| ruby_kwarg(prop, translator) }.join(", ")
+      def render_ruby_class_with_props(component, props, rest_name, translator)
+        kwargs = props.map { |prop| ruby_kwarg(prop, translator) }
+        kwargs << "**#{rest_name}" if rest_name
+
         assignments = props.map do |prop|
           snake = AST::Inflector.underscore(prop.name)
           "    @#{snake} = #{snake}"
-        end.join("\n")
+        end
+        assignments << "    @#{rest_name} = #{rest_name}" if rest_name
 
         <<~RUBY
           # frozen_string_literal: true
 
           class #{component.name}Component < ::ViewComponent::Base
-            def initialize(#{kwargs})
-          #{assignments}
+            def initialize(#{kwargs.join(", ")})
+          #{assignments.join("\n")}
             end
           end
         RUBY
@@ -129,6 +134,8 @@ module JsxRosetta
       end
 
       def render_element(element, translator, indent:)
+        return render_element_with_tag_builder(element, translator, indent: indent) if needs_tag_builder?(element)
+
         attrs = render_attributes(element.attributes, translator)
         attrs_segment = attrs.empty? ? "" : " #{attrs}"
 
@@ -145,8 +152,74 @@ module JsxRosetta
         end
       end
 
+      def needs_tag_builder?(element)
+        element.attributes.any?(IR::SpreadAttribute)
+      end
+
+      def render_element_with_tag_builder(element, translator, indent:)
+        builder_args = render_tag_builder_args(element.attributes, translator)
+        prefix = "<%= tag.#{element.tag}(#{builder_args})"
+
+        if VOID_ELEMENTS.include?(element.tag) || element.children.empty?
+          "#{spaces(indent)}#{prefix} %>"
+        else
+          inner = element.children.map { |child| render_ir_node(child, translator, indent: indent + 2) }.join("\n")
+          "#{spaces(indent)}#{prefix} do %>\n#{inner}\n#{spaces(indent)}<% end %>"
+        end
+      end
+
+      def render_tag_builder_args(attributes, translator)
+        events, others = attributes.partition { |attr| attr.is_a?(IR::EventBinding) }
+        spreads, plain = others.partition { |attr| attr.is_a?(IR::SpreadAttribute) }
+
+        pieces = plain.filter_map { |attr| tag_builder_kwarg(attr, translator) }
+        pieces << tag_builder_data_action(events, translator) if events.any?
+        pieces.concat(spreads.map { |s| "**#{tag_builder_spread(s.expression, translator)}" })
+        pieces.join(", ")
+      end
+
+      def tag_builder_kwarg(attribute, translator)
+        case attribute
+        when IR::StyleBinding
+          translated = translator.translate(attribute.expression)
+          ruby = translated ? translated.ruby : attribute.expression.inspect
+          "class: #{ruby}"
+        when IR::Attribute
+          tag_builder_plain_kwarg(attribute, translator)
+        end
+      end
+
+      def tag_builder_plain_kwarg(attribute, translator)
+        key = attribute.name.match?(/\A[a-z_][a-z0-9_]*\z/i) ? "#{attribute.name}:" : "#{attribute.name.inspect} =>"
+        "#{key} #{tag_builder_value(attribute.value, translator)}"
+      end
+
+      def tag_builder_value(value, translator)
+        case value
+        when true then "true"
+        when String then value.inspect
+        when IR::Interpolation
+          translated = translator.translate(value.expression)
+          translated ? translated.ruby : value.expression.inspect
+        end
+      end
+
+      def tag_builder_data_action(events, translator)
+        rubies = events.map do |event|
+          translated = translator.translate(event.handler.expression)
+          translated ? translated.ruby : event.handler.expression.inspect
+        end
+        joined = rubies.size == 1 ? rubies.first : %("#{rubies.map { |r| "\#{#{r}}" }.join(" ")}")
+        %("data-action" => #{joined})
+      end
+
+      def tag_builder_spread(expression, translator)
+        translated = translator.translate(expression)
+        translated ? translated.ruby : expression
+      end
+
       def render_component_invocation(invocation, translator, indent:)
-        kwargs = invocation.props.filter_map { |attr| component_kwarg(attr, translator) }.join(", ")
+        kwargs = component_invocation_kwargs(invocation.props, translator)
         new_call = kwargs.empty? ? "#{invocation.name}Component.new" : "#{invocation.name}Component.new(#{kwargs})"
 
         if invocation.children.empty?
@@ -155,6 +228,13 @@ module JsxRosetta
           inner = invocation.children.map { |child| render_ir_node(child, translator, indent: indent + 2) }.join("\n")
           "#{spaces(indent)}<%= render #{new_call} do %>\n#{inner}\n#{spaces(indent)}<% end %>"
         end
+      end
+
+      def component_invocation_kwargs(props, translator)
+        spreads, others = props.partition { |attr| attr.is_a?(IR::SpreadAttribute) }
+        parts = others.filter_map { |attr| component_kwarg(attr, translator) }
+        parts.concat(spreads.map { |s| "**#{tag_builder_spread(s.expression, translator)}" })
+        parts.join(", ")
       end
 
       def render_fragment(fragment, translator, indent:)
@@ -213,8 +293,6 @@ module JsxRosetta
       end
 
       def render_plain_attribute(attribute, translator)
-        return nil if attribute.name == "__spread__"
-
         case attribute.value
         when true then attribute.name
         when String then %(#{attribute.name}="#{attribute.value}")
@@ -265,13 +343,21 @@ module JsxRosetta
       def component_kwarg(attribute, translator)
         case attribute
         when IR::Attribute
-          name = AST::Inflector.underscore(attribute.name)
-          value = component_kwarg_value(attribute.value, translator)
-          "#{name}: #{value}"
+          component_attribute_kwarg(attribute, translator)
         when IR::StyleBinding
           translated = translator.translate(attribute.expression)
           ruby = translated ? translated.ruby : attribute.expression.inspect
           "class: #{ruby}"
+        end
+      end
+
+      def component_attribute_kwarg(attribute, translator)
+        value = component_kwarg_value(attribute.value, translator)
+        if attribute.name.match?(/\A[a-z_][a-z0-9_]*\z/i)
+          name = AST::Inflector.underscore(attribute.name)
+          "#{name}: #{value}"
+        else
+          "#{attribute.name.inspect} => #{value}"
         end
       end
 

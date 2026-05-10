@@ -117,39 +117,46 @@ module JsxRosetta
           raise lowering_error("anonymous component functions are not supported", node: function)
         end
 
-        props = lower_props(function[:params])
+        props, rest_prop_name = lower_params(function[:params])
         @prop_names = props.map(&:name)
 
         Component.new(
           name: name,
           props: props,
-          body: lower_function_body(function[:body])
+          body: lower_function_body(function[:body]),
+          rest_prop_name: rest_prop_name
         )
       end
 
-      def lower_props(params)
-        return [] if params.nil? || params.empty?
+      def lower_params(params)
+        return [[], nil] if params.nil? || params.empty?
 
         first_param = params.first
         case first_param.type
         when "ObjectPattern"
-          first_param[:properties].map { |property| lower_prop(property) }
+          lower_object_pattern_params(first_param)
         when "Identifier"
-          [Prop.new(name: first_param[:name], default: nil)]
+          [[Prop.new(name: first_param[:name], default: nil)], nil]
         else
           raise lowering_error("unsupported parameter shape: #{first_param.type}", node: first_param)
         end
       end
 
-      def lower_prop(property)
-        case property.type
-        when "ObjectProperty"
-          lower_object_prop(property)
-        when "RestElement"
-          Prop.new(name: source_of(property[:argument]), default: nil)
-        else
-          raise lowering_error("unsupported prop pattern: #{property.type}", node: property)
+      def lower_object_pattern_params(pattern)
+        props = []
+        rest_name = nil
+        pattern[:properties].each do |property|
+          case property.type
+          when "ObjectProperty"
+            props << lower_object_prop(property)
+          when "RestElement"
+            argument = property[:argument]
+            rest_name = argument.type == "Identifier" ? argument[:name] : source_of(argument)
+          else
+            raise lowering_error("unsupported prop pattern: #{property.type}", node: property)
+          end
         end
+        [props, rest_name]
       end
 
       def lower_object_prop(property)
@@ -391,7 +398,7 @@ module JsxRosetta
         when AST::JSXAttribute
           lower_jsx_attribute(attr)
         when AST::JSXSpreadAttribute
-          Attribute.new(name: "__spread__", value: Interpolation.new(expression: source_of(attr.argument)))
+          SpreadAttribute.new(expression: source_of(attr.argument))
         end
       end
 

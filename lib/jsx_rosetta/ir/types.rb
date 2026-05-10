@@ -9,10 +9,14 @@ module JsxRosetta
 
     # A translated component definition. The root of a lowered IR tree.
     #
-    # name  : String — component name as it appears in JSX (e.g. "Button").
-    # props : [Prop]
-    # body  : Node — usually an Element or Fragment.
-    Component = Data.define(:name, :props, :body) do
+    # name           : String — component name as it appears in JSX (e.g. "Button").
+    # props          : [Prop]
+    # body           : Node — usually an Element or Fragment.
+    # rest_prop_name : String | nil — name of a rest-destructured prop
+    #                  (`function X({ a, ...rest })`). When non-nil, the
+    #                  backend should generate a `**rest` initializer kwarg
+    #                  and make it available via `@rest_prop_name`.
+    Component = Data.define(:name, :props, :body, :rest_prop_name) do
       include Node
     end
 
@@ -40,6 +44,15 @@ module JsxRosetta
     # props    : [Attribute | StyleBinding]
     # children : [Element | ComponentInvocation | Text | Interpolation | Fragment]
     ComponentInvocation = Data.define(:name, :props, :children) do
+      include Node
+    end
+
+    # A spread attribute: `{...rest}` in JSX. The expression is preserved
+    # verbatim; backends emit it as `**<expression>` or equivalent.
+    #
+    # expression : String — verbatim JS source of the spread argument
+    #              (typically a single identifier, sometimes a member chain).
+    SpreadAttribute = Data.define(:expression) do
       include Node
     end
 

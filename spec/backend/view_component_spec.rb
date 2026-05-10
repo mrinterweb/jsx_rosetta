@@ -213,16 +213,72 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(files["x_component.html.erb"]).not_to include("</img>")
     end
 
+    it "switches to tag.* builder when an Element has a spread attribute" do
+      files = files_for("function X({ rest }) { return <button className=\"x\" {...rest}>Click</button>; }")
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include("<%= tag.button(class: \"x\", **@rest) do %>")
+      expect(erb).to include("<% end %>")
+      expect(erb).not_to include("<button class=")
+    end
+
+    it "renders a void element with spread via the tag builder" do
+      files = files_for("function X({ rest }) { return <input type=\"text\" {...rest} />; }")
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include("<%= tag.input(type: \"text\", **@rest) %>")
+      expect(erb).not_to include("<input")
+    end
+
     it "renders nested component invocations as `render`" do
       files = files_for("function X() { return <div><Inner foo={bar} /></div>; }")
 
       expect(files["x_component.html.erb"]).to include("<%= render InnerComponent.new(foo: bar) %>")
     end
 
+    it "passes a spread argument as **rest in a component invocation" do
+      files = files_for("function X({ rest }) { return <Inner title=\"x\" {...rest} />; }")
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include('<%= render InnerComponent.new(title: "x", **@rest) %>')
+    end
+
+    it "spreads a rest-destructured prop as **@rest_name (not **rest_name)" do
+      files = files_for("function X({ a, ...props }) { return <Inner title={a} {...props} />; }")
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include("**@props")
+      expect(erb).not_to match(/\*\*props(?!\w)/) # bare `**props` would mean an undefined local
+    end
+
+    it "uses a quoted-key hash entry for hyphenated component-invocation kwargs" do
+      files = files_for("function X({ label }) { return <Inner aria-label={label} />; }")
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include('<%= render InnerComponent.new("aria-label" => @label) %>')
+    end
+
     it "emits a TODO marker for unsupported interpolations" do
       files = files_for("function X() { return <p>{a + b}</p>; }")
 
       expect(files["x_component.html.erb"]).to include("<%# TODO: translate")
+    end
+
+    it "generates an initializer with **rest when the component destructures a rest binding" do
+      files = files_for("function X({ a, ...rest }) { return <div />; }")
+
+      ruby = files["x_component.rb"]
+      expect(ruby).to include("def initialize(a: nil, **rest)")
+      expect(ruby).to include("@a = a")
+      expect(ruby).to include("@rest = rest")
+    end
+
+    it "generates an initializer with only **rest when no other props are present" do
+      files = files_for("function X({ ...rest }) { return <div />; }")
+
+      ruby = files["x_component.rb"]
+      expect(ruby).to include("def initialize(**rest)")
+      expect(ruby).to include("@rest = rest")
     end
 
     it "renders a JSX block comment as an ERB comment" do
