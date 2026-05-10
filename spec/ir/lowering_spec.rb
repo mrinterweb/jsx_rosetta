@@ -645,6 +645,28 @@ RSpec.describe JsxRosetta::IR::Lowering do
     end
   end
 
+  describe "skipping non-component top-level functions" do
+    it "skips lowercase-named functions (React convention: hooks are camelCase, helpers lowercase)" do
+      source = <<~JSX
+        function useCarousel() { return context; }
+        function Carousel({ children }) { return <div>{children}</div>; }
+      JSX
+
+      ir = JsxRosetta::IR.lower_all(JsxRosetta.parse(source), source: source)
+      expect(ir.map(&:name)).to eq(["Carousel"])
+    end
+
+    it "skips lowercase const-bound arrows alongside PascalCase ones" do
+      source = <<~JSX
+        const useFormField = () => ({});
+        const Form = () => <form />;
+      JSX
+
+      ir = JsxRosetta::IR.lower_all(JsxRosetta.parse(source), source: source)
+      expect(ir.map(&:name)).to eq(["Form"])
+    end
+  end
+
   describe "arrow-function components" do
     it "lowers `const X = () => { return <jsx>; }`" do
       ir = lower("const Greeting = () => { return <p>Hi</p>; };")

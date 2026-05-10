@@ -100,9 +100,19 @@ module JsxRosetta
       end
 
       def find_component_functions(program)
-        program.body.flat_map do |stmt|
-          extract_components(stmt)
-        end.compact
+        program.body.flat_map { |stmt| extract_components(stmt) }
+                    .compact
+                    .select { |(name, _)| component_name?(name) }
+      end
+
+      # React convention: components are PascalCase, hooks are camelCase
+      # starting with `use`, plain helpers are lowercase. Only PascalCase
+      # names are treated as components.
+      def component_name?(name)
+        return false if name.nil? || name.empty?
+
+        first = name[0]
+        first == first.upcase && first != first.downcase
       end
 
       def extract_components(stmt)
