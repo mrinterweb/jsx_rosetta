@@ -465,6 +465,44 @@ RSpec.describe JsxRosetta::IR::Lowering do
       expect(ir.body.alternate).to be_nil
       expect(ir.body.consequent).to be_a(JsxRosetta::IR::Element)
     end
+
+    it "lowers a multi-branch if/else-if/else of all-return branches to a Conditional chain" do
+      ir = lower(<<~JS)
+        function X({ kind }) {
+          if (kind === "a") {
+            return <a />;
+          } else if (kind === "b") {
+            return <b />;
+          } else {
+            return <c />;
+          }
+        }
+      JS
+
+      cond = ir.body
+      expect(cond).to be_a(JsxRosetta::IR::Conditional)
+      expect(cond.consequent).to be_a(JsxRosetta::IR::Element)
+      expect(cond.consequent.tag).to eq("a")
+
+      else_if = cond.alternate
+      expect(else_if).to be_a(JsxRosetta::IR::Conditional)
+      expect(else_if.consequent.tag).to eq("b")
+      expect(else_if.alternate).to be_a(JsxRosetta::IR::Element)
+      expect(else_if.alternate.tag).to eq("c")
+    end
+
+    it "lowers a brace-less if/else of bare returns" do
+      ir = lower("function X({ open }) { if (open) return <a />; else return <b />; }")
+
+      expect(ir.body).to be_a(JsxRosetta::IR::Conditional)
+      expect(ir.body.consequent.tag).to eq("a")
+      expect(ir.body.alternate.tag).to eq("b")
+    end
+
+    it "still raises when a branch has side-effect statements before its return" do
+      jsx = "function X({ kind }) { if (kind) { sideEffect(); return <a />; } else { return <b />; } }"
+      expect { lower(jsx) }.to raise_error(JsxRosetta::IR::Lowering::LoweringError, /no return statement/)
+    end
   end
 
   describe "loops" do

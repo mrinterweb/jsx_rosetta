@@ -218,9 +218,12 @@ module JsxRosetta
         when "BlockStatement"
           collect_local_bindings(body[:body])
           return_stmt = body[:body].find { |stmt| stmt.type == "ReturnStatement" }
-          raise lowering_error("component function has no return statement", node: body) unless return_stmt
+          return lower_return_value(return_stmt[:argument]) if return_stmt
 
-          lower_return_value(return_stmt[:argument])
+          chained = lower_if_return_chain_from_body(body[:body])
+          return chained if chained
+
+          raise lowering_error("component function has no return statement", node: body)
         when "JSXElement", "JSXFragment"
           @local_jsx = {}
           lower_jsx(body)
@@ -237,6 +240,54 @@ module JsxRosetta
         when "ConditionalExpression" then lower_ternary_expression(node)
         when "LogicalExpression" then lower_logical_expression(node)
         else lower_jsx(node)
+        end
+      end
+
+      # Recognize a body whose only return paths are inside an
+      # `if/else if/else` chain at the bottom (no unconditional return).
+      # Lowers the chain to nested IR::Conditional. Returns nil when the
+      # shape doesn't fit.
+      def lower_if_return_chain_from_body(statements)
+        if_stmt = statements.last
+        return nil unless if_stmt.is_a?(AST::Node) && if_stmt.type == "IfStatement"
+
+        lower_if_return_chain(if_stmt)
+      end
+
+      def lower_if_return_chain(if_stmt)
+        consequent = lower_return_branch(if_stmt[:consequent])
+        return nil unless consequent
+
+        alternate_node = if_stmt[:alternate]
+        alternate = case alternate_node&.type
+                    when nil then nil
+                    when "IfStatement" then lower_if_return_chain(alternate_node)
+                    else lower_return_branch(alternate_node)
+                    end
+        return nil if alternate_node && alternate.nil?
+
+        Conditional.new(
+          test: Interpolation.new(expression: source_of(if_stmt[:test])),
+          consequent: consequent,
+          alternate: alternate
+        )
+      end
+
+      # An if-chain branch lowers to a return value only when it is a
+      # single-statement block ending in `return X;` (or a bare `return X;`
+      # without braces). Multi-statement branches imply side effects we
+      # don't preserve, so we bail.
+      def lower_return_branch(branch)
+        case branch.type
+        when "ReturnStatement"
+          branch[:argument] && lower_return_value(branch[:argument])
+        when "BlockStatement"
+          return nil if branch[:body].size != 1
+
+          inner = branch[:body].first
+          return nil unless inner.type == "ReturnStatement" && inner[:argument]
+
+          lower_return_value(inner[:argument])
         end
       end
 
