@@ -912,6 +912,51 @@ module JsxRosetta
         when IR::Interpolation
           translated = translator.translate(value.expression)
           translated ? translated.ruby : "nil # TODO: translate #{value.expression.inspect}"
+        when IR::ComponentInvocation
+          component_invocation_inline_value(value, translator)
+        when IR::Element, IR::Fragment
+          "nil # TODO: couldn't inline JSX value: #{jsx_value_summary(value)}"
+        end
+      end
+
+      # JSX appearing as an attribute value — `icon={<Foo/>}` etc. — lowered
+      # in v0.5.x. Emit a component-instance value (`icon: FooComponent.new`)
+      # so the receiving ViewComponent can `render @icon`. With children we
+      # use Ruby block syntax (`FooComponent.new { ... }`) when the body
+      # fits one line; otherwise we drop with a TODO so the kwarg stays
+      # valid Ruby. Cases requiring a Phlex execution context (IR::Element,
+      # multi-element IR::Fragment) drop with a TODO too — out of MVP scope.
+      def component_invocation_inline_value(invocation, translator)
+        return inline_render_prop_todo if invocation.children.any?(IR::RenderProp)
+
+        kwargs = component_invocation_kwargs(invocation.props, translator)
+        class_name = component_class_name(invocation.name)
+        new_call = kwargs.empty? ? "#{class_name}.new" : "#{class_name}.new(#{kwargs})"
+        return new_call if invocation.children.empty?
+
+        block_body = inline_children_body(invocation.children, translator)
+        return "nil # TODO: couldn't inline JSX value: <#{invocation.name}...>" unless block_body
+
+        "#{new_call} { #{block_body} }"
+      end
+
+      def inline_render_prop_todo
+        "nil # TODO: couldn't inline render-prop value"
+      end
+
+      def inline_children_body(children, translator)
+        rendered = children.map { |c| render_ir_node(c, translator, indent: 0).strip }
+        return nil if rendered.any? { |line| line.include?("\n") }
+
+        joined = rendered.join("; ")
+        joined.empty? || joined.length > 100 ? nil : joined
+      end
+
+      def jsx_value_summary(value)
+        case value
+        when IR::Element then "<#{value.tag}...>"
+        when IR::Fragment then "<>...</>"
+        else "<JSX>"
         end
       end
 

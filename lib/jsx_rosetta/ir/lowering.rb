@@ -1667,15 +1667,36 @@ module JsxRosetta
       # Recursively lower an arbitrary JS expression into structured IR
       # when possible: ObjectExpression → ObjectLiteral, ArrayExpression
       # → ArrayLiteral, ArrowFunctionExpression / FunctionExpression →
-      # Lambda. Everything else falls back to the verbatim Interpolation
-      # so simpler ExpressionTranslator paths still get a crack at it.
+      # Lambda, JSXElement / JSXFragment → the same Element / Fragment /
+      # ComponentInvocation that JSX children lower to. Everything else
+      # falls back to the verbatim Interpolation so simpler
+      # ExpressionTranslator paths still get a crack at it.
       def lower_value_expression(expression)
         case expression.type
         when "ObjectExpression" then lower_object_literal(expression)
         when "ArrayExpression" then lower_array_literal(expression)
         when "ArrowFunctionExpression", "FunctionExpression" then lower_value_lambda(expression)
+        when "JSXElement", "JSXFragment" then lower_jsx_value(expression)
         else
           Interpolation.new(expression: source_of(expression))
+        end
+      end
+
+      # JSX appearing in a non-child position — typically as an attribute
+      # value (`icon={<Foo/>}`, `fallback={<Loading/>}`). Lowered through
+      # the same `lower_jsx` pipeline as children, so the resulting IR
+      # node (Element / ComponentInvocation / Fragment) carries all the
+      # structure the backend can use to emit a real Phlex render call
+      # in place of the old "[untranslated: …]" drop. Single-child
+      # Fragments (`<><Foo/></>`, often emitted by React idioms or as a
+      # workaround for "one node required") collapse to the inner child
+      # so the kwarg value isn't an awkwardly-wrapped Fragment.
+      def lower_jsx_value(expression)
+        lowered = lower_jsx(expression)
+        if lowered.is_a?(Fragment) && lowered.children.length == 1
+          lowered.children.first
+        else
+          lowered
         end
       end
 

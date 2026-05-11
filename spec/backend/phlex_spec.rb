@@ -414,13 +414,16 @@ RSpec.describe JsxRosetta::Backend::Phlex do
   end
 
   describe "preserving untranslatable attribute values" do
-    it "emits a TODO comment line above the element when a JSX-element prop can't translate" do
+    it "emits a JSX component as an inline component-instance value" do
+      # `icon={<LeftOutlined size={12} />}` used to drop entirely as a TODO,
+      # so any rendered file lost its icons / fallbacks / tooltip bodies.
+      # Now lowers as IR::ComponentInvocation and emits inline so the
+      # receiving Ruby component can `render @icon`.
       source = "function X() { return <Button icon={<LeftOutlined size={12} />} />; }"
       content = file_contents(source, "x.rb")
 
-      expect(content).to include("# TODO: attribute \"icon\" dropped — couldn't translate:")
-      expect(content).to include("<LeftOutlined")
-      expect(content).to include("icon: nil")
+      expect(content).to include("icon: LeftOutlined.new(size: 12)")
+      expect(content).not_to include('# TODO: attribute "icon" dropped')
     end
 
     it "recursively translates an array-of-objects literal prop into a Ruby array of hashes" do
@@ -632,6 +635,61 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       # Inside the block, `fields` is the param, so the leaf should be
       # `plain fields` — not `plain nil` and not a TODO.
       expect(content).to match(/plain fields(?!\w)/)
+    end
+  end
+
+  describe "JSX as attribute value" do
+    it "lowers a bare-component JSX value to `ClassRef.new` (no children, no kwargs)" do
+      source = "function X() { return <Suspense fallback={<Loading />} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("fallback: Loading.new")
+    end
+
+    it "preserves kwargs on the inlined component" do
+      source = "function X() { return <Button icon={<RightOutlined rotate={90} />} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("icon: RightOutlined.new(rotate: 90)")
+    end
+
+    it "resolves prop references inside the inlined component" do
+      # The JSX value is lowered through the same pipeline as children, so
+      # identifier references like `label` resolve to `@label` per the
+      # surrounding component's prop scope.
+      source = "function X({ label }) { return <Tooltip title={<TooltipBody label={label} />} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("title: TooltipBody.new(label: @label)")
+    end
+
+    it "unwraps a single-child Fragment around the JSX value" do
+      # `<><Foo/></>` is a common idiom for satisfying type checks that
+      # require a single ReactNode. Collapse to just the inner child.
+      source = "function X() { return <Suspense fallback={<><Loading /></>} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("fallback: Loading.new")
+      expect(content).not_to include("Fragment")
+    end
+
+    it "emits a single-line block for a JSX value with simple children" do
+      source = "function X() { return <Tooltip title={<Container><A /><B /></Container>} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("title: Container.new { render A.new; render B.new }")
+    end
+
+    it "drops to TODO when the JSX value is a plain HTML element (no Phlex receiver context)" do
+      # An HTML tag as an attribute value needs the receiver's Phlex render
+      # context to execute `span { ... }`. Out of scope for MVP — drop with
+      # a TODO so the kwarg stays valid Ruby (`title: nil`) and the source
+      # is visible above.
+      source = "function X() { return <Tooltip title={<span>hover</span>} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("title: nil")
+      expect(content).to include("# TODO: attribute \"title\" dropped — couldn't inline JSX value: <span...>")
     end
   end
 

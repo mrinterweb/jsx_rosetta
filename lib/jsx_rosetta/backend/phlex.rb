@@ -798,6 +798,14 @@ module JsxRosetta
         when IR::ObjectLiteral then render_object_literal_value(value, translator, todos: todos, indent: indent)
         when IR::ArrayLiteral then render_array_literal_value(value, translator, todos: todos, indent: indent)
         when IR::Lambda then render_lambda_method_reference(value, translator, attr_name: name)
+        when IR::ComponentInvocation
+          component_invocation_value(value, translator, todos: todos, attr_name: name)
+        when IR::Element, IR::Fragment
+          # An HTML tag (`title={<span>x</span>}`) or a multi-element
+          # Fragment as an attribute value needs a Phlex execution context
+          # the receiver might not provide. Drop with a TODO rather than
+          # emit a broken kwarg or a speculative method reference.
+          drop_jsx_value_with_todo(name, value, todos: todos)
         end
       end
 
@@ -872,6 +880,10 @@ module JsxRosetta
         when IR::Lambda then render_lambda_method_reference(value, translator, attr_name: attr_name)
         when IR::Interpolation then interpolated_attribute_value(attr_name || "<element>", value, translator,
                                                                  todos: todos)
+        when IR::ComponentInvocation
+          component_invocation_value(value, translator, todos: todos, attr_name: attr_name)
+        when IR::Element, IR::Fragment
+          drop_jsx_value_with_todo(attr_name, value, todos: todos)
         when String then AST::Inflector.ruby_string_literal(value)
         when true then "true"
         else
@@ -933,6 +945,77 @@ module JsxRosetta
 
       def uppercase_unresolved?(unresolved_identifiers)
         unresolved_identifiers.any? { |name| name[0] == name[0].upcase }
+      end
+
+      # JSX appearing as an attribute value — typically `icon={<Foo/>}` or
+      # `fallback={<Loading/>}` on antd/MUI components. Emitted as a
+      # component-instance value: `icon: FooComponent.new`. The receiving
+      # Phlex component can render it directly via `render @icon`. Closes
+      # the largest single category of attribute-value drops we were
+      # silently emitting as `attr: nil` + TODO.
+      #
+      # Three child-handling tiers:
+      #   1. No children — `ClassRef.new(kwargs)` on one line.
+      #   2. Children whose rendered Phlex body fits a single line — emit
+      #      as a block: `ClassRef.new(kwargs) { plain "x" }`. The block
+      #      runs in the child component's render context, so HTML helpers
+      #      resolve correctly.
+      #   3. Children that need multiple lines, or any IR::Element /
+      #      IR::Fragment we can't represent inline — fall back to the
+      #      existing TODO drop. Out of MVP scope; expand later if the
+      #      stress numbers warrant it.
+      def component_invocation_value(invocation, translator, todos:, attr_name:)
+        return drop_attribute_with_todo(attr_name, invocation, todos: todos) if invocation_has_render_prop?(invocation)
+
+        kwargs = component_invocation_kwargs(invocation.props, translator, todos: todos, indent: 0)
+        class_ref = component_class_reference(invocation.name)
+        new_call = kwargs.empty? ? "#{class_ref}.new" : "#{class_ref}.new(#{kwargs})"
+
+        return new_call if invocation.children.empty?
+
+        block_body = render_inline_children(invocation.children, translator)
+        return drop_attribute_with_todo(attr_name, invocation, todos: todos) unless block_body
+
+        "#{new_call} { #{block_body} }"
+      end
+
+      def invocation_has_render_prop?(invocation)
+        invocation.children.any?(IR::RenderProp)
+      end
+
+      # Render children to a single-line Phlex block body. Returns nil when
+      # any child needs multiple lines or isn't representable inline — the
+      # caller falls back to the TODO drop.
+      def render_inline_children(children, translator)
+        rendered = children.map { |c| render_ir_node(c, translator, indent: 0) }
+        return nil if rendered.any? { |line| line.include?("\n") }
+
+        joined = rendered.join("; ")
+        joined.length <= LITERAL_INLINE_BUDGET ? joined : nil
+      end
+
+      def drop_attribute_with_todo(attr_name, invocation, todos:)
+        label = attr_name || "<element>"
+        compact = invocation_source_summary(invocation)
+        todos << "attribute #{label.inspect} dropped — couldn't inline JSX value: #{compact}"
+        "nil"
+      end
+
+      def invocation_source_summary(invocation)
+        tag = invocation.name
+        suffix = invocation.children.empty? ? "/" : "...>"
+        "<#{tag}#{suffix}"
+      end
+
+      def drop_jsx_value_with_todo(attr_name, value, todos:)
+        label = attr_name || "<element>"
+        summary = case value
+                  when IR::Element then "<#{value.tag}...>"
+                  when IR::Fragment then "<>...</>"
+                  else "<JSX>"
+                  end
+        todos << "attribute #{label.inspect} dropped — couldn't inline JSX value: #{summary}"
+        "nil"
       end
 
       def component_invocation_kwargs(props, translator, todos: [], indent: 0)
