@@ -240,22 +240,21 @@ RSpec.describe JsxRosetta::IR::Lowering do
   end
 
   describe "event bindings" do
-    it "lowers on*={prop} to IR::EventBinding with the lowercased event name" do
+    it "promotes on*={prop} to IR::StimulusBinding (handler name derived from the identifier)" do
       ir = lower("function X({ onClick }) { return <button onClick={onClick} />; }")
 
       event = ir.body.attributes.first
-      expect(event).to eq(
-        JsxRosetta::IR::EventBinding.new(
-          event: "click",
-          handler: JsxRosetta::IR::Interpolation.new(expression: "onClick")
-        )
-      )
+      expect(event).to be_a(JsxRosetta::IR::StimulusBinding)
+      expect(event.event).to eq("click")
+      expect(event.method_name).to eq("onClick")
     end
 
-    it "translates onMouseEnter to the native event name" do
+    it "translates onMouseEnter to the native event name and promotes the prop ref" do
       ir = lower("function X({ onMouseEnter }) { return <div onMouseEnter={onMouseEnter} />; }")
 
-      expect(ir.body.attributes.first.event).to eq("mouseenter")
+      attr = ir.body.attributes.first
+      expect(attr).to be_a(JsxRosetta::IR::StimulusBinding)
+      expect(attr.event).to eq("mouseenter")
     end
 
     it "leaves on*=\"literal\" attributes alone (no expression container)" do
@@ -387,12 +386,18 @@ RSpec.describe JsxRosetta::IR::Lowering do
       expect(ir.stimulus_methods.first.name).to eq("handleClick")
     end
 
-    it "leaves prop-bound event handlers as EventBinding (no Stimulus promotion)" do
+    it "promotes prop-bound event handlers (onClick={propRef}) to Stimulus methods" do
+      # A bare prop reference as an event handler has no useful EventBinding
+      # rendering — `data-action="<%= @on_click %>"` isn't a valid Stimulus
+      # action descriptor. Promoting to Stimulus generates a method whose
+      # body documents the original prop reference.
       ir = lower("function X({ onClick }) { return <button onClick={onClick}>x</button>; }")
 
       attr = ir.body.attributes.first
-      expect(attr).to be_a(JsxRosetta::IR::EventBinding)
-      expect(ir.stimulus_methods).to eq([])
+      expect(attr).to be_a(JsxRosetta::IR::StimulusBinding)
+      expect(attr.method_name).to eq("onClick")
+      expect(ir.stimulus_methods.first.name).to eq("onClick")
+      expect(ir.stimulus_methods.first.body_source).to include("originally bound to: onClick")
     end
 
     it "uniquifies method names when multiple inline handlers share an event" do
@@ -1159,10 +1164,7 @@ RSpec.describe JsxRosetta::IR::Lowering do
           attributes: [
             JsxRosetta::IR::Attribute.new(name: "type", value: "button"),
             JsxRosetta::IR::StyleBinding.new(expression: "`btn btn-${variant}`"),
-            JsxRosetta::IR::EventBinding.new(
-              event: "click",
-              handler: JsxRosetta::IR::Interpolation.new(expression: "onClick")
-            )
+            JsxRosetta::IR::StimulusBinding.new(event: "click", method_name: "onClick")
           ],
           children: [
             JsxRosetta::IR::Slot.new(name: "children")
@@ -1170,7 +1172,9 @@ RSpec.describe JsxRosetta::IR::Lowering do
         ),
         rest_prop_name: nil,
         local_bindings: [],
-        stimulus_methods: [],
+        stimulus_methods: [
+          JsxRosetta::IR::StimulusMethod.new(name: "onClick", body_source: "// originally bound to: onClick")
+        ],
         react_hooks: []
       )
 

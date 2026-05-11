@@ -960,26 +960,44 @@ module JsxRosetta
         )
       end
 
+      # Promote a JSX event-handler attribute (`onClick={...}`, `onChange={...}`)
+      # to a Stimulus method binding. Three input shapes are recognized:
+      #   - inline arrow / function expression (`onClick={() => doX()}`)
+      #     → method body is the arrow's body source.
+      #   - identifier referring to a local arrow binding
+      #     (`const h = () => doX(); onClick={h}`) → method body is the
+      #     bound arrow's body. The local arrow is consumed.
+      #   - identifier referring to a prop or external (`onClick={onChange}`)
+      #     → synthesizes a method whose body documents the original
+      #     reference. Without this branch, prop-handler bindings used to
+      #     fall through to an EventBinding that rendered as a broken
+      #     `data-action` (a Ruby reference, not a Stimulus action descriptor).
       def try_promote_to_stimulus(attr_name, event, expression)
-        arrow_node, name_hint = stimulus_arrow_for(expression)
-        return nil unless arrow_node
+        case expression.type
+        when "ArrowFunctionExpression", "FunctionExpression"
+          promote_arrow_to_stimulus(attr_name, event, expression, name_hint: nil)
+        when "Identifier"
+          promote_identifier_event(attr_name, event, expression[:name])
+        end
+      end
 
+      def promote_arrow_to_stimulus(attr_name, event, arrow_node, name_hint:)
         method_name = stimulus_method_name(name_hint || default_stimulus_method_name(attr_name))
         body_source = source_of(arrow_node[:body])
         @stimulus_methods << StimulusMethod.new(name: method_name, body_source: body_source)
         @local_arrows.delete(name_hint) if name_hint
-
         StimulusBinding.new(event: event, method_name: method_name)
       end
 
-      def stimulus_arrow_for(expression)
-        case expression.type
-        when "ArrowFunctionExpression", "FunctionExpression"
-          [expression, nil]
-        when "Identifier"
-          arrow = @local_arrows[expression[:name]]
-          arrow ? [arrow, expression[:name]] : nil
+      def promote_identifier_event(attr_name, event, identifier_name)
+        if (arrow = @local_arrows[identifier_name])
+          return promote_arrow_to_stimulus(attr_name, event, arrow, name_hint: identifier_name)
         end
+
+        method_name = stimulus_method_name(identifier_name)
+        body_source = "// originally bound to: #{identifier_name}"
+        @stimulus_methods << StimulusMethod.new(name: method_name, body_source: body_source)
+        StimulusBinding.new(event: event, method_name: method_name)
       end
 
       def default_stimulus_method_name(attr_name)

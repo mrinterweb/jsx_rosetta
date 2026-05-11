@@ -83,21 +83,22 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
   end
 
   describe "event bindings" do
-    it "renders a single onClick prop as data-action" do
+    it "promotes a single prop-bound onClick into a Stimulus action descriptor" do
       files = files_for("function X({ onClick }) { return <button onClick={onClick} />; }")
 
-      expect(files["x_component.html.erb"]).to include('data-action="<%= @on_click %>"')
+      expect(files["x_component.html.erb"]).to include('data-controller="x"')
+      expect(files["x_component.html.erb"]).to include('data-action="click->x#onClick"')
       expect(files["x_component.html.erb"]).not_to include("onClick=")
     end
 
-    it "concatenates multiple event bindings into a single data-action" do
+    it "concatenates multiple prop-bound event handlers into one data-action descriptor list" do
       files = files_for(<<~JSX)
         function X({ onClick, onMouseEnter }) {
           return <button onClick={onClick} onMouseEnter={onMouseEnter} />;
         }
       JSX
 
-      expect(files["x_component.html.erb"]).to include('data-action="<%= @on_click %> <%= @on_mouse_enter %>"')
+      expect(files["x_component.html.erb"]).to include('data-action="click->x#onClick mouseenter->x#onMouseEnter"')
     end
   end
 

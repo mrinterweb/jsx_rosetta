@@ -62,8 +62,14 @@ module JsxRosetta
 
       private
 
+      # JSX-returning lowercase helpers (e.g. `textRender`, `getNodeIcon`)
+      # have lowercase-starting names. Ruby class names must be constants
+      # (begin with an uppercase letter), so we capitalize the first
+      # letter when forming the class name. Pure-PascalCase names pass
+      # through unchanged.
       def class_name(component)
-        @suffix ? "#{component.name}#{@suffix}" : component.name
+        base = "#{component.name[0].upcase}#{component.name[1..]}"
+        @suffix ? "#{base}#{@suffix}" : base
       end
 
       def ruby_path(component)
@@ -200,27 +206,41 @@ module JsxRosetta
       end
 
       def render_element(element, translator, indent:)
-        method_call = "#{element.tag}#{format_attributes(element.attributes, translator)}"
+        todos = []
+        attrs_source = format_attributes(element.attributes, translator, context: :html, todos: todos)
+        method_call = "#{element.tag}#{attrs_source}"
 
-        if VOID_ELEMENTS.include?(element.tag) || element.children.empty?
-          "#{spaces(indent)}#{method_call}"
-        else
-          inner = element.children.map { |child| render_ir_node(child, translator, indent: indent + 2) }.join("\n")
-          "#{spaces(indent)}#{method_call} do\n#{inner}\n#{spaces(indent)}end"
-        end
+        body = if VOID_ELEMENTS.include?(element.tag) || element.children.empty?
+                 "#{spaces(indent)}#{method_call}"
+               else
+                 inner = element.children.map { |c| render_ir_node(c, translator, indent: indent + 2) }.join("\n")
+                 "#{spaces(indent)}#{method_call} do\n#{inner}\n#{spaces(indent)}end"
+               end
+
+        prepend_attribute_todos(todos, indent, body)
       end
 
       def render_component_invocation(invocation, translator, indent:)
-        kwargs = component_invocation_kwargs(invocation.props, translator)
+        todos = []
+        kwargs = component_invocation_kwargs(invocation.props, translator, todos: todos)
         class_ref = component_class_reference(invocation.name)
         new_call = kwargs.empty? ? "#{class_ref}.new" : "#{class_ref}.new(#{kwargs})"
 
-        if invocation.children.empty?
-          "#{spaces(indent)}render #{new_call}"
-        else
-          inner = invocation.children.map { |child| render_ir_node(child, translator, indent: indent + 2) }.join("\n")
-          "#{spaces(indent)}render #{new_call} do\n#{inner}\n#{spaces(indent)}end"
-        end
+        body = if invocation.children.empty?
+                 "#{spaces(indent)}render #{new_call}"
+               else
+                 inner = invocation.children.map { |c| render_ir_node(c, translator, indent: indent + 2) }.join("\n")
+                 "#{spaces(indent)}render #{new_call} do\n#{inner}\n#{spaces(indent)}end"
+               end
+
+        prepend_attribute_todos(todos, indent, body)
+      end
+
+      def prepend_attribute_todos(todos, indent, body)
+        return body if todos.empty?
+
+        prefix = todos.map { |t| "#{spaces(indent)}# TODO: #{t}" }.join("\n")
+        "#{prefix}\n#{body}"
       end
 
       # JSX `<Foo>` → `Foo` (default), `FooComponent` (suffix), or just
@@ -237,8 +257,10 @@ module JsxRosetta
       end
 
       def render_conditional(conditional, translator, indent:)
-        test_ruby = render_test_expression(conditional.test, translator)
-        lines = ["#{spaces(indent)}if #{test_ruby}"]
+        test_ruby, todo = safe_test_expression(conditional.test.expression, translator, fallback: "false")
+        lines = []
+        lines << "#{spaces(indent)}# TODO: translate condition: #{todo}" if todo
+        lines << "#{spaces(indent)}if #{test_ruby}"
         lines << render_ir_node(conditional.consequent, translator, indent: indent + 2)
         if conditional.alternate
           lines << "#{spaces(indent)}else"
@@ -249,7 +271,7 @@ module JsxRosetta
       end
 
       def render_loop(loop_node, translator, indent:)
-        iterable_ruby = render_test_expression(loop_node.iterable, translator)
+        iterable_ruby, todo = safe_test_expression(loop_node.iterable.expression, translator, fallback: "[]")
         js_bindings = [loop_node.item_binding, loop_node.index_binding].compact
         ruby_bindings = js_bindings.map { |name| AST::Inflector.underscore(name) }
         binding_str = ruby_bindings.size == 1 ? "|#{ruby_bindings.first}|" : "|#{ruby_bindings.join(", ")}|"
@@ -258,11 +280,28 @@ module JsxRosetta
           render_ir_node(loop_node.body, translator, indent: indent + 2)
         end
 
-        [
-          "#{spaces(indent)}#{iterable_ruby}.each do #{binding_str}",
-          body,
-          "#{spaces(indent)}end"
-        ].join("\n")
+        lines = []
+        lines << "#{spaces(indent)}# TODO: translate iterable: #{todo}" if todo
+        lines << "#{spaces(indent)}#{iterable_ruby}.each do #{binding_str}"
+        lines << body
+        lines << "#{spaces(indent)}end"
+        lines.join("\n")
+      end
+
+      # Translate an expression intended to drive an `if` or `.each` call.
+      # Returns `[ruby_source, todo_text]`. When the translator can parse
+      # the expression, `todo_text` is nil. When it can't, the caller's
+      # `fallback` (e.g. `"false"` for conditions, `"[]"` for iterables)
+      # is returned along with the original expression so a TODO comment
+      # can be emitted above the call. Without this, JS operators like
+      # `!==`, `===`, optional chaining, and `in` would leak into the
+      # emitted Ruby and produce SyntaxError on load.
+      def safe_test_expression(expression, translator, fallback:)
+        translated = translator.translate(expression)
+        return [translated.ruby, nil] if translated
+
+        compact = expression.tr("\n", " ").squeeze(" ")
+        [fallback, compact]
       end
 
       def render_slot(slot, indent:)
@@ -279,10 +318,7 @@ module JsxRosetta
 
       def render_interpolation(interpolation, translator, indent:)
         translated = translator.translate(interpolation.expression)
-        unless translated
-          return "#{spaces(indent)}# TODO: translate #{interpolation.expression.inspect}\n" \
-                 "#{spaces(indent)}plain #{interpolation.expression}"
-        end
+        return render_untranslated_interpolation(interpolation.expression, indent) unless translated
 
         unresolved = translated.unresolved_identifiers
         if unresolved.empty?
@@ -294,33 +330,45 @@ module JsxRosetta
         end
       end
 
+      # The original JS expression couldn't be translated to Ruby. We can't
+      # emit `plain <verbatim-JS>` because raw JS (TypeScript casts, JSX
+      # method chains, ternary spreads, etc.) usually isn't valid Ruby.
+      # Instead, emit two safe lines: a `# TODO:` comment naming the
+      # expression, then a string-literal placeholder so the template still
+      # renders something visible at runtime.
+      def render_untranslated_interpolation(expression, indent)
+        compact = expression.tr("\n", " ").squeeze(" ")
+        "#{spaces(indent)}# TODO: translate #{compact.inspect}\n" \
+          "#{spaces(indent)}plain #{"[untranslated: #{compact}]".inspect}"
+      end
+
       def render_comment(comment, indent:)
         "#{spaces(indent)}# #{comment.text}"
       end
 
-      def render_test_expression(test, translator)
-        translated = translator.translate(test.expression)
-        translated ? translated.ruby : test.expression
-      end
-
-      # Build the Ruby attribute list — `(id: @id, class: @class, **{ "data-testid" => @x })`
-      # — to splice immediately after the tag method name. Returns "" when
-      # there are no attributes (so the caller emits a bare `h1` instead of `h1()`).
-      def format_attributes(attributes, translator)
+      # Build the Ruby attribute list — `(id: @id, class: @class, ...)`  —
+      # to splice immediately after the tag method name. Returns "" when
+      # there are no attributes (so the caller emits a bare `h1` instead
+      # of `h1()`). The `context:` param selects naming convention:
+      #   - :html       (HTML element attrs — preserve camelCase for SVG)
+      #   - :component  (Ruby method args — snake_case via Inflector.underscore)
+      def format_attributes(attributes, translator, context: :html, todos: [])
         events, others = attributes.partition { |a| a.is_a?(IR::EventBinding) || a.is_a?(IR::StimulusBinding) }
         spreads, plain_attrs = others.partition { |a| a.is_a?(IR::SpreadAttribute) }
 
         sym_parts = []
         str_parts = []
-        plain_attrs.each { |a| append_attribute_part(a, translator, sym_parts, str_parts) }
+        plain_attrs.each do |a|
+          append_attribute_part(a, translator, sym_parts, str_parts, context: context, todos: todos)
+        end
         sym_parts << data_action_entry(events, translator) if events.any?
 
         joined = build_attribute_list(sym_parts, str_parts, spreads, translator)
         joined.empty? ? "" : "(#{joined})"
       end
 
-      def append_attribute_part(attribute, translator, sym_parts, str_parts)
-        part = phlex_attribute_part(attribute, translator)
+      def append_attribute_part(attribute, translator, sym_parts, str_parts, context:, todos:)
+        part = phlex_attribute_part(attribute, translator, context: context, todos: todos)
         return unless part
 
         (part[:string_key] ? str_parts : sym_parts) << part[:source]
@@ -334,14 +382,14 @@ module JsxRosetta
       end
 
       # Emit one attribute as either a {string_key: false, source: "id: @x"}
-      # (Ruby-kwarg-safe name) or {string_key: true, source: '"data-testid" => @x'}
-      # (hyphenated; goes into a **{ ... } splat).
-      def phlex_attribute_part(attribute, translator)
+      # (Ruby-kwarg-safe name) or {string_key: true, source: '"xml:lang" => @x'}
+      # (rare; non-identifier name — goes into a **{ ... } splat).
+      def phlex_attribute_part(attribute, translator, context:, todos:)
         case attribute
         when IR::StyleBinding then class_attribute_part(attribute.expression, translator)
         when IR::ClassList then { string_key: false, source: "class: #{class_list_to_ruby_string(attribute, translator)}" }
         when IR::Style then { string_key: false, source: "style: #{style_to_ruby_string(attribute, translator)}" }
-        when IR::Attribute then plain_attribute_part(attribute, translator)
+        when IR::Attribute then plain_attribute_part(attribute, translator, context: context, todos: todos)
         end
       end
 
@@ -351,17 +399,21 @@ module JsxRosetta
         { string_key: false, source: "class: #{ruby}" }
       end
 
-      # Phlex 2.x auto-converts underscores in symbol keys to hyphens in HTML
-      # attribute names (`data_testid: "x"` → `<h1 data-testid="x">`). So we
-      # just hyphen-to-underscore the JSX attr name and emit it as a normal
-      # kwarg — no `**{ ... }` splat dance. camelCase names (`viewBox`,
-      # `preserveAspectRatio`) preserve as-is since Phlex only converts
-      # underscores. Names that aren't valid Ruby identifiers after the
-      # hyphen swap (rare: `xml:lang` and friends) fall back to a quoted
-      # string key inside the splat.
-      def plain_attribute_part(attribute, translator)
-        value_ruby = attribute_value_to_ruby(attribute.value, translator)
-        ruby_name = attribute.name.tr("-", "_")
+      # Map a JSX attribute name to its Ruby kwarg form. For HTML element
+      # attrs (`context: :html`), only hyphens convert to underscores —
+      # camelCase (`viewBox`, `preserveAspectRatio`) preserves verbatim
+      # so SVG attributes render correctly through Phlex. For component
+      # invocations (`context: :component`), full Inflector.underscore
+      # converts both hyphens AND camelCase, since Ruby method args
+      # follow snake_case convention (`defaultValue` → `default_value`).
+      # Names that aren't valid Ruby identifiers after conversion (rare:
+      # `xml:lang` and friends) fall back to a quoted string key.
+      def plain_attribute_part(attribute, translator, context:, todos:)
+        value_ruby = attribute_value_to_ruby(attribute.name, attribute.value, translator, todos: todos)
+        ruby_name = case context
+                    when :component then AST::Inflector.underscore(attribute.name)
+                    else attribute.name.tr("-", "_")
+                    end
         if ruby_name.match?(VALID_IDENTIFIER)
           { string_key: false, source: "#{ruby_name}: #{value_ruby}" }
         else
@@ -369,35 +421,43 @@ module JsxRosetta
         end
       end
 
-      def attribute_value_to_ruby(value, translator)
+      def attribute_value_to_ruby(name, value, translator, todos:)
         case value
         when true then "true"
         when String then value.inspect
-        when IR::Interpolation then interpolated_attribute_value(value, translator)
+        when IR::Interpolation then interpolated_attribute_value(name, value, translator, todos: todos)
         end
       end
 
-      # Attribute-position interpolation. Unlike the text-position renderer,
-      # we can't safely put a `# TODO:` comment here — it would either be
-      # inside a hash literal (where `# … }` swallows the closing brace) or
-      # mid-method-call (illegal). So we emit the translated identifier as
-      # a bare expression and let the user spot it. Unresolved-identifier
-      # cases still bubble up as bare snake_case references, which won't
-      # match any `@ivar` and will surface at template-render time.
-      def interpolated_attribute_value(value, translator)
+      # Attribute-position interpolation. Two failure modes:
+      #   1. Translator returns non-nil but with unresolved identifiers —
+      #      the Ruby reference is fine to emit (it'll surface as a
+      #      NameError at render time if it's wrong). Inline TODO comments
+      #      aren't safe in attribute position (would break hash splat or
+      #      method-call syntax), so the marker is suppressed.
+      #   2. Translator returns nil — the original JS expression couldn't
+      #      be parsed at all (e.g. `<LeftOutlined .../>`, array literals,
+      #      template literals with method calls). We emit `nil` for the
+      #      kwarg AND record the original expression in `todos` so the
+      #      caller can prepend a `# TODO:` comment line above the element.
+      def interpolated_attribute_value(name, value, translator, todos:)
         translated = translator.translate(value.expression)
-        return "nil" unless translated
+        return translated.ruby if translated
 
-        translated.ruby
+        compact = value.expression.tr("\n", " ").squeeze(" ")
+        todos << "attribute #{name.inspect} dropped — couldn't translate: #{compact}"
+        "nil"
       end
 
-      def component_invocation_kwargs(props, translator)
+      def component_invocation_kwargs(props, translator, todos: [])
         events, others = props.partition { |a| a.is_a?(IR::EventBinding) || a.is_a?(IR::StimulusBinding) }
         spreads, plain_attrs = others.partition { |a| a.is_a?(IR::SpreadAttribute) }
 
         sym_parts = []
         str_parts = []
-        plain_attrs.each { |a| append_attribute_part(a, translator, sym_parts, str_parts) }
+        plain_attrs.each do |a|
+          append_attribute_part(a, translator, sym_parts, str_parts, context: :component, todos: todos)
+        end
         sym_parts << data_action_entry(events, translator) if events.any?
 
         build_attribute_list(sym_parts, str_parts, spreads, translator)

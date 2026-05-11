@@ -187,6 +187,18 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("render Card.new do")
       expect(content).to include("p do")
     end
+
+    it "snake_cases camelCase JSX prop names for component invocations" do
+      # Component invocations are Ruby method calls; their kwargs should
+      # follow snake_case. HTML element attrs preserve camelCase (SVG
+      # `viewBox`) — different context, different rule.
+      content = file_contents('function X() { return <Select defaultValue="x" pageSize={10} />; }', "x.rb")
+
+      expect(content).to include("default_value:")
+      expect(content).to include("page_size:")
+      expect(content).not_to include("defaultValue:")
+      expect(content).not_to include("pageSize:")
+    end
   end
 
   describe "default slot (children prop)" do
@@ -257,6 +269,102 @@ RSpec.describe JsxRosetta::Backend::Phlex do
 
       expect(content).to include("some_global")
       expect(content).not_to include("# TODO: unresolved identifier")
+    end
+
+    it "emits valid Ruby (string-literal placeholder) when an interpolation can't be translated" do
+      # The translator handles bare identifiers and simple member chains, but
+      # bails on expressions like `cloneElement(x, { label })`. Bug would be
+      # to emit `plain cloneElement(x, { label })` — invalid Ruby outside a
+      # call site (the bare `{ label }` block isn't a hash). We emit a string
+      # placeholder + comment instead so `ruby -c` always passes.
+      source = "function X({ x, label }) { return <p>{cloneElement(x, { label })}</p>; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: translate")
+      expect(content).to include("plain \"[untranslated:")
+    end
+  end
+
+  describe "preserving untranslatable test/iterable expressions" do
+    it "wraps an untranslatable conditional test in a TODO and emits `if false`" do
+      # JS operators like `!==`, `===`, `?.` don't translate to Ruby —
+      # leaving them verbatim would produce SyntaxError on load. We emit
+      # a TODO comment above the `if` and use `false` as a safe placeholder.
+      source = "function X({ value }) { return value !== null ? <p>have</p> : <NilValue />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: translate condition: value !== null")
+      expect(content).to include("if false")
+      expect(content).not_to include("if value !==")
+    end
+
+    it "wraps an untranslatable loop iterable in a TODO and emits []" do
+      source = "function X({ items }) { return <ul>{items.filter(x => x.active).map((i) => <li />)}</ul>; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: translate iterable:")
+      expect(content).to include("[].each do")
+    end
+
+    it "still emits the translated condition when it parses cleanly" do
+      content = file_contents("function X({ open }) { return open ? <a /> : <b />; }", "x.rb")
+
+      expect(content).to include("if @open")
+      expect(content).not_to include("# TODO: translate condition")
+    end
+  end
+
+  describe "preserving untranslatable attribute values" do
+    it "emits a TODO comment line above the element when a JSX-element prop can't translate" do
+      source = "function X() { return <Button icon={<LeftOutlined size={12} />} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: attribute \"icon\" dropped — couldn't translate:")
+      expect(content).to include("<LeftOutlined")
+      expect(content).to include("icon: nil")
+    end
+
+    it "emits a TODO comment line above the element when an array-literal prop can't translate" do
+      source = <<~JS
+        function X() {
+          return <Select options={[{ value: 10, label: "a" }, { value: 25, label: "b" }]} />;
+        }
+      JS
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: attribute \"options\" dropped")
+      expect(content).to include("options: nil")
+    end
+
+    it "does NOT emit a TODO when an attribute interpolation translates cleanly" do
+      content = file_contents("function X({ open }) { return <p hidden={open} />; }", "x.rb")
+
+      expect(content).not_to include("# TODO:")
+      expect(content).to include("hidden: @open")
+    end
+  end
+
+  describe "Ruby class-name capitalization (JSX lowercase helpers)" do
+    it "capitalizes the first letter of a lowercase-named JSX helper" do
+      source = "function getNodeIcon({ type }) { return <span>{type}</span>; }"
+      files = files_for(source, suffix: "Component")
+
+      expect(files.keys).to eq(["get_node_icon_component.rb"])
+      expect(files["get_node_icon_component.rb"]).to include("class GetNodeIconComponent < Phlex::HTML")
+      expect(files["get_node_icon_component.rb"]).not_to match(/class get/)
+    end
+
+    it "capitalizes correctly under namespace mode too" do
+      source = "function textRender({ value }) { return <p>{value}</p>; }"
+      content = file_contents(source, "text_render.rb", namespace: "Components")
+
+      expect(content).to include("class TextRender < Phlex::HTML")
+    end
+
+    it "leaves PascalCase names unchanged" do
+      content = file_contents("function FlashyHeader() { return <h1>x</h1>; }", "flashy_header.rb")
+
+      expect(content).to include("class FlashyHeader < Phlex::HTML")
     end
   end
 
