@@ -63,16 +63,40 @@ module JsxRosetta
 
       out_dir = options[:out] || "."
       typescript = options[:tsx] || input_path.end_with?(".tsx")
-      backend = options[:as] == "view" ? :rails_view : :view_component
+      backend = backend_for_as(options[:as])
+      backend_options = backend_options_for(backend, options)
 
       source = File.read(input_path)
       files = JsxRosetta.translate(
         source,
         backend: backend,
+        backend_options: backend_options,
         typescript: typescript,
         source_filename: input_path
       )
 
+      write_emitted_files(files, out_dir)
+      EXIT_OK
+    rescue ParseError, IR::Lowering::LoweringError, ArgumentError => e
+      @stderr.puts "jsx_rosetta translate: #{e.message}"
+      EXIT_FAILURE
+    end
+
+    def backend_for_as(value)
+      case value
+      when "view" then :rails_view
+      when "phlex" then :phlex
+      else :view_component
+      end
+    end
+
+    def backend_options_for(backend, options)
+      return {} unless backend == :phlex
+
+      { suffix: options[:phlex_suffix], namespace: options[:phlex_namespace] }.compact
+    end
+
+    def write_emitted_files(files, out_dir)
       FileUtils.mkdir_p(out_dir)
       files.each do |file|
         target = File.join(out_dir, file.path)
@@ -80,10 +104,6 @@ module JsxRosetta
         File.write(target, file.contents)
         @stdout.puts "wrote #{target}"
       end
-      EXIT_OK
-    rescue ParseError, IR::Lowering::LoweringError => e
-      @stderr.puts "jsx_rosetta translate: #{e.message}"
-      EXIT_FAILURE
     end
 
     def run_routes
@@ -142,6 +162,10 @@ module JsxRosetta
         when "--tsx", "--typescript" then options[:tsx] = true
         when "--as" then options[:as] = @argv.shift
         when /\A--as=(.+)\z/ then options[:as] = ::Regexp.last_match(1)
+        when "--phlex-suffix" then options[:phlex_suffix] = @argv.shift
+        when /\A--phlex-suffix=(.*)\z/ then options[:phlex_suffix] = ::Regexp.last_match(1)
+        when "--phlex-namespace" then options[:phlex_namespace] = @argv.shift
+        when /\A--phlex-namespace=(.+)\z/ then options[:phlex_namespace] = ::Regexp.last_match(1)
         else positional << arg
         end
       end
@@ -166,6 +190,10 @@ module JsxRosetta
                                      Pass --as=view to emit a Rails view template (`<snake>.html.erb`)
                                      instead of a ViewComponent class + sidecar template — appropriate
                                      for pages tied to a route.
+                                     Pass --as=phlex to emit a single-file Phlex 2.x view class
+                                     (`<snake>.rb`) instead of a ViewComponent. Configure the class
+                                     name with --phlex-suffix=Component or --phlex-namespace=Components
+                                     (mutually exclusive; default is bare class name).
           routes FILE [-o OUT.rb]    Parse <Route path=... element={<X/>} /> patterns from FILE
                                      and emit a reviewable Ruby script that calls `rails generate
                                      controller` and prints suggested config/routes.rb additions.

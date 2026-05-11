@@ -13,7 +13,7 @@ gem itself emits.
 
 ```
 JSX text ──► Babel AST ──► Ruby AST ──► IR ──► backend ──► .rb / .html.erb / _controller.js
-            (Node sidecar) (typed tree) (sema)        (ViewComponent / RailsView / RoutesScript)
+            (Node sidecar) (typed tree) (sema)        (ViewComponent / RailsView / Phlex / RoutesScript)
 ```
 
 ## Installation
@@ -39,6 +39,17 @@ jsx_rosetta translate path/to/Button.tsx -o app/components
 # →   app/components/button_component.rb
 #     app/components/button_component/button_component.html.erb
 #     app/components/button_component/button_controller.js   (when inline arrow handlers)
+
+# Translate as a single-file Phlex 2.x view class (no separate ERB)
+jsx_rosetta translate path/to/Button.tsx --as=phlex -o app/components
+# →   app/components/button.rb
+#     app/components/button_controller.js     (when inline arrow handlers)
+# With suffix:
+jsx_rosetta translate path/to/Button.tsx --as=phlex --phlex-suffix=Component -o app/components
+# →   app/components/button_component.rb       (class ButtonComponent)
+# With namespace:
+jsx_rosetta translate path/to/Button.tsx --as=phlex --phlex-namespace=Components -o app/components
+# →   app/components/button.rb                 (class Components::Button)
 
 # Translate a route-tied page as a Rails view template (no Ruby class)
 jsx_rosetta translate path/to/Home.tsx --as=view -o app/views/home
@@ -96,11 +107,16 @@ JsxRosetta::Backend::RoutesScript.new(source_path: "router.tsx").emit(route_tree
 ```
 
 Optional kwargs to `JsxRosetta.translate`:
-- `backend: :view_component | :rails_view` (default `:view_component`)
-- `helpers: nil | Hash | false` — JSX-name → Rails-helper mapping (see below)
-- `layout: :sidecar | :flat` (default `:sidecar`, ignored for `:rails_view`)
+- `backend: :view_component | :rails_view | :phlex` (default `:view_component`)
+- `backend_options: Hash` — per-backend options (see below)
+- `helpers: nil | Hash | false` — JSX-name → Rails-helper mapping (see below; ViewComponent/RailsView only)
+- `layout: :sidecar | :flat` (default `:sidecar`; ViewComponent only)
 - `typescript: true` — force the TypeScript Babel plugin
 - `source_filename:` — surfaces in parse errors
+
+Phlex backend options (pass via `backend_options:`):
+- `suffix: "Component"` — append a suffix to the class name and file name. Mutually exclusive with `namespace:`.
+- `namespace: "Components"` — wrap the class in a `module Namespace` block. Mutually exclusive with `suffix:`.
 
 ## What translates
 
@@ -159,13 +175,13 @@ auto-perform. Common cases:
   recreate React's runtime in Ruby.
 - React Router's data-router form (`createBrowserRouter([...])`). Only the
   declarative `<Routes><Route>` shape is parsed today.
-- Backends other than ViewComponent and RailsView (Phlex, Slim, LiveView).
+- Backends other than ViewComponent, RailsView, and Phlex (Slim, LiveView).
 - Suspense → Turbo Frame mapping (depends on a data-fetching translation
   story we don't have yet).
 
-## ViewComponent emission targets
+## Emission targets
 
-Two backends, picked via `--as` on the CLI or `backend:` in the API:
+Three backends, picked via `--as` on the CLI or `backend:` in the API:
 
 **`:view_component` (default)** — emits a sidecar layout matching
 ViewComponent's `--sidecar` generator convention:
@@ -184,6 +200,40 @@ Pass `layout: :flat` to revert to the older flat layout
 **`:rails_view`** — for pages tied to a route. Emits one `.html.erb` with
 no Ruby class and no sidecar. Place at `app/views/<controller>/<action>.html.erb`;
 the controller's instance variables become the template's `@x` references.
+
+**`:phlex`** — emits a single-file [Phlex 2.x](https://www.phlex.fun/) view
+class. The JSX template lives inside `view_template` as Ruby method calls,
+not in a separate ERB file:
+
+```ruby
+# app/components/card.rb (default mode)
+# app/components/card_component.rb (suffix: "Component")
+class Card < Phlex::HTML
+  def initialize(title: nil)
+    @title = title
+  end
+
+  def view_template
+    div(class: "card") do
+      h2 { plain @title }
+      yield
+    end
+  end
+end
+```
+
+Three mutually exclusive naming strategies (configurable):
+- **default** — `class FlashyHeader < Phlex::HTML` (collision-prone in large
+  apps where names like `Card` / `User` / `Image` overlap with models).
+- **`suffix: "Component"`** — `class FlashyHeaderComponent < Phlex::HTML`,
+  matches the ViewComponent layout, safest for migrations.
+- **`namespace: "Components"`** — wraps the class in a `module Components`
+  block. Cross-references inside the namespace stay bare (`render Card.new`)
+  and resolve via Ruby's constant lookup.
+
+Stimulus handlers still emit a sibling `_controller.js` skeleton alongside
+the `.rb` — the `data-controller`/`data-action` attrs go inline on the
+element, the handler body goes into the JS skeleton as a TODO comment.
 
 ## Helper mappings
 

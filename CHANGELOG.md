@@ -1,5 +1,37 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Phlex 2.x backend** — `--as=phlex` emits a single-file Phlex
+  `view_template` Ruby class (no separate ERB sidecar). The JSX
+  template lives as method calls inside `view_template`; attributes
+  become kwargs (`h1(class: "foo", **{ "data-testid" => @x })`);
+  control flow uses native Ruby (`if`, `.each`); children pass
+  through `yield`. Three mutually exclusive naming strategies:
+    * **default** — `class FlashyHeader < Phlex::HTML`, `flashy_header.rb`
+    * **suffix** — `--phlex-suffix=Component` → `FlashyHeaderComponent`,
+      `flashy_header_component.rb`. Defaults to `"Component"` if the
+      flag is passed without a value.
+    * **namespace** — `--phlex-namespace=Components` →
+      `module Components; class FlashyHeader < Phlex::HTML`. Component
+      cross-references inside the namespace stay bare (`render Card.new`)
+      and resolve via Ruby's constant lookup.
+  Stimulus handlers still emit a sibling `_controller.js` skeleton with
+  the original JSX handler body preserved as a TODO comment.
+
+### Refactored
+
+- `Lowering` class shrunk by ~150 lines: pure-heuristic
+  `ModuleShapeClassifier` lives in its own file; helper methods
+  `AST::Node#child`, `#of_type?`, `Node.matches?` replaced ~25
+  defensive `is_a?(AST::Node) && type ==` checks; class/style
+  rendering in the ViewComponent backend deduplicated across
+  HTML-vs-Ruby output formats; `tag_builder_data_action` replaced
+  its "parse what I just emitted" heuristic with a structured
+  `EventDescriptor` intermediate.
+
 ## [0.3.0] - 2026-05-10
 
 Driven by a 929-file stress run against the entire `reserv-web` codebase
