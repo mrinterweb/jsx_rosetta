@@ -118,21 +118,40 @@ module JsxRosetta
       def render_class_body(component, translator)
         initializer = render_initializer(component, translator)
         template = render_view_template(component, translator)
-        # Render lambdas only AFTER the template — `@lambda_methods` is
-        # populated as attribute values are rendered.
-        lambda_methods = render_lambda_method_definitions(translator)
+        # Render private methods (render_methods + lambdas) AFTER the
+        # template — `@lambda_methods` is populated during attribute-value
+        # rendering, and render_methods bodies share the same indent.
+        private_section = render_private_methods(component, translator)
 
-        sections = [initializer, template, lambda_methods].compact.join("\n\n")
+        sections = [initializer, template, private_section].compact.join("\n\n")
         "class #{class_name(component)} < #{PHLEX_BASE_CLASS}\n#{sections}\nend\n"
       end
 
-      def render_lambda_method_definitions(translator)
-        return nil if @lambda_methods.nil? || @lambda_methods.empty?
-
-        defs = @lambda_methods.map do |entry|
+      # Coalesce RenderMethod (from local-arrow extraction) and Lambda
+      # (from Gap H object-literal extraction) into one `private` section.
+      # Emitting `private` twice is harmless but ugly; one block reads
+      # cleaner.
+      def render_private_methods(component, translator)
+        render_methods = component.render_methods.map { |rm| render_render_method_definition(rm, translator) }
+        lambda_methods = (@lambda_methods || []).map do |entry|
           render_lambda_method_definition(entry[:method_name], entry[:lambda], translator)
         end
-        "  private\n\n#{defs.join("\n\n")}"
+        all = render_methods + lambda_methods
+        return nil if all.empty?
+
+        "  private\n\n#{all.join("\n\n")}"
+      end
+
+      # Emit one RenderMethod as a private method on the class. Params are
+      # pushed into the translator scope so identifier references inside
+      # the body resolve to method-local arguments.
+      def render_render_method_definition(render_method, translator)
+        snake_params = render_method.params.map { |p| AST::Inflector.underscore(p) }
+        signature = snake_params.empty? ? render_method.name : "#{render_method.name}(#{snake_params.join(", ")})"
+        body = translator.with_locals(render_method.params) do
+          render_ir_node(render_method.body, translator, indent: 4)
+        end
+        "  def #{signature}\n#{body}\n  end"
       end
 
       def render_lambda_method_definition(method_name, lambda, translator)
@@ -249,10 +268,28 @@ module JsxRosetta
         when IR::Conditional then render_conditional(node, translator, indent: indent)
         when IR::Loop then render_loop(node, translator, indent: indent)
         when IR::RenderProp then render_orphan_render_prop(node, translator, indent: indent)
+        when IR::LocalRenderCall then render_local_render_call(node, translator, indent: indent)
         when IR::Slot then render_slot(node, indent: indent)
         when IR::Text then render_text(node, indent: indent)
         when IR::Interpolation then render_interpolation(node, translator, indent: indent)
         when IR::Comment then render_comment(node, indent: indent)
+        end
+      end
+
+      # Emit a call to a previously-extracted RenderMethod. The method body
+      # uses `tag.*`/`render` helpers (Phlex executes inside the view), so
+      # invoking it inline produces output at the right place in the
+      # template. Arg expressions are translated; any that fail translation
+      # fall back to verbatim source.
+      def render_local_render_call(call, translator, indent:)
+        if call.args.empty?
+          "#{spaces(indent)}#{call.method_name}"
+        else
+          arg_sources = call.args.map do |arg|
+            translated = translator.translate(arg.expression)
+            translated ? translated.ruby : arg.expression
+          end
+          "#{spaces(indent)}#{call.method_name}(#{arg_sources.join(", ")})"
         end
       end
 
@@ -389,9 +426,15 @@ module JsxRosetta
       # can be emitted above the call. Without this, JS operators like
       # `!==`, `===`, optional chaining, and `in` would leak into the
       # emitted Ruby and produce SyntaxError on load.
+      #
+      # A translated value of `"nil"` is treated as untranslatable: the
+      # translator returns `"nil"` for known-local bindings (so the file
+      # loads as a leaf reference), but driving an `if` with `nil` silently
+      # disables the whole branch. Fall through to the TODO path instead so
+      # the human reviewer sees what needs filling in.
       def safe_test_expression(expression, translator, fallback:)
         translated = translator.translate(expression)
-        return [translated.ruby, nil] if translated
+        return [translated.ruby, nil] if translated && translated.ruby != "nil"
 
         compact = expression.tr("\n", " ").squeeze(" ")
         [fallback, compact]

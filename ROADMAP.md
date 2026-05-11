@@ -9,43 +9,11 @@ Items are tagged by source so the lineage is traceable:
 - **[plan-oos]** — explicitly listed as out-of-scope in a prior release plan.
 - **[stress]** — surfaced by the 929-file stress run rejection logs.
 
-## Next up — v0.5.0 candidates
+## Next up
 
-The four items below are the highest-leverage residuals from the
-v0.4.0 sample review. Each one was observed multiple times across
-random samples and is a real render-time bug, not a cosmetic issue.
-
-- [ ] **Locally-declared `useCallback` / function names leak as bare refs.**
-  `const handleChange = useCallback(...)` followed by
-  `onChange={handleChange}` emits `on_change: handle_change` referencing
-  a method that doesn't exist on the class. The hook source is
-  preserved in the TODO block but the use site has no marker.
-  *Fix sketch:* extend `Component#local_binding_names` capture in
-  `Lowering#collect_local_bindings` to include `const X = useCallback(...)`
-  bindings; translator already handles the rest. [review]
-- [ ] **Nested render-function locals drop to `[untranslated: ...]`.**
-  `const renderHeader = () => <div/>; ... {renderHeader()}` — the call
-  expression is opaque to `lower_call_expression`.
-  *Fix sketch:* recognize `CallExpression` whose callee resolves to a
-  local arrow returning JSX; extract to a private method on the class
-  (like Gap H's lambda extraction) and reference via `render_header`. [review]
-- [ ] **Trivially-translatable `BinaryExpression` conditions emit `if false`.**
-  `email.emailAttachments.length > 0` could translate to
-  `@email.email_attachments.length > 0` but `ExpressionTranslator`
-  doesn't handle `BinaryExpression` (or `LogicalExpression` at the
-  expression level). Lots of guards bail to the safe `# TODO` + `if false`
-  placeholder for no good reason.
-  *Fix sketch:* add `BinaryExpression` and `LogicalExpression` branches
-  to `translate_ruby` in `expression_translator.rb`. Map JS operators to
-  Ruby: `===` → `==`, `!==` → `!=`, `??` → `||`. Optional chaining
-  (`?.`) needs `&.`. [review]
-- [ ] **`error && <X />` guard collapses to `if nil` for destructured locals.**
-  When the test resolves to a known local binding, `Gap C`'s
-  `safe_test_expression` returns `nil` (the Gap A placeholder) instead
-  of bailing to the `# TODO` path. The `if nil` is Ruby-valid but the
-  whole branch silently never renders.
-  *Fix sketch:* detect when the translated expression is just `nil` and
-  treat it as untranslatable (fall through to the TODO emission). [review]
+All four v0.5.0 candidate items from the v0.4.0 review are done (see
+the Done section below). Next-up is open — pick from v0.5+ or
+Stress-test residuals.
 
 ## v0.5+ — Larger features
 
@@ -105,3 +73,15 @@ See [CHANGELOG.md](CHANGELOG.md). Major arcs to date:
 - **v0.4.0** — Closed nine gaps surfaced by a sample review of v0.3.0
   Phlex output (A, B, D, E, F, G, H, J, K); 0/1224 syntax failures
   (down from 25); 343 specs.
+- **Unreleased** — Closed the four v0.5.0 candidate items from the
+  v0.4.0 sample review:
+  - useCallback / useRef / useMemo identifier-bound hook results captured
+    in `local_binding_names` so use sites emit `nil` instead of bare
+    snake_case refs to nonexistent methods.
+  - `BinaryExpression` / `LogicalExpression` translation in the
+    `ExpressionTranslator` (incl. `===`/`!==`/`??` mapping).
+  - Optional chaining (`?.`) → safe navigation (`&.`) in member chains.
+  - Nested render-function locals (`const renderHeader = () => <div/>;
+    ... {renderHeader()}`) extracted to private methods on the class.
+  - `error && <X/>` guard on a known local no longer collapses to
+    `if nil` — falls through to the TODO path.

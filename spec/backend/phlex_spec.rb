@@ -308,15 +308,24 @@ RSpec.describe JsxRosetta::Backend::Phlex do
 
   describe "preserving untranslatable test/iterable expressions" do
     it "wraps an untranslatable conditional test in a TODO and emits `if false`" do
-      # JS operators like `!==`, `===`, `?.` don't translate to Ruby —
-      # leaving them verbatim would produce SyntaxError on load. We emit
+      # Function calls aren't translated by the expression translator —
+      # leaving them verbatim could produce JS-isms in the output. We emit
       # a TODO comment above the `if` and use `false` as a safe placeholder.
+      source = "function X({ items }) { return items.includes(x) ? <p /> : <q />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: translate condition: items.includes(x)")
+      expect(content).to include("if false")
+    end
+
+    it "translates a comparison test (value !== null) to Ruby (@value != nil)" do
+      # Binary/logical operator translation handles `!==`, `===`, `<`, `>`,
+      # `&&`, `||`, `??`, etc. — these used to bail to `if false` placeholders.
       source = "function X({ value }) { return value !== null ? <p>have</p> : <NilValue />; }"
       content = file_contents(source, "x.rb")
 
-      expect(content).to include("# TODO: translate condition: value !== null")
-      expect(content).to include("if false")
-      expect(content).not_to include("if value !==")
+      expect(content).to include("if @value != nil")
+      expect(content).not_to include("# TODO: translate condition")
     end
 
     it "wraps an untranslatable loop iterable in a TODO and emits []" do
@@ -332,6 +341,73 @@ RSpec.describe JsxRosetta::Backend::Phlex do
 
       expect(content).to include("if @open")
       expect(content).not_to include("# TODO: translate condition")
+    end
+  end
+
+  describe "binary and logical operator translation" do
+    it "translates a relational comparison on a member chain" do
+      source = "function X({ email }) { return email.emailAttachments.length > 0 ? <p /> : <q />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("if @email.email_attachments.length > 0")
+    end
+
+    it "translates `===` and `!==` to `==` and `!=`" do
+      source = "function X({ status }) { return status === \"open\" ? <a /> : <b />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include('if @status == "open"')
+    end
+
+    it "translates `??` to `||`" do
+      content = file_contents(
+        "function X({ value }) { return (value ?? defaultValue) ? <a /> : <b />; }", "x.rb"
+      )
+
+      expect(content).to include("if @value || default_value")
+    end
+
+    it "translates `&&` and `||` between sub-expressions" do
+      source = "function X({ a, b }) { return a > 0 && b < 5 ? <p /> : <q />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("if @a > 0 && @b < 5")
+    end
+
+    it "translates optional chaining (?.) to Ruby safe-nav (&.)" do
+      source = "function X({ user }) { return <p>{user?.profile?.name}</p>; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("plain @user&.profile&.name")
+    end
+
+    it "translates optional chaining inside a binary comparison" do
+      source = "function X({ user }) { return user?.posts?.length > 0 ? <p /> : <q />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("if @user&.posts&.length > 0")
+    end
+
+    it "does not partially translate a ternary expression in attribute position" do
+      # Regression: STRING_LITERAL used to be greedy (`/\A(['"])(.*)\1\z/m`),
+      # so an expression like `partyType === "ORG" ? "X" : "Y"` would match
+      # because `"ORG" ? "X" : "Y"` was accepted as a single string. The
+      # binary-operator translator would then emit valid-looking Ruby with
+      # the JS ternary spliced in verbatim — but Ruby's parser doesn't allow
+      # the `? :` continuation across a newline so the output failed to
+      # parse. The attribute now bails to `nil` + a TODO instead.
+      source = <<~JSX
+        function X({ values }) {
+          return <Field value={values.partyType === "ORGANIZATION" ? "Organization" : "Person"} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("value: nil")
+      expect(content).to include("# TODO: attribute \"value\" dropped")
+      # Verify the kwarg position has `nil`, not a partial ternary fragment.
+      expect(content).not_to match(/value:\s*"Organization"/)
+      expect(content).not_to match(/value:\s*@values\.party_type/)
     end
   end
 
@@ -650,6 +726,91 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       content = file_contents(source, "x.rb")
 
       expect(content).to include("**(@rest || {})")
+    end
+  end
+
+  describe "Identifier-bound hook locals at use sites" do
+    # `const handleChange = useCallback(...)` is a hook with an Identifier
+    # binding (not a destructure). Without recording the name, the use
+    # site emits `on_change: handle_change` referencing a method that
+    # doesn't exist on the class — NameError at render time. Recording
+    # the name routes it through the known-local path, which emits `nil`.
+    it "translates a useCallback identifier use site as nil instead of a bare snake_case ref" do
+      source = <<~JSX
+        function X() {
+          const handleChange = useCallback(() => 1, []);
+          return <Select onChange={handleChange} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("on_change: nil")
+      expect(content).not_to include("on_change: handle_change")
+    end
+  end
+
+  describe "nested render-function locals" do
+    # `const renderHeader = () => <div/>; ... {renderHeader()}` used to
+    # emit `plain "[untranslated: renderHeader()]"`. The arrow is now
+    # extracted as a private method on the class, and the call site emits
+    # the method invocation directly.
+    it "extracts a no-arg local arrow as a private method and calls it at the use site" do
+      source = <<~JSX
+        function X() {
+          const renderHeader = () => <h1>Header</h1>;
+          return <main>{renderHeader()}</main>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("  private\n")
+      expect(content).to include("def render_header")
+      expect(content).to include("h1 do")
+      expect(content).to include("plain \"Header\"")
+      # use site:
+      expect(content).to match(/^\s+render_header$/)
+      expect(content).not_to include("[untranslated:")
+    end
+
+    it "passes args through and snake_cases param names" do
+      source = <<~JSX
+        function X({ count }) {
+          const renderHeader = (headerCount) => <h1>{headerCount}</h1>;
+          return <main>{renderHeader(count)}</main>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("def render_header(header_count)")
+      expect(content).to include("plain header_count")
+      expect(content).to match(/render_header\(@count\)/)
+    end
+
+    it "leaves an unmatched call (no local arrow binding) as a verbatim TODO" do
+      source = "function X() { return <p>{externalFn()}</p>; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("[untranslated: externalFn()]")
+    end
+  end
+
+  describe "guard whose test resolves to a known local binding" do
+    # `error && <X />` where `error` is destructured from a hook collapses
+    # to `if nil` in v0.4.0 (the translator returns `"nil"` to make the
+    # file load). `if nil` is valid Ruby but the branch silently never
+    # renders. Treat `"nil"` as untranslatable so the TODO surfaces.
+    it "falls through to the TODO path instead of emitting `if nil`" do
+      source = <<~JSX
+        function X() {
+          const { error } = useQuery();
+          return <div>{error && <Banner />}</div>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).not_to match(/^\s*if nil\s*$/)
+      expect(content).to include("# TODO: translate condition: error")
+      expect(content).to include("if false")
     end
   end
 

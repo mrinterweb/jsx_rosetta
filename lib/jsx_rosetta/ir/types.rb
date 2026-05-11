@@ -47,10 +47,16 @@ module JsxRosetta
     #                  Without this capture, references to module-level
     #                  constants from inside the JSX silently drop and
     #                  produce unbacked snake_case references at render time.
+    # render_methods : [RenderMethod] — local arrow bindings that return JSX
+    #                  and are invoked from the JSX body (`const renderHeader
+    #                  = () => <div/>; ... {renderHeader()}`). Backends emit
+    #                  each as a private method on the generated class and
+    #                  reference it from a LocalRenderCall at the use site.
     Component = Data.define(:name, :props, :body, :rest_prop_name,
                             :local_bindings, :local_binding_names,
                             :module_bindings,
-                            :stimulus_methods, :react_hooks) do
+                            :stimulus_methods, :react_hooks,
+                            :render_methods) do
       include Node
     end
 
@@ -341,6 +347,31 @@ module JsxRosetta
     # params : [String] — param names (camelCase preserved; backends snake_case).
     # body   : Node — the lowered IR node produced by the arrow's body.
     RenderProp = Data.define(:params, :body) do
+      include Node
+    end
+
+    # A locally-declared JSX-returning arrow that's invoked inside the
+    # render body: `const renderHeader = (count) => <h1>{count}</h1>;
+    # ... {renderHeader(headerCount)}`. Backends emit one private method
+    # per RenderMethod on the generated class and reference it via a
+    # LocalRenderCall at each use site.
+    #
+    # name   : String — snake_case method name on the class.
+    # params : [String] — arrow param names (camelCase preserved; backends
+    #          snake_case to form Ruby parameter names).
+    # body   : Node — the lowered IR node produced by the arrow's body.
+    RenderMethod = Data.define(:name, :params, :body) do
+      include Node
+    end
+
+    # A call to a locally-declared JSX-returning arrow at its use site.
+    # Pairs with a sibling RenderMethod on Component#render_methods.
+    #
+    # method_name : String — snake_case method name (matches RenderMethod#name).
+    # args        : [Interpolation] — argument expressions captured verbatim
+    #               (each Interpolation's expression is translated by the
+    #               backend's ExpressionTranslator at emission time).
+    LocalRenderCall = Data.define(:method_name, :args) do
       include Node
     end
   end

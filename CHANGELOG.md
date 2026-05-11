@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+Closes the four v0.5.0 candidate items from `ROADMAP.md` — the highest-
+leverage residuals from the v0.4.0 Phlex sample review.
+
+### Added
+
+- **`BinaryExpression` and `LogicalExpression` translation.**
+  `email.emailAttachments.length > 0` now translates to
+  `@email.email_attachments.length > 0` instead of bailing to `if false`.
+  Covers `===`/`!==`/`==`/`!=`/`<`/`>`/`<=`/`>=`/`&&`/`||`/`??`. JS-only
+  operators map to their Ruby equivalents (`===` → `==`, `??` → `||`).
+  Recursive splitting respects nested parens and string literals; outer
+  parens are stripped so `(a > b) && c` parses cleanly.
+- **Optional chaining (`?.`) → safe navigation (`&.`).** `user?.profile?.name`
+  now emits `@user&.profile&.name` instead of leaving a Ruby SyntaxError
+  in member-chain interpolations.
+- **Nested render-function locals extracted to methods.**
+  `const renderHeader = () => <h1/>; ... {renderHeader()}` previously
+  dropped to `[untranslated: renderHeader()]`. New IR types `RenderMethod`
+  and `LocalRenderCall` mean the arrow gets extracted to a private method
+  on the Phlex class (`def render_header; h1 do; ...; end`) and the use
+  site emits a direct call. Args translate through the same path as
+  attribute interpolations. The ViewComponent backend emits a method
+  skeleton with a TODO since ERB-method bodies don't translate cleanly
+  to Ruby fragments.
+
+### Fixed
+
+- **`useCallback` / `useRef` / `useMemo` identifier bindings recognized.**
+  `const handleChange = useCallback(...)` followed by
+  `onChange={handleChange}` used to emit `on_change: handle_change`
+  referencing a nonexistent method. The binding name is now captured in
+  `Component#local_binding_names` so the translator emits `nil` at use
+  sites, matching the destructure-pattern behavior added in v0.4.0.
+- **Conditional guard on a known local no longer collapses to `if nil`.**
+  `error && <X />` where `error` is destructured from a hook used to
+  translate to `if nil` (the local-binding placeholder) — Ruby-valid but
+  silently never-rendering. Both backends now treat a `"nil"` translation
+  as untranslatable, falling through to the TODO-emission path so the
+  reviewer sees what to fill in.
+
 ## [0.4.0] - 2026-05-11
 
 Closes nine translation gaps identified during a sample review of 12

@@ -131,19 +131,48 @@ module JsxRosetta
         props = initializable_props(component)
         rest_name = component.rest_prop_name
 
-        body = if props.empty? && rest_name.nil?
-                 <<~RUBY
-                   # frozen_string_literal: true
-
-                   class #{component.name}Component < ::ViewComponent::Base
-                   end
-                 RUBY
-               else
-                 render_ruby_class_with_props(component, props, rest_name, translator)
-               end
+        body = render_class_with_optional_props(component, props, rest_name, translator)
+        body = inject_render_method_skeletons(body, component)
 
         prefix = render_module_bindings_prefix(component)
         prefix.empty? ? body : insert_module_bindings_prefix(body, prefix)
+      end
+
+      def render_class_with_optional_props(component, props, rest_name, translator)
+        if props.empty? && rest_name.nil?
+          <<~RUBY
+            # frozen_string_literal: true
+
+            class #{component.name}Component < ::ViewComponent::Base
+            end
+          RUBY
+        else
+          render_ruby_class_with_props(component, props, rest_name, translator)
+        end
+      end
+
+      # For each RenderMethod, emit a method skeleton on the class just
+      # before the closing `end`. ERB-rendered VC bodies don't translate
+      # cleanly to Ruby methods (Phlex does — see its renderer), so the
+      # skeleton stays empty and the JSX source is preserved as a comment
+      # for the reviewer to translate by hand.
+      def inject_render_method_skeletons(body, component)
+        return body if component.render_methods.empty?
+
+        skeletons = component.render_methods.map { |rm| render_method_skeleton(rm) }
+        body.sub(/(\n)end\n\z/, "\n\n#{skeletons.join("\n\n")}\\1end\n")
+      end
+
+      def render_method_skeleton(render_method)
+        snake_params = render_method.params.map { |p| AST::Inflector.underscore(p) }
+        signature = snake_params.empty? ? render_method.name : "#{render_method.name}(#{snake_params.join(", ")})"
+        [
+          "  # TODO: translate the JSX body for #{render_method.name} — was a",
+          "  # local arrow returning JSX in the source component.",
+          "  def #{signature}",
+          "    \"\"",
+          "  end"
+        ].join("\n")
       end
 
       def render_module_bindings_prefix(component)
@@ -283,10 +312,28 @@ module JsxRosetta
         when IR::Conditional then render_conditional(node, translator, indent: indent)
         when IR::Loop then render_loop(node, translator, indent: indent)
         when IR::RenderProp then render_orphan_render_prop(node, translator, indent: indent)
+        when IR::LocalRenderCall then render_local_render_call(node, translator, indent: indent)
         when IR::Slot then render_slot(node, indent: indent)
         when IR::Text then "#{spaces(indent)}#{node.value}"
         when IR::Interpolation then "#{spaces(indent)}#{interpolation_to_erb(node, translator)}"
         when IR::Comment then "#{spaces(indent)}<%# #{node.text} %>"
+        end
+      end
+
+      # `{renderHeader(arg)}` → `<%= render_header(arg) %>`. The matching
+      # method definition is emitted on the component class via
+      # `render_render_methods_section`. The class method returns an
+      # HTML-safe string (Rails' `content_tag` / `safe_join` is the
+      # canonical approach), and `<%= %>` interpolates it into the template.
+      def render_local_render_call(call, translator, indent:)
+        if call.args.empty?
+          "#{spaces(indent)}<%= #{call.method_name} %>"
+        else
+          arg_sources = call.args.map do |arg|
+            translated = translator.translate(arg.expression)
+            translated ? translated.ruby : arg.expression
+          end
+          "#{spaces(indent)}<%= #{call.method_name}(#{arg_sources.join(", ")}) %>"
         end
       end
 
@@ -531,9 +578,16 @@ module JsxRosetta
         lines.join("\n")
       end
 
+      # A translated value of `"nil"` is treated as untranslatable: the
+      # translator emits `"nil"` for known-local bindings (so the file
+      # loads as a leaf reference), but driving an `<% if %>` with `nil`
+      # silently disables the whole branch. Fall back to the verbatim
+      # expression so the human reviewer sees what needs translating.
       def render_test_expression(test, translator)
         translated = translator.translate(test.expression)
-        translated ? translated.ruby : test.expression
+        return translated.ruby if translated && translated.ruby != "nil"
+
+        test.expression
       end
 
       def render_slot(slot, indent:)

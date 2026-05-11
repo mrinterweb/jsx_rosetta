@@ -2,6 +2,7 @@
 
 require_relative "types"
 require_relative "module_shape_classifier"
+require_relative "../ast/inflector"
 
 module JsxRosetta
   module IR
@@ -112,6 +113,8 @@ module JsxRosetta
         @stimulus_methods = []
         @stimulus_seen_names = {}
         @react_hooks = []
+        @render_methods = []
+        @render_method_seen = {}
       end
 
       def lower_file(file)
@@ -290,6 +293,8 @@ module JsxRosetta
         @stimulus_methods = []
         @stimulus_seen_names = {}
         @react_hooks = []
+        @render_methods = []
+        @render_method_seen = {}
 
         body = lower_function_body(function[:body])
 
@@ -302,7 +307,8 @@ module JsxRosetta
           local_binding_names: @local_binding_names.uniq,
           module_bindings: [],
           stimulus_methods: @stimulus_methods,
-          react_hooks: @react_hooks
+          react_hooks: @react_hooks,
+          render_methods: @render_methods
         )
       end
 
@@ -618,25 +624,34 @@ module JsxRosetta
         @react_hooks << ReactHookCall.new(hook: init[:callee][:name], source: source_of(stmt).strip) if is_hook
 
         id_node = declarator[:id]
-        if destructure_pattern?(id_node)
-          # Capture destructured names so the ExpressionTranslator recognizes
-          # them as known-local bindings and emits a `nil` placeholder
-          # instead of a bare unresolved reference (which NameErrors at
-          # render time). Hook destructures (`const [open, setOpen] = useState(0)`)
-          # contribute names but not a separate LocalBinding TODO — the
-          # hook's source already shows the binding to the reviewer.
-          # Also track member-expression destructures (Gap J) so
-          # `const { Content } = Layout` lets `<Content/>` resolve to
-          # `Layout::Content`.
-          record_destructured_names(stmt, declarator, init: init, seen: seen, is_hook: is_hook)
-          return
-        end
-
-        return if is_hook
+        return handle_destructure_binding(stmt, declarator, init, seen, is_hook) if destructure_pattern?(id_node)
+        return handle_identifier_hook_binding(id_node) if is_hook
 
         name = id_node&.[](:name)
         return unless name
 
+        dispatch_identifier_binding(stmt, init, name, seen)
+      end
+
+      # `const [a, b] = ...` or `const { a, b } = ...`. Capture every bound
+      # name so the translator recognizes them as known locals. Hook
+      # destructures (`const [open, setOpen] = useState(0)`) contribute
+      # names but not a separate LocalBinding TODO — the hook's source
+      # already shows the binding to the reviewer.
+      def handle_destructure_binding(stmt, declarator, init, seen, is_hook)
+        record_destructured_names(stmt, declarator, init: init, seen: seen, is_hook: is_hook)
+      end
+
+      # Identifier-bound hook result (`const handleChange = useCallback(...)`).
+      # The hook source is already in @react_hooks; just mark the binding
+      # name as known-local so use sites translate to `nil` instead of a
+      # bare snake_case ref that NameErrors at render time.
+      def handle_identifier_hook_binding(id_node)
+        name = id_node&.[](:name)
+        @local_binding_names << name if name
+      end
+
+      def dispatch_identifier_binding(stmt, init, name, seen)
         case init.type
         when "JSXElement", "JSXFragment"
           @local_jsx[name] = init
@@ -899,7 +914,66 @@ module JsxRosetta
 
       def lower_call_expression(expression)
         loop_node = try_lower_map_loop(expression)
-        loop_node || Interpolation.new(expression: source_of(expression))
+        return loop_node if loop_node
+
+        local_call = try_lower_local_arrow_call(expression)
+        return local_call if local_call
+
+        Interpolation.new(expression: source_of(expression))
+      end
+
+      # Recognize `{renderHeader()}` where `renderHeader` is a locally-bound
+      # arrow whose body returns JSX. Extract the arrow as a RenderMethod
+      # on the component and emit a LocalRenderCall at this use site so the
+      # backend can call the generated method instead of dropping the
+      # expression as "[untranslated: renderHeader()]". Args must be simple
+      # identifiers (props, locals) since we don't translate arbitrary
+      # argument expressions here — the backend's ExpressionTranslator
+      # handles them via the Interpolation it sees.
+      def try_lower_local_arrow_call(call_expression)
+        match = local_arrow_call_match(call_expression)
+        return nil unless match
+
+        # Consume the arrow so it doesn't ALSO get promoted to a Stimulus
+        # method if it later appears in event-handler position.
+        @local_arrows.delete(match[:callee_name])
+
+        method_name = unique_render_method_name(match[:callee_name])
+        @render_methods << RenderMethod.new(
+          name: method_name,
+          params: match[:arrow][:params].map { |p| p[:name] },
+          body: match[:body]
+        )
+
+        LocalRenderCall.new(
+          method_name: method_name,
+          args: match[:args].map { |arg| Interpolation.new(expression: source_of(arg)) }
+        )
+      end
+
+      def local_arrow_call_match(call_expression)
+        callee = call_expression.child(:callee)
+        return nil unless callee&.of_type?("Identifier")
+
+        arrow = @local_arrows[callee[:name]]
+        return nil unless arrow
+        return nil unless arrow[:params].all? { |p| AST::Node.matches?(p, "Identifier") }
+
+        args = call_expression[:arguments]
+        return nil if args.size != arrow[:params].size
+        return nil unless args.all? { |a| AST::Node.matches?(a, "Identifier", "MemberExpression") }
+
+        body = lower_lambda_body(arrow[:body])
+        return nil unless body
+
+        { callee_name: callee[:name], arrow: arrow, args: args, body: body }
+      end
+
+      def unique_render_method_name(js_name)
+        snake = AST::Inflector.underscore(js_name)
+        @render_method_seen[snake] ||= 0
+        @render_method_seen[snake] += 1
+        @render_method_seen[snake] == 1 ? snake : "#{snake}_#{@render_method_seen[snake]}"
       end
 
       def try_lower_map_loop(call_expression)

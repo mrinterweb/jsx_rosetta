@@ -142,6 +142,43 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(files["x_component.html.erb"]).to include("<% else %>")
       expect(files["x_component.html.erb"]).to include("<% end %>")
     end
+
+    # `error && <X />` where `error` is destructured from a hook would
+    # collapse to `<% if nil %>` (the translator returns `"nil"` so the
+    # file loads). That's silently never-rendering. Falling back to the
+    # verbatim expression makes the JS source visible to the reviewer.
+    it "falls back to the verbatim expression when the test resolves to a known local" do
+      source = <<~JSX
+        function X() {
+          const { error } = useQuery();
+          return <div>{error && <p>err</p>}</div>;
+        }
+      JSX
+      files = files_for(source)
+
+      expect(files["x_component.html.erb"]).not_to include("<% if nil %>")
+      expect(files["x_component.html.erb"]).to include("<% if error %>")
+    end
+  end
+
+  describe "nested render-function locals" do
+    # ERB ViewComponent doesn't have a clean way to render Ruby-method
+    # bodies into the template inline, so the template emits a call
+    # invocation and the class gets a method skeleton with a TODO. The
+    # reviewer fills in the body by hand.
+    it "emits the method invocation at the use site and a skeleton on the class" do
+      source = <<~JSX
+        function X() {
+          const renderHeader = () => <h1>Header</h1>;
+          return <main>{renderHeader()}</main>;
+        }
+      JSX
+      files = files_for(source)
+
+      expect(files["x_component.html.erb"]).to include("<%= render_header %>")
+      expect(files["x_component.rb"]).to include("def render_header")
+      expect(files["x_component.rb"]).to include("# TODO: translate the JSX body for render_header")
+    end
   end
 
   describe "Ruby class generation" do

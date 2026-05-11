@@ -328,6 +328,50 @@ RSpec.describe JsxRosetta::IR::Lowering do
 
       expect(ir.local_binding_names).to contain_exactly("open", "setOpen")
     end
+
+    it "extracts a JSX-returning local arrow into render_methods with a LocalRenderCall at the use site" do
+      # `const renderHeader = () => <h1/>; ... {renderHeader()}` used to
+      # drop to `Interpolation("renderHeader()")` at the use site. Now the
+      # arrow is captured as a RenderMethod and the call as a
+      # LocalRenderCall pointing at it.
+      ir = lower(<<~JSX)
+        function X() {
+          const renderHeader = (count) => <h1>{count}</h1>;
+          return <main>{renderHeader(headerCount)}</main>;
+        }
+      JSX
+
+      expect(ir.render_methods.size).to eq(1)
+      rm = ir.render_methods.first
+      expect(rm.name).to eq("render_header")
+      expect(rm.params).to eq(["count"])
+      expect(rm.body).to be_a(JsxRosetta::IR::Element)
+
+      call = ir.body.children.first
+      expect(call).to be_a(JsxRosetta::IR::LocalRenderCall)
+      expect(call.method_name).to eq("render_header")
+      expect(call.args.map(&:expression)).to eq(["headerCount"])
+    end
+
+    it "exposes Identifier-bound hook results (useCallback / useRef / useMemo) as local_binding_names" do
+      # `const handleChange = useCallback(...)` is not a destructure, so
+      # earlier versions of classify_local_binding dropped it on the floor.
+      # Without the binding name on record, the translator emits
+      # `on_change: handle_change` at the use site — a NameError. Recording
+      # it makes the translator emit `nil` instead.
+      ir = lower(<<~JSX)
+        function X() {
+          const handleChange = useCallback(() => 1, []);
+          const ref = useRef(null);
+          const memoed = useMemo(() => 2, []);
+          return <div />;
+        }
+      JSX
+
+      expect(ir.local_binding_names).to contain_exactly("handleChange", "ref", "memoed")
+      expect(ir.local_bindings).to be_empty
+      expect(ir.react_hooks.map(&:hook)).to eq(%w[useCallback useRef useMemo])
+    end
   end
 
   describe "Gap A: destructure pattern capture" do
@@ -1391,7 +1435,8 @@ RSpec.describe JsxRosetta::IR::Lowering do
             original_name: "onClick"
           )
         ],
-        react_hooks: []
+        react_hooks: [],
+        render_methods: []
       )
 
       expect(ir).to eq(expected)

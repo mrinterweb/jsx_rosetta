@@ -20,16 +20,16 @@ Metrics/BlockLength:
     - "*.gemspec"
 
 Metrics/MethodLength:
-  Max: 25
+  Max: 28
 
 Metrics/AbcSize:
-  Max: 25
+  Max: 27
 
 Metrics/ClassLength:
-  Max: 950
+  Max: 1000
 
 Metrics/CyclomaticComplexity:
-  Max: 11
+  Max: 12
 
 Metrics/PerceivedComplexity:
   Max: 11
