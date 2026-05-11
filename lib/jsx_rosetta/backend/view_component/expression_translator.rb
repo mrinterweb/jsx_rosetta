@@ -39,6 +39,13 @@ module JsxRosetta
         TEMPLATE_INTERPOLATION = /\$\{([a-zA-Z_$][a-zA-Z_$0-9]*(?:\??\.[a-zA-Z_$][a-zA-Z_$0-9]*)*)\}/
         MEMBER_CHAIN = /\A(?<root>[a-zA-Z_$][a-zA-Z_$0-9]*)(?<rest>(?:\??\.[a-zA-Z_$][a-zA-Z_$0-9]*)+)\z/
         MEMBER_SEGMENT = /(\??\.)([a-zA-Z_$][a-zA-Z_$0-9]*)/
+        # Class-component access patterns. `this.props.X` is the same shape as
+        # a function-component prop reference, so it maps to `@x` plus any
+        # trailing member chain. `this.state.X` has no Ruby analog (state
+        # without a backing data source) so we surface a `nil` placeholder
+        # with a TODO marker — the file still loads.
+        THIS_PROPS_CHAIN = /\Athis\.props\.(?<rest>[a-zA-Z_$][a-zA-Z_$0-9]*(?:\??\.[a-zA-Z_$][a-zA-Z_$0-9]*)*)\z/
+        THIS_STATE_CHAIN = /\Athis\.state\.(?<rest>[a-zA-Z_$][a-zA-Z_$0-9]*(?:\??\.[a-zA-Z_$][a-zA-Z_$0-9]*)*)\z/
         UNARY = /\A(?<op>!+|-|\+)(?<operand>.+)\z/m
         SIMPLE_LITERALS = { "null" => "nil", "undefined" => "nil", "true" => "true", "false" => "false" }.freeze
 
@@ -91,16 +98,54 @@ module JsxRosetta
 
         def translate_ruby(source, unresolved)
           source = unwrap_outer_parens(source.strip)
-          if SIMPLE_LITERALS.key?(source) then SIMPLE_LITERALS[source]
-          elsif source.match?(NUMBER_LITERAL) || source.match?(STRING_LITERAL) then source
-          elsif source.match?(IDENTIFIER) then translate_identifier(source, unresolved)
-          elsif (m = MEMBER_CHAIN.match(source)) then translate_member_chain(m[:root], m[:rest], unresolved)
+          translate_simple_form(source, unresolved) || translate_compound_form(source, unresolved)
+        end
+
+        # Handle the shapes that don't recurse: literals, identifiers, and
+        # the class-component `this.props.X` / `this.state.X` accessors.
+        # Returns nil when the source needs the compound-form dispatcher.
+        def translate_simple_form(source, unresolved)
+          return SIMPLE_LITERALS[source] if SIMPLE_LITERALS.key?(source)
+          return source if source.match?(NUMBER_LITERAL) || source.match?(STRING_LITERAL)
+          return translate_this_props_chain(::Regexp.last_match(:rest)) if THIS_PROPS_CHAIN.match(source)
+          return translate_this_state_chain(::Regexp.last_match(:rest)) if THIS_STATE_CHAIN.match(source)
+          return translate_identifier(source, unresolved) if source.match?(IDENTIFIER)
+
+          nil
+        end
+
+        # Handle the recursive / multi-segment shapes: member chains,
+        # template literals, unary operators, and the binary fallthrough.
+        def translate_compound_form(source, unresolved)
+          if (m = MEMBER_CHAIN.match(source)) then translate_member_chain(m[:root], m[:rest], unresolved)
           elsif (m = TEMPLATE_LITERAL.match(source)) then translate_template_literal(m[1], unresolved)
-          elsif (m = UNARY.match(source))
-            translate_unary(m[:op], m[:operand], unresolved)
-          else
-            translate_binary(source, unresolved)
+          elsif (m = UNARY.match(source)) then translate_unary(m[:op], m[:operand], unresolved)
+          else translate_binary(source, unresolved)
           end
+        end
+
+        # `this.props.X` → `@x` (plus any trailing member chain segments,
+        # snake_cased and with `?.` → `&.`). The first segment IS the prop;
+        # subsequent segments are accessed off the prop's value. We don't
+        # add to `unresolved` here — class-component prop synthesis at
+        # lowering time has already registered the name.
+        def translate_this_props_chain(rest)
+          first = rest.split(/\??\./, 2).first
+          ivar = "@#{AST::Inflector.underscore(first)}"
+          remainder = rest[first.length..]
+          ruby_rest = remainder.gsub(MEMBER_SEGMENT) do
+            op = ::Regexp.last_match(1) == "?." ? "&." : "."
+            "#{op}#{AST::Inflector.underscore(::Regexp.last_match(2))}"
+          end
+          "#{ivar}#{ruby_rest}"
+        end
+
+        # `this.state.X` has no direct Ruby analog — class-component state
+        # mutations don't map cleanly to a Phlex render. Emit `nil` so the
+        # file loads; reviewers wire up real state via controller-passed
+        # props or Stimulus values.
+        def translate_this_state_chain(_rest)
+          "nil"
         end
 
         def translate_unary(operator, operand, unresolved)

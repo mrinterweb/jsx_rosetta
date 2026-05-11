@@ -145,6 +145,11 @@ module JsxRosetta
         @react_hooks = []
         @render_methods = []
         @render_method_seen = {}
+        # Class-component non-render members (constructor, lifecycle hooks,
+        # custom handlers). Keyed by class name; populated by
+        # extract_class_component, drained by lower_component to surface
+        # the verbatim sources as a TODO comment block.
+        @pending_class_other_members = {}
       end
 
       def lower_file(file)
@@ -243,6 +248,7 @@ module JsxRosetta
         return false if name.nil? || name.empty?
         return true if pascal_case?(name)
         return false if hook_name?(name)
+        return true if extract_data_factory_array(function)
 
         body_returns_jsx?(function[:body])
       end
@@ -280,6 +286,8 @@ module JsxRosetta
           [[stmt[:id]&.[](:name), stmt]]
         when "VariableDeclaration"
           extract_arrow_components(stmt)
+        when "ClassDeclaration"
+          extract_class_component(stmt)
         when "ExportNamedDeclaration", "ExportDefaultDeclaration"
           extract_exported_components(stmt[:declaration])
         else
@@ -293,8 +301,131 @@ module JsxRosetta
         case declaration.type
         when "FunctionDeclaration" then [[declaration[:id]&.[](:name), declaration]]
         when "VariableDeclaration" then extract_arrow_components(declaration)
+        when "ClassDeclaration" then extract_class_component(declaration)
         else []
         end
+      end
+
+      # Recognize a class component by the presence of a `render()` method.
+      # We don't require `extends React.Component` because TypeScript codebases
+      # often declare the parent via an `extends` of a typed alias. The render
+      # method's signature (no args, returns JSX) is the JSX-component signal.
+      #
+      # The render ClassMethod's `[:params]` is always `[]` and `[:body]` is a
+      # BlockStatement — same shape as a function declaration's body, so the
+      # rest of the lowering pipeline works unchanged. Other class members
+      # (constructor, lifecycle hooks, custom handlers) get stashed on
+      # `@pending_class_other_members` keyed by class name, then surfaced as
+      # a LocalBinding-style TODO block by `lower_component`.
+      def extract_class_component(class_decl)
+        name = class_decl[:id]&.[](:name)
+        return [] unless name
+
+        render_method, other_members = partition_class_members(class_decl)
+        return [] unless render_method
+
+        @pending_class_other_members[name] = other_members
+        [[name, render_method]]
+      end
+
+      def partition_class_members(class_decl)
+        body = class_decl.child(:body)
+        return [nil, []] unless body
+
+        render_method = nil
+        others = []
+        body[:body].each do |member|
+          if class_render_method?(member)
+            render_method = member
+          else
+            others << member
+          end
+        end
+        [render_method, others]
+      end
+
+      def class_render_method?(member)
+        return false unless AST::Node.matches?(member, "ClassMethod", "MethodDefinition")
+
+        key = member.child(:key)
+        AST::Node.matches?(key, "Identifier") && key[:name] == "render" && member[:kind] != "constructor"
+      end
+
+      # Surface every non-render class member (constructor, lifecycle
+      # methods like componentDidMount / componentDidCatch / getDerivedStateFromError,
+      # custom event handlers) as a LocalBinding-shaped TODO with the
+      # verbatim JS source preserved. The user either translates each to a
+      # Ruby method by hand or moves the behavior to Stimulus / controllers.
+      def absorb_class_other_members(name)
+        members = @pending_class_other_members.delete(name) || []
+        members.each do |member|
+          source = source_of(member).strip
+          member_name = class_member_label(member)
+          @local_bindings << LocalBinding.new(name: member_name, source: source)
+        end
+      end
+
+      def class_member_label(member)
+        key = member.child(:key)
+        return "<class member>" unless key
+
+        case key.type
+        when "Identifier" then key[:name]
+        when "StringLiteral" then key[:value]
+        else "<class member>"
+        end
+      end
+
+      # Pre-scan the render method body for `this.props.X` member access
+      # patterns. Each unique X becomes a synthesized IR::Prop entry on the
+      # component, so the generated class emits a matching `initialize(x:)`
+      # and the translator (which sees `@x`) resolves cleanly. Without this
+      # scan, render references would land in `unresolved_identifiers` and
+      # the generated initializer would be empty.
+      def absorb_class_render_props(render_method)
+        body = render_method.child(:body)
+        return [] unless body
+
+        prop_names = []
+        scan_this_props(body, prop_names)
+        prop_names.uniq.map { |name| Prop.new(name: name, default: nil) }
+      end
+
+      def scan_this_props(node, accumulator)
+        return unless node.is_a?(AST::Node)
+
+        if node.of_type?("MemberExpression") && this_props_access?(node)
+          accumulator << node[:property][:name]
+        elsif node.of_type?("VariableDeclarator") && this_props_destructure?(node)
+          destructured_names_of(node[:id]).each { |name| accumulator << name }
+        end
+        node.each_child { |child| scan_this_props(child, accumulator) }
+      end
+
+      # Match `this.props.X` exactly — `this.props` member access where the
+      # property side is also a MemberExpression. We don't follow deeper
+      # chains here; only the immediate `.X` after `.props` becomes a prop
+      # name. `this.props.foo.bar` still yields prop name `foo`.
+      def this_props_access?(member_expr)
+        object = member_expr.child(:object)
+        return false unless AST::Node.matches?(object, "MemberExpression")
+        return false unless AST::Node.matches?(object.child(:object), "ThisExpression")
+
+        object_prop = object.child(:property)
+        AST::Node.matches?(object_prop, "Identifier") && object_prop[:name] == "props"
+      end
+
+      # `const { foo, bar } = this.props;` — destructure off this.props. Each
+      # destructured name becomes a prop. We don't need to walk the rest of
+      # the chain because the destructure consumes one level of `.props`.
+      def this_props_destructure?(declarator)
+        init = declarator[:init]
+        return false unless AST::Node.matches?(init, "MemberExpression")
+        return false unless AST::Node.matches?(init.child(:object), "ThisExpression")
+        return false unless destructure_pattern?(declarator[:id])
+
+        prop = init.child(:property)
+        AST::Node.matches?(prop, "Identifier") && prop[:name] == "props"
       end
 
       def extract_arrow_components(variable_declaration)
@@ -313,20 +444,19 @@ module JsxRosetta
           raise lowering_error("anonymous component functions are not supported", node: function)
         end
 
+        reset_per_component_state!
         props, rest_prop_name = lower_params(function[:params])
         @prop_names = props.map(&:name)
-        @local_bindings = []
-        @local_binding_names = []
-        @local_arrows = {}
-        @local_polymorphic_tags = {}
-        @local_destructures = {}
-        @stimulus_methods = []
-        @stimulus_seen_names = {}
-        @react_hooks = []
-        @render_methods = []
-        @render_method_seen = {}
+        absorb_class_metadata(name, function, props) if function.of_type?("ClassMethod", "MethodDefinition")
 
-        body = lower_function_body(function[:body])
+        factory_array = extract_data_factory_array(function)
+        if factory_array
+          body = lower_value_expression(factory_array)
+          mode = :data_factory
+        else
+          body = lower_function_body(function[:body])
+          mode = :view
+        end
 
         Component.new(
           name: name,
@@ -338,12 +468,78 @@ module JsxRosetta
           module_bindings: [],
           stimulus_methods: @stimulus_methods,
           react_hooks: @react_hooks,
-          render_methods: @render_methods
+          render_methods: @render_methods,
+          mode: mode
         )
+      end
+
+      # A "data factory" function — common for AG-Grid / antd column
+      # descriptor modules — is a function whose body just returns an array
+      # of object literals (`export const createColumns = (...) => [{...},
+      # {...}]`). When we recognize this shape, we lower the body via the
+      # recursive ObjectLiteral/ArrayLiteral path (Gap H) and let the
+      # backend emit a snake_case method that returns the data, instead of
+      # a `view_template`. JSX inside object properties still extracts to
+      # private methods on the class via the IR::Lambda extraction.
+      def extract_data_factory_array(function)
+        body = function[:body]
+        return nil unless body.is_a?(AST::Node)
+
+        # Implicit-return arrow: body IS the ArrayExpression.
+        return body if data_factory_candidate_array?(body)
+
+        return nil unless body.of_type?("BlockStatement")
+
+        return_stmt = body[:body].last
+        return nil unless AST::Node.matches?(return_stmt, "ReturnStatement")
+
+        arg = return_stmt[:argument]
+        data_factory_candidate_array?(arg) ? arg : nil
+      end
+
+      def data_factory_candidate_array?(node)
+        return false unless AST::Node.matches?(node, "ArrayExpression")
+
+        # At least one element should be an object literal — otherwise
+        # this is probably a primitive list, which doesn't warrant the
+        # extra emission machinery and can stay as a regular
+        # `body_returns_jsx?` rejection.
+        node[:elements].any? { |el| AST::Node.matches?(el, "ObjectExpression") }
+      end
+
+      def reset_per_component_state!
+        @local_bindings = []
+        @local_binding_names = []
+        @local_arrows = {}
+        @local_polymorphic_tags = {}
+        @local_destructures = {}
+        @stimulus_methods = []
+        @stimulus_seen_names = {}
+        @react_hooks = []
+        @render_methods = []
+        @render_method_seen = {}
+      end
+
+      def absorb_class_metadata(name, render_method, props)
+        absorb_class_other_members(name)
+        props.concat(absorb_class_render_props(render_method))
+        @prop_names = props.map(&:name)
       end
 
       def lower_params(params)
         return [[], nil] if params.nil? || params.empty?
+
+        # Multi-positional params — typical for data-factory functions
+        # like `createColumns(token, sortedInfo)` and lowercase JSX-helpers
+        # like `getAlertIcon(level, status, token, isSnoozed = false)`.
+        # Each becomes a Prop with no default. We support Identifier and
+        # `AssignmentPattern` (default values get dropped — translating
+        # JS defaults to Ruby isn't worth the risk here). Other shapes
+        # in a multi-param signature fall through to legacy first-param-
+        # only handling so we don't regress files that used to translate.
+        if params.size > 1 && params.all? { |p| multi_param_supported?(p) }
+          return [params.map { |p| Prop.new(name: multi_param_name(p), default: nil) }, nil]
+        end
 
         first_param = params.first
         case first_param.type
@@ -354,6 +550,16 @@ module JsxRosetta
         else
           raise lowering_error("unsupported parameter shape: #{first_param.type}", node: first_param)
         end
+      end
+
+      def multi_param_supported?(param)
+        return true if AST::Node.matches?(param, "Identifier")
+
+        AST::Node.matches?(param, "AssignmentPattern") && AST::Node.matches?(param[:left], "Identifier")
+      end
+
+      def multi_param_name(param)
+        param.type == "Identifier" ? param[:name] : param[:left][:name]
       end
 
       def lower_object_pattern_params(pattern)
@@ -649,6 +855,13 @@ module JsxRosetta
       def classify_local_binding(stmt, declarator, seen)
         init = declarator[:init]
         return unless init.is_a?(AST::Node)
+
+        # `const { foo, bar } = this.props` — destructured names already
+        # got synthesized into `props:` by absorb_class_render_props at
+        # class-component setup time. Skip the LocalBinding TODO + the
+        # local_binding_names capture so the translator picks up the prop
+        # form (`@foo`) instead of emitting a `nil` placeholder.
+        return if this_props_destructure?(declarator)
 
         library = hook_library_for(init)
         record_hook_call(stmt, init, library) if library

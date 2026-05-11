@@ -11,22 +11,13 @@ Items are tagged by source so the lineage is traceable:
 
 ## Next up
 
-v0.5.0 is shipping. Apollo + Next.js hook hint translation are done
-(see the Done section). The next open larger features are class
-components, AG-Grid module emission, and pretty-printing.
+v0.5.0 ships every roadmap "Larger features" item that was queued. The
+remaining work in this file is Stress-test residual triage and Polish.
 
 ## v0.5+ — Larger features
 
-- [ ] **`ClassDeclaration` → ViewComponent path.** The 4 class-based
-  components currently rejected at lowering (`ErrorBoundary` and
-  cousins) could lower if we handle `render() {}` method extraction. [plan-oos]
-- [ ] **AG-Grid column-descriptor module emission.** Files that are
-  entirely `export const columns = [...]` get rejected as
-  `columns_data`. Could emit a Ruby presenter / module with the
-  column descriptors translated via Gap H's recursive lowering. [plan-oos]
-- [ ] **Pretty-printing long object/array literals.** Gap H emits
-  single-line output; long AG-Grid columns become unreadable. Add
-  multi-line formatting with deterministic indentation. [plan-oos]
+_All previously-listed items shipped in v0.5.0. Drop new larger
+features here as they surface._
 
 ## Stress-test residuals (42/929 rejected)
 
@@ -66,9 +57,8 @@ See [CHANGELOG.md](CHANGELOG.md). Major arcs to date:
 - **v0.4.0** — Closed nine gaps surfaced by a sample review of v0.3.0
   Phlex output (A, B, D, E, F, G, H, J, K); 0/1224 syntax failures
   (down from 25); 343 specs.
-- **v0.5.0** — Closed the four v0.5.0 candidate items from the
-  v0.4.0 sample review **plus** the two larger features at the top
-  of the v0.5+ list (Apollo + Next.js hook hint translation):
+- **v0.5.0** — Closed all four v0.5.0 candidate items from the v0.4.0
+  sample review **plus** every "Larger features" item that was queued:
   - useCallback / useRef / useMemo identifier-bound hook results captured
     in `local_binding_names` so use sites emit `nil` instead of bare
     snake_case refs to nonexistent methods.
@@ -90,3 +80,13 @@ See [CHANGELOG.md](CHANGELOG.md). Major arcs to date:
     detected and surfaced in a dedicated TODO block listing each
     hook's Rails analog. Stress-test impact: 105/929 files now carry
     the Next.js block.
+  - Class-component support (`render()` method extraction, `this.props.X`
+    → `@x` translation, non-render members captured as TODO comments).
+    The 4 class-component residuals now translate cleanly.
+  - Data-factory components (`export const createColumns = (token) =>
+    [{...}]`) lower with `mode: :data_factory`; Phlex emits a snake_case
+    method that returns the translated array, with JSX render lambdas
+    extracted to private methods.
+  - Pretty-printing for long `ObjectLiteral` / `ArrayLiteral` output:
+    multi-line layout when single-line exceeds 80 chars; short literals
+    stay inline.

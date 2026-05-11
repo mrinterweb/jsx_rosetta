@@ -59,11 +59,19 @@ module JsxRosetta
     #                  = () => <div/>; ... {renderHeader()}`). Backends emit
     #                  each as a private method on the generated class and
     #                  reference it from a LocalRenderCall at the use site.
+    # mode  : Symbol — `:view` for a normal Phlex/ViewComponent component
+    #         whose body is rendered as JSX (the default); `:data_factory`
+    #         for column-descriptor / option-list modules whose top-level
+    #         export is a function returning an array of object literals.
+    #         When `:data_factory`, the backend emits a snake_case method
+    #         that returns the translated data, instead of `view_template`.
+    #         JSX inside object properties still extracts to private
+    #         methods on the class via the IR::Lambda path.
     Component = Data.define(:name, :props, :body, :rest_prop_name,
                             :local_bindings, :local_binding_names,
                             :module_bindings,
                             :stimulus_methods, :react_hooks,
-                            :render_methods) do
+                            :render_methods, :mode) do
       include Node
     end
 

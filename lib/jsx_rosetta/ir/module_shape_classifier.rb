@@ -78,9 +78,28 @@ module JsxRosetta
         name.start_with?("use") && name.length > 3 && name[3] == name[3].upcase
       end
 
+      # Only flag class-component shape when the class has no usable render
+      # method. Classes WITH `render()` lower via the
+      # ClassDeclaration → ViewComponent path added in v0.5.0, so the
+      # classifier should leave them alone and let the regular component
+      # finder pick them up.
       def class_component?(stmt)
         decl = stmt.of_type?(*EXPORT_TYPES) ? stmt[:declaration] : stmt
-        AST::Node.matches?(decl, "ClassDeclaration")
+        return false unless AST::Node.matches?(decl, "ClassDeclaration")
+
+        !class_has_render_method?(decl)
+      end
+
+      def class_has_render_method?(class_decl)
+        body = class_decl.child(:body)
+        return false unless body
+
+        body[:body].any? do |member|
+          next false unless AST::Node.matches?(member, "ClassMethod", "MethodDefinition")
+
+          key = member.child(:key)
+          AST::Node.matches?(key, "Identifier") && key[:name] == "render" && member[:kind] != "constructor"
+        end
       end
 
       # Recognize `export const X = React.memo(...)` (export wrapper) or a

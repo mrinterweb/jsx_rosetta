@@ -92,6 +92,13 @@ module JsxRosetta
         base_name = "#{AST::Inflector.underscore(component.name)}_component"
         @stimulus_identifier = component.stimulus_methods.any? ? stimulus_identifier(component) : nil
 
+        # Data-factory components (column-descriptor modules) have no
+        # template — they're pure-data classes. Skip the .erb pair and
+        # emit a single .rb with the factory method. JSX render lambdas
+        # inside the data have nowhere to live in the ViewComponent
+        # ERB-template world, so we surface a TODO note in the class.
+        return emit_data_factory(component) if component.mode == :data_factory
+
         files = [
           File.new(path: "#{base_name}.rb", contents: render_ruby_class(component, translator)),
           File.new(path: erb_path(base_name), contents: render_erb_template(component, translator))
@@ -103,6 +110,85 @@ module JsxRosetta
           )
         end
         files
+      end
+
+      # For data-factory components emit a plain Ruby class (no ApplicationViewComponent
+      # base, no ERB template). The user can mix it into a ViewComponent or call
+      # the method directly — the goal is to surface the translated data array,
+      # not to render it in isolation.
+      def emit_data_factory(component)
+        method_name = AST::Inflector.underscore(component.name)
+        param_names = component.props.map(&:name)
+        translator = ExpressionTranslator.new(prop_names: [], local_binding_names: param_names)
+        signature = data_factory_signature(method_name, param_names)
+        body = translator.with_locals(param_names) do
+          inline_render_value(component.body, translator, indent: 4)
+        end
+        contents = <<~RUBY
+          # frozen_string_literal: true
+
+          # TODO: data-factory module — the translated array contains JSX render
+          # lambdas as `nil` placeholders. Wire each up to a Phlex helper or a
+          # method on the consuming ViewComponent.
+          class #{class_name_for(component)}
+            def #{signature}
+              #{body}
+            end
+          end
+        RUBY
+        [File.new(path: "#{AST::Inflector.underscore(component.name)}.rb", contents: contents)]
+      end
+
+      def class_name_for(component)
+        component.name[0].upcase + component.name[1..]
+      end
+
+      def data_factory_signature(method_name, param_names)
+        return method_name if param_names.empty?
+
+        kwargs = param_names.map { |name| "#{AST::Inflector.underscore(name)}: nil" }
+        "#{method_name}(#{kwargs.join(", ")})"
+      end
+
+      # Recursively render a non-JSX value (ObjectLiteral / ArrayLiteral /
+      # Lambda / Interpolation / primitives) without the kwarg-list
+      # context the Phlex backend uses. IR::Lambda and unmatched cases
+      # both fall through to `nil` — there's no Phlex class to host a
+      # rendered method body, and the class-level TODO comment above the
+      # emitted file already flags both for the reviewer.
+      def inline_render_value(value, translator, indent: 0)
+        case value
+        when IR::ObjectLiteral then render_factory_object_literal(value, translator, indent: indent)
+        when IR::ArrayLiteral then render_factory_array_literal(value, translator, indent: indent)
+        when IR::Interpolation then translator.translate(value.expression)&.ruby || "nil"
+        when String then value.inspect
+        when true then "true"
+        else "nil"
+        end
+      end
+
+      def render_factory_object_literal(obj, translator, indent:)
+        parts = obj.properties.map do |(key, value)|
+          rendered = inline_render_value(value, translator, indent: indent + 2)
+          snake = AST::Inflector.underscore(key)
+          if snake.match?(/\A[a-z_][a-z0-9_]*\z/)
+            "#{snake}: #{rendered}"
+          else
+            "#{key.inspect} => #{rendered}"
+          end
+        end
+        "{ #{parts.join(", ")} }"
+      end
+
+      def render_factory_array_literal(arr, translator, indent:)
+        parts = arr.elements.map do |el|
+          el.nil? ? "nil" : inline_render_value(el, translator, indent: indent + 2)
+        end
+        return "[]" if parts.empty?
+
+        pad = " " * (indent + 2)
+        close_pad = " " * indent
+        "[\n#{pad}#{parts.join(",\n#{pad}")}\n#{close_pad}]"
       end
 
       def erb_path(base_name)

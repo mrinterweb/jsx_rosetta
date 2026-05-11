@@ -637,6 +637,108 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     end
   end
 
+  describe "Data-factory components (AG-Grid column-descriptor module emission)" do
+    it "emits a snake_case method that returns the translated array literal" do
+      source = <<~JS
+        export const createColumns = (token) => [
+          { title: "Name", dataIndex: "name", width: 200 }
+        ];
+      JS
+      content = file_contents(source, "create_columns.rb")
+
+      expect(content).to include("class CreateColumns < Phlex::HTML")
+      expect(content).to include("def create_columns(token: nil)")
+      expect(content).not_to include("def view_template")
+      expect(content).not_to include("def initialize")
+      expect(content).to include("data_index: \"name\"")
+    end
+
+    it "extracts JSX render-lambdas inside the data array to private methods" do
+      source = <<~JS
+        export const createColumns = () => [
+          { title: "ID", render: (id) => <span>{id}</span> }
+        ];
+      JS
+      content = file_contents(source, "create_columns.rb")
+
+      expect(content).to include("render: method(:render_render)")
+      expect(content).to include("def render_render(id)")
+      expect(content).to include("span do")
+    end
+
+    it "translates factory param references as locals (bare snake_case, not @ivar)" do
+      # `token.colorPrimary` should resolve to `token.color_primary`, not
+      # `@token.color_primary` — token is a method-local, not a constructor prop.
+      source = <<~JS
+        export const createColumns = (token) => [
+          { title: "Name", color: token.colorPrimary }
+        ];
+      JS
+      content = file_contents(source, "create_columns.rb")
+
+      expect(content).to include("color: token.color_primary")
+      expect(content).not_to include("@token")
+    end
+  end
+
+  describe "Pretty-printing long object/array literals" do
+    # Short literals stay inline (the v0.4.0 behavior). The wrap kicks in
+    # only when the single-line rendering exceeds LITERAL_INLINE_BUDGET,
+    # so tiny columns/options arrays don't get gratuitously expanded.
+    it "keeps short array-of-hash literals inline" do
+      content = file_contents(
+        "function X() { return <Select options={[{ value: 10, label: \"a\" }]} />; }",
+        "x.rb"
+      )
+
+      expect(content).to include('options: [{ value: 10, label: "a" }]')
+      # Ensure no spurious wrap.
+      expect(content).not_to match(/options: \[\n/)
+    end
+
+    it "wraps long array-of-hash literals across multiple lines" do
+      source = <<~JS
+        function X() {
+          return (
+            <Grid columns={[
+              { field: "name", headerName: "Full Name", sortable: true, filter: true, width: 200 },
+              { field: "value", headerName: "Currency Value", sortable: true, filter: false, width: 250 }
+            ]} />
+          );
+        }
+      JS
+      content = file_contents(source, "x.rb")
+
+      # The wrap puts one element per line at indent+2, with the closing
+      # bracket re-aligned to the parent `render` indent (4 spaces for a
+      # view_template body) so the file still parses cleanly.
+      expect(content).to match(/columns: \[\n      \{/)
+      expect(content).to match(/\n    \]/)
+      # And the emitted file still passes Ruby syntax check.
+      expect(RubyVM::InstructionSequence.compile(content)).to be_a(RubyVM::InstructionSequence)
+    end
+
+    it "wraps nested object literals when the outer is wrapped" do
+      # When the outer array wraps, the parts come in pre-formatted; nested
+      # objects that exceed the inline budget also wrap. The result must
+      # still be valid Ruby and the closing brackets must align with the
+      # right indent.
+      source = <<~JS
+        function X() {
+          return (
+            <Grid columns={[
+              { field: "first", config: { sortable: true, filter: true, width: 200, headerCellClass: "long-string-here" } }
+            ]} />
+          );
+        }
+      JS
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("config: {")
+      expect(content).to include("header_cell_class:")
+    end
+  end
+
   describe "Gap G: plain/raw hint for ReactNode-typed props" do
     it "emits a `raw` comment hint when an interpolation resolves to a bare @ivar prop" do
       # `plain @children` HTML-escapes the value, which corrupts ReactNode-

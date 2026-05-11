@@ -1115,9 +1115,75 @@ RSpec.describe JsxRosetta::IR::Lowering do
         .to raise_error(JsxRosetta::IR::Lowering::LoweringError, /utility module.*JSX-returning/)
     end
 
-    it "labels a class-component module" do
-      expect { lower("export class MyComp extends React.Component { render() { return <div />; } }") }
+    it "still labels a class-component module when there's no render method" do
+      # v0.5.0 added a ClassDeclaration → ViewComponent path for classes
+      # WITH a `render()` method, but classes lacking render still can't
+      # translate — surface the original triage label.
+      expect { lower("export class MyComp extends React.Component { other() { return 1; } }") }
         .to raise_error(JsxRosetta::IR::Lowering::LoweringError, /class component.*function components/)
+    end
+
+    it "lowers a class component that defines a render() method (v0.5.0 path)" do
+      ir = lower(<<~JSX)
+        class MyComp extends React.Component {
+          render() {
+            const { type } = this.props;
+            return <div className={type} />;
+          }
+        }
+      JSX
+
+      expect(ir).to be_a(JsxRosetta::IR::Component)
+      expect(ir.name).to eq("MyComp")
+      expect(ir.props.map(&:name)).to include("type")
+      expect(ir.body).to be_a(JsxRosetta::IR::Element)
+    end
+
+    it "captures non-render class members as LocalBinding TODOs" do
+      ir = lower(<<~JSX)
+        class MyComp extends React.Component {
+          constructor(props) { super(props); this.state = { x: 0 }; }
+          componentDidMount() { console.log("mounted"); }
+          render() { return <div />; }
+        }
+      JSX
+
+      bound_names = ir.local_bindings.map(&:name)
+      expect(bound_names).to include("constructor", "componentDidMount")
+      expect(ir.local_bindings.map(&:source).join).to include("super(props)")
+    end
+
+    it "synthesizes props from direct `this.props.X` access in a class render" do
+      ir = lower(<<~JSX)
+        class Card extends React.Component {
+          render() {
+            return <div>{this.props.title}</div>;
+          }
+        }
+      JSX
+
+      expect(ir.props.map(&:name)).to include("title")
+    end
+
+    it "lowers a data-factory function whose body returns an array of object literals" do
+      ir = lower(<<~JS)
+        export const createColumns = (token, sortedInfo) => [
+          { title: "Name", dataIndex: "name", width: 200 }
+        ];
+      JS
+
+      expect(ir).to be_a(JsxRosetta::IR::Component)
+      expect(ir.name).to eq("createColumns")
+      expect(ir.mode).to eq(:data_factory)
+      expect(ir.body).to be_a(JsxRosetta::IR::ArrayLiteral)
+      expect(ir.props.map(&:name)).to eq(%w[token sortedInfo])
+    end
+
+    it "does not treat a body returning a primitive array as a data factory" do
+      # `[1, 2, 3]` is not column-descriptor-shaped; the existing utility-
+      # module rejection should still fire.
+      expect { lower("export const constants = () => [1, 2, 3];") }
+        .to raise_error(JsxRosetta::IR::Lowering::LoweringError, /utility module/)
     end
 
     it "labels a columns/data module (top-level array literal export)" do
@@ -1563,7 +1629,8 @@ RSpec.describe JsxRosetta::IR::Lowering do
           )
         ],
         react_hooks: [],
-        render_methods: []
+        render_methods: [],
+        mode: :view
       )
 
       expect(ir).to eq(expected)

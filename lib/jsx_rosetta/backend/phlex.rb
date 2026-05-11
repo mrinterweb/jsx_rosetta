@@ -31,6 +31,15 @@ module JsxRosetta
       VALID_IDENTIFIER = /\A[a-z_][a-z0-9_]*\z/i
       VOID_ELEMENTS = %w[area base br col embed hr img input link meta param source track wbr].freeze
 
+      # Inline budget for object/array literal rendering. When the
+      # single-line rendering of a literal exceeds this width — measured
+      # from the opening bracket — it switches to a multi-line layout
+      # with one entry per line, indented two spaces past the parent's
+      # line indent. Closing bracket re-aligns to the parent indent.
+      # Chosen to keep typical attr lines under ~120 chars after the
+      # kwarg name and surrounding `render Foo.new(...)` wrapper.
+      LITERAL_INLINE_BUDGET = 80
+
       # Per-library TODO header lines surfaced above the verbatim hook
       # source. Each library has a different Rails analog, so we don't
       # collapse them into a single generic block. Keys must mirror the
@@ -142,7 +151,11 @@ module JsxRosetta
 
       def render_class_body(component, translator)
         initializer = render_initializer(component, translator)
-        template = render_view_template(component, translator)
+        template = if component.mode == :data_factory
+                     render_data_factory_method(component, translator)
+                   else
+                     render_view_template(component, translator)
+                   end
         # Render private methods (render_methods + lambdas) AFTER the
         # template — `@lambda_methods` is populated during attribute-value
         # rendering, and render_methods bodies share the same indent.
@@ -150,6 +163,33 @@ module JsxRosetta
 
         sections = [initializer, template, private_section].compact.join("\n\n")
         "class #{class_name(component)} < #{PHLEX_BASE_CLASS}\n#{sections}\nend\n"
+      end
+
+      # For data-factory components (`export const createColumns = (args)
+      # => [{...}, {...}]`) emit a public method that returns the
+      # translated data array. The method name is the snake_case of the
+      # original JS identifier (`createColumns` → `create_columns`).
+      # Param names come from the regular `props:` list so callers can
+      # invoke with keyword arguments matching the JS signature.
+      def render_data_factory_method(component, translator)
+        method_name = AST::Inflector.underscore(component.name)
+        param_names = component.props.map(&:name)
+        signature = data_factory_signature(method_name, param_names)
+        # Param refs translate as locals (`token`) inside the body rather
+        # than as ivars (`@token`) — the factory params are method-local,
+        # not constructor-stored. `with_locals` pushes the JS names onto
+        # the translator's local stack for the duration of the body.
+        body = translator.with_locals(param_names) do
+          render_inline_value(component.body, translator, todos: [], attr_name: nil, indent: 4)
+        end
+        "  def #{signature}\n    #{body}\n  end"
+      end
+
+      def data_factory_signature(method_name, param_names)
+        return method_name if param_names.empty?
+
+        kwargs = param_names.map { |name| "#{AST::Inflector.underscore(name)}: nil" }
+        "#{method_name}(#{kwargs.join(", ")})"
       end
 
       # Coalesce RenderMethod (from local-arrow extraction) and Lambda
@@ -189,6 +229,10 @@ module JsxRosetta
       end
 
       def render_initializer(component, translator)
+        # Data-factory components consume their params as method args, not
+        # as constructor props — skip the initializer entirely.
+        return nil if component.mode == :data_factory
+
         props = initializable_props(component)
         rest_name = component.rest_prop_name
         return nil if props.empty? && rest_name.nil?
@@ -337,7 +381,7 @@ module JsxRosetta
 
       def render_element(element, translator, indent:)
         todos = []
-        attrs_source = format_attributes(element.attributes, translator, context: :html, todos: todos)
+        attrs_source = format_attributes(element.attributes, translator, context: :html, todos: todos, indent: indent)
         method_call = "#{element.tag}#{attrs_source}"
 
         body = if VOID_ELEMENTS.include?(element.tag) || element.children.empty?
@@ -352,7 +396,7 @@ module JsxRosetta
 
       def render_component_invocation(invocation, translator, indent:)
         todos = []
-        kwargs = component_invocation_kwargs(invocation.props, translator, todos: todos)
+        kwargs = component_invocation_kwargs(invocation.props, translator, todos: todos, indent: indent)
         class_ref = component_class_reference(invocation.name)
         new_call = kwargs.empty? ? "#{class_ref}.new" : "#{class_ref}.new(#{kwargs})"
 
@@ -534,31 +578,30 @@ module JsxRosetta
       # of `h1()`). The `context:` param selects naming convention:
       #   - :html       (HTML element attrs — preserve camelCase for SVG)
       #   - :component  (Ruby method args — snake_case via Inflector.underscore)
-      def format_attributes(attributes, translator, context: :html, todos: [])
+      def format_attributes(attributes, translator, context: :html, todos: [], indent: 0)
         events, others = attributes.partition { |a| a.is_a?(IR::EventBinding) || a.is_a?(IR::StimulusBinding) }
         spreads, plain_attrs = others.partition { |a| a.is_a?(IR::SpreadAttribute) }
 
-        sym_parts = []
-        str_parts = []
+        parts = { sym: [], str: [] }
         plain_attrs.each do |a|
-          append_attribute_part(a, translator, sym_parts, str_parts, context: context, todos: todos)
+          append_attribute_part(a, translator, parts, context: context, todos: todos, indent: indent)
         end
-        sym_parts << data_action_entry(events, translator) if events.any?
+        parts[:sym] << data_action_entry(events, translator) if events.any?
 
-        joined = build_attribute_list(sym_parts, str_parts, spreads, translator)
+        joined = build_attribute_list(parts, spreads, translator)
         joined.empty? ? "" : "(#{joined})"
       end
 
-      def append_attribute_part(attribute, translator, sym_parts, str_parts, context:, todos:)
-        part = phlex_attribute_part(attribute, translator, context: context, todos: todos)
+      def append_attribute_part(attribute, translator, parts, context:, todos:, indent: 0)
+        part = phlex_attribute_part(attribute, translator, context: context, todos: todos, indent: indent)
         return unless part
 
-        (part[:string_key] ? str_parts : sym_parts) << part[:source]
+        (part[:string_key] ? parts[:str] : parts[:sym]) << part[:source]
       end
 
-      def build_attribute_list(sym_parts, str_parts, spreads, translator)
-        pieces = sym_parts.dup
-        pieces << "**{ #{str_parts.join(", ")} }" if str_parts.any?
+      def build_attribute_list(parts, spreads, translator)
+        pieces = parts[:sym].dup
+        pieces << "**{ #{parts[:str].join(", ")} }" if parts[:str].any?
         pieces.concat(spreads.map { |s| "**#{render_spread(s.expression, translator)}" })
         pieces.join(", ")
       end
@@ -566,12 +609,13 @@ module JsxRosetta
       # Emit one attribute as either a {string_key: false, source: "id: @x"}
       # (Ruby-kwarg-safe name) or {string_key: true, source: '"xml:lang" => @x'}
       # (rare; non-identifier name — goes into a **{ ... } splat).
-      def phlex_attribute_part(attribute, translator, context:, todos:)
+      def phlex_attribute_part(attribute, translator, context:, todos:, indent: 0)
         case attribute
         when IR::StyleBinding then class_attribute_part(attribute.expression, translator)
         when IR::ClassList then { string_key: false, source: "class: #{class_list_to_ruby_string(attribute, translator)}" }
         when IR::Style then { string_key: false, source: "style: #{style_to_ruby_string(attribute, translator)}" }
-        when IR::Attribute then plain_attribute_part(attribute, translator, context: context, todos: todos)
+        when IR::Attribute
+          plain_attribute_part(attribute, translator, context: context, todos: todos, indent: indent)
         end
       end
 
@@ -590,8 +634,8 @@ module JsxRosetta
       # follow snake_case convention (`defaultValue` → `default_value`).
       # Names that aren't valid Ruby identifiers after conversion (rare:
       # `xml:lang` and friends) fall back to a quoted string key.
-      def plain_attribute_part(attribute, translator, context:, todos:)
-        value_ruby = attribute_value_to_ruby(attribute.name, attribute.value, translator, todos: todos)
+      def plain_attribute_part(attribute, translator, context:, todos:, indent: 0)
+        value_ruby = attribute_value_to_ruby(attribute.name, attribute.value, translator, todos: todos, indent: indent)
         ruby_name = case context
                     when :component then AST::Inflector.underscore(attribute.name)
                     else attribute.name.tr("-", "_")
@@ -603,13 +647,13 @@ module JsxRosetta
         end
       end
 
-      def attribute_value_to_ruby(name, value, translator, todos:)
+      def attribute_value_to_ruby(name, value, translator, todos:, indent: 0)
         case value
         when true then "true"
         when String then value.inspect
         when IR::Interpolation then interpolated_attribute_value(name, value, translator, todos: todos)
-        when IR::ObjectLiteral then render_object_literal_value(value, translator, todos: todos)
-        when IR::ArrayLiteral then render_array_literal_value(value, translator, todos: todos)
+        when IR::ObjectLiteral then render_object_literal_value(value, translator, todos: todos, indent: indent)
+        when IR::ArrayLiteral then render_array_literal_value(value, translator, todos: todos, indent: indent)
         when IR::Lambda then render_lambda_method_reference(value, translator, attr_name: name)
         end
       end
@@ -617,15 +661,19 @@ module JsxRosetta
       # Render an ObjectLiteral as a Ruby hash literal. Identifier-keyed
       # entries become Ruby kwargs (snake_cased to match Ruby convention);
       # non-identifier keys (numeric, hyphenated) fall back to string keys.
-      def render_object_literal_value(object_literal, translator, todos:)
+      # When the single-line rendering exceeds LITERAL_INLINE_BUDGET, or
+      # when any rendered child value spans multiple lines, the layout
+      # switches to one entry per line, indented two spaces past `indent`.
+      def render_object_literal_value(object_literal, translator, todos:, indent: 0)
+        child_indent = indent + 2
         parts = object_literal.properties.map do |(key, value)|
-          render_object_property(key, value, translator, todos: todos)
+          render_object_property(key, value, translator, todos: todos, indent: child_indent)
         end
-        "{ #{parts.join(", ")} }"
+        wrap_literal_parts(parts, open: "{", close: "}", indent: indent, inline_sep: ", ", inline_pad: " ")
       end
 
-      def render_object_property(key, value, translator, todos:)
-        value_ruby = render_inline_value(value, translator, todos: todos, attr_name: key)
+      def render_object_property(key, value, translator, todos:, indent: 0)
+        value_ruby = render_inline_value(value, translator, todos: todos, attr_name: key, indent: indent)
         snake = AST::Inflector.underscore(key)
         if snake.match?(VALID_IDENTIFIER)
           "#{snake}: #{value_ruby}"
@@ -634,20 +682,37 @@ module JsxRosetta
         end
       end
 
-      def render_array_literal_value(array_literal, translator, todos:)
+      def render_array_literal_value(array_literal, translator, todos:, indent: 0)
+        child_indent = indent + 2
         parts = array_literal.elements.map do |el|
-          el.nil? ? "nil" : render_inline_value(el, translator, todos: todos, attr_name: nil)
+          el.nil? ? "nil" : render_inline_value(el, translator, todos: todos, attr_name: nil, indent: child_indent)
         end
-        "[#{parts.join(", ")}]"
+        wrap_literal_parts(parts, open: "[", close: "]", indent: indent, inline_sep: ", ", inline_pad: "")
+      end
+
+      # Pick single-line vs multi-line layout for a rendered literal.
+      # Multi-line is forced when any rendered part already contains a
+      # newline (a nested literal that wrapped); otherwise we wrap only
+      # when the single-line form exceeds LITERAL_INLINE_BUDGET.
+      def wrap_literal_parts(parts, open:, close:, indent:, inline_sep:, inline_pad:)
+        return "#{open}#{close}" if parts.empty?
+
+        inline = "#{open}#{inline_pad}#{parts.join(inline_sep)}#{inline_pad}#{close}"
+        any_multiline = parts.any? { |p| p.include?("\n") }
+        return inline if !any_multiline && inline.length <= LITERAL_INLINE_BUDGET
+
+        child_pad = " " * (indent + 2)
+        close_pad = " " * indent
+        "#{open}\n#{child_pad}#{parts.join(",\n#{child_pad}")}\n#{close_pad}#{close}"
       end
 
       # An inline value can appear as a kwarg value, an array element, or a
       # hash property value. Recursive shapes route back through the new IR
       # types; primitives fall through the same paths as attribute_value_to_ruby.
-      def render_inline_value(value, translator, todos:, attr_name:)
+      def render_inline_value(value, translator, todos:, attr_name:, indent: 0)
         case value
-        when IR::ObjectLiteral then render_object_literal_value(value, translator, todos: todos)
-        when IR::ArrayLiteral then render_array_literal_value(value, translator, todos: todos)
+        when IR::ObjectLiteral then render_object_literal_value(value, translator, todos: todos, indent: indent)
+        when IR::ArrayLiteral then render_array_literal_value(value, translator, todos: todos, indent: indent)
         when IR::Lambda then render_lambda_method_reference(value, translator, attr_name: attr_name)
         when IR::Interpolation then interpolated_attribute_value(attr_name || "<element>", value, translator,
                                                                  todos: todos)
@@ -707,18 +772,17 @@ module JsxRosetta
         "nil"
       end
 
-      def component_invocation_kwargs(props, translator, todos: [])
+      def component_invocation_kwargs(props, translator, todos: [], indent: 0)
         events, others = props.partition { |a| a.is_a?(IR::EventBinding) || a.is_a?(IR::StimulusBinding) }
         spreads, plain_attrs = others.partition { |a| a.is_a?(IR::SpreadAttribute) }
 
-        sym_parts = []
-        str_parts = []
+        parts = { sym: [], str: [] }
         plain_attrs.each do |a|
-          append_attribute_part(a, translator, sym_parts, str_parts, context: :component, todos: todos)
+          append_attribute_part(a, translator, parts, context: :component, todos: todos, indent: indent)
         end
-        sym_parts << data_action_entry(events, translator) if events.any?
+        parts[:sym] << data_action_entry(events, translator) if events.any?
 
-        build_attribute_list(sym_parts, str_parts, spreads, translator)
+        build_attribute_list(parts, spreads, translator)
       end
 
       def class_list_to_ruby_string(class_list, translator)

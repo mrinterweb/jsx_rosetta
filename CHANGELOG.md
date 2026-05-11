@@ -3,16 +3,64 @@
 ## [0.5.0] - 2026-05-11
 
 Closes the four v0.5.0-candidate items from the v0.4.0 Phlex sample
-review, plus the two larger features queued at the top of the roadmap:
-Apollo and Next.js hook hint translation.
+review, plus the four larger features queued at the top of the
+roadmap: Apollo + Next.js hook hint translation, class-component
+support, AG-Grid column-descriptor module emission, and pretty-printing
+for long object/array literals.
+
+### Added — class-component support
+
+- **`ClassDeclaration` → ViewComponent path.** Classes with a `render()`
+  method now lower as components instead of getting flagged with the
+  `:class_component` rejection. The `ExpressionTranslator` recognizes
+  `this.props.X` and translates to `@x` (plus a snake_case member chain
+  for `this.props.X.y.z`); `this.state.X` translates to `nil` since
+  there's no Rails-side equivalent without a backing data source. Other
+  class members (constructor, lifecycle hooks like
+  `componentDidCatch`/`getDerivedStateFromError`, custom event handlers)
+  get captured as LocalBinding-style TODO comments at the top of the
+  view template so the reviewer sees the verbatim sources. Props are
+  synthesized from direct `this.props.X` access AND from
+  `const { X } = this.props` destructure patterns — the generated
+  `initialize(...)` matches the original class's prop set.
+  Stress-test impact: the 4 class-component residuals (ErrorBoundary
+  and cousins) now translate cleanly.
+
+### Added — AG-Grid column-descriptor module emission
+
+- **Data-factory components.** `export const createColumns = (token,
+  sortedInfo) => [{...}, {...}]` now lowers as an `IR::Component` with
+  `mode: :data_factory`. Phlex emits a snake_case method that returns
+  the translated array — `def create_columns(token: nil, sorted_info: nil)`
+  — instead of `view_template`. JSX inside object properties extracts to
+  private methods on the class via the existing IR::Lambda path
+  (`render: method(:render_id_cell)`). ViewComponent backend emits a
+  plain Ruby class with the method and a TODO note (the .erb pair is
+  skipped — pure-data classes don't have a template). Multi-positional
+  Identifier params are now also supported by `lower_params` — previously
+  only single-arg React-style signatures lowered cleanly.
+
+### Added — pretty-printing
+
+- **Multi-line layout for long object/array literals.** When the single-
+  line rendering of an `IR::ObjectLiteral` or `IR::ArrayLiteral` exceeds
+  `LITERAL_INLINE_BUDGET` (80 chars), or contains a nested literal that
+  itself wrapped, the layout switches to one entry per line indented
+  two spaces past the parent line's indent. Closing bracket re-aligns
+  to the parent indent. Short literals (typical Select options, small
+  config objects) stay inline so non-AG-Grid output is unchanged. Helps
+  readability of the column-descriptor output from the new
+  data-factory path.
 
 ### Stress test outcome
 
-- 929-file Phlex stress rerun: 887/929 clean translations (unchanged
-  from v0.4.0 — rejection logic untouched), 0/1224 syntax failures
-  (unchanged). 221/929 files now carry an Apollo TODO block (281
-  GraphQL operation names captured); 105/929 carry a Next.js
-  navigation-hook block.
+- 929-file Phlex stress rerun: **895/929 clean translations**
+  (up from 887/929 in v0.4.0 — 8 additional files now translate via
+  the class-component and data-factory paths). **0/1240 emitted `.rb`
+  files fail `ruby -c`** (unchanged; 16 more files emitted vs v0.4.0).
+  221/929 files carry an Apollo TODO block (281 GraphQL operation
+  names captured); 105/929 carry a Next.js navigation-hook block.
+- 385 specs, all green; rubocop clean.
 
 ### Added — framework hook hints
 
