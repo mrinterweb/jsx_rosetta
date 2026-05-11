@@ -54,6 +54,14 @@ module JsxRosetta
     #                  Without this capture, references to module-level
     #                  constants from inside the JSX silently drop and
     #                  produce unbacked snake_case references at render time.
+    # module_imports : [ModuleImport] — top-level `import` declarations.
+    #                  Backends thread the imported names into the
+    #                  ExpressionTranslator so any expression-context
+    #                  reference to an import (e.g. `styles.listContainer`
+    #                  from `import styles from "./X.module.css"`, or
+    #                  `AlertStatusEnum.Pending` from a TS enum import)
+    #                  bails out to a TODO instead of snake-casing to a
+    #                  bare identifier that NameErrors at render time.
     # render_methods : [RenderMethod] — local arrow bindings that return JSX
     #                  and are invoked from the JSX body (`const renderHeader
     #                  = () => <div/>; ... {renderHeader()}`). Backends emit
@@ -69,9 +77,26 @@ module JsxRosetta
     #         methods on the class via the IR::Lambda path.
     Component = Data.define(:name, :props, :body, :rest_prop_name,
                             :local_bindings, :local_binding_names,
-                            :module_bindings,
+                            :module_bindings, :module_imports,
                             :stimulus_methods, :react_hooks,
                             :render_methods, :mode) do
+      include Node
+    end
+
+    # A top-level `import` declaration. Captured at lowering time so the
+    # ExpressionTranslator can recognize use-site references and bail out
+    # to a TODO instead of emitting a bare snake_case identifier that
+    # NameErrors at render time.
+    #
+    # name   : String — the local binding name (the side the source uses
+    #          to reference the imported value). For `import { foo as bar }`
+    #          this is "bar"; for `import * as styles` this is "styles";
+    #          for `import Default` this is "Default".
+    # source : String — the module specifier verbatim (e.g. "./styles.module.css",
+    #          "@apollo/client", "react"). Lets backends apply per-source
+    #          policy later (e.g. always strip `*.module.css` references).
+    # kind   : Symbol — :default | :named | :namespace.
+    ModuleImport = Data.define(:name, :source, :kind) do
       include Node
     end
 

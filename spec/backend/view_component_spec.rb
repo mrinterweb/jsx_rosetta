@@ -537,16 +537,31 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(files["x_component.html.erb"]).to include("<%# note: be careful %>")
     end
 
-    it "flags an interpolation whose identifier is neither a prop nor a local" do
+    it "flags an interpolation whose identifier is neither a prop, a local, nor an import" do
+      # CMS_NAME is referenced without any backing declaration in the source —
+      # neither prop, hook local, nor import. The translator falls through
+      # to the bare snake_case emission and records it as unresolved so the
+      # backend surfaces a TODO marker.
+      files = files_for("function X() { return <p>{CMS_NAME}</p>; }")
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include("TODO: unresolved identifier")
+      expect(erb).to include('"CMS_NAME"')
+      expect(erb).to include("<%= cms_name %>")
+    end
+
+    it "bails out of a JSX reference to an imported identifier" do
       files = files_for(<<~JSX)
         import { CMS_NAME } from "@/lib/constants";
         function X() { return <p>{CMS_NAME}</p>; }
       JSX
 
       erb = files["x_component.html.erb"]
-      expect(erb).to include("TODO: unresolved identifier")
-      expect(erb).to include('"CMS_NAME"')
-      expect(erb).to include("<%= cms_name %>")
+      # Imports are unresolvable at translation time — emit `nil` (so the file
+      # loads at render time) rather than a bare `cms_name` reference that
+      # NameErrors.
+      expect(erb).to include("<%= nil %>")
+      expect(erb).not_to include("cms_name")
     end
   end
 

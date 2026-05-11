@@ -584,6 +584,24 @@ RSpec.describe JsxRosetta::IR::Lowering do
       expect(ir.module_bindings).to eq([])
     end
 
+    it "captures a top-level `function helper(){}` as a module binding" do
+      # Without capture, `function onError(){}` at module level silently
+      # disappears, and any reference inside the JSX (e.g. `onClick={onError}`)
+      # snake-cases to a bare `on_error` ref that NameErrors at render time.
+      ir = lower(<<~JSX)
+        function onError(e) { console.error(e); }
+        function X() { return <button onClick={onError}>click</button>; }
+      JSX
+
+      expect(ir.module_bindings.map(&:name)).to include("onError")
+    end
+
+    it "doesn't capture the component itself when declared with FunctionDeclaration" do
+      ir = lower("function X() { return <p />; }")
+
+      expect(ir.module_bindings).to eq([])
+    end
+
     it "captures multiple module bindings preserving source order" do
       ir = described_class.lower(JsxRosetta.parse(<<~JSX), source: <<~JSX)
         const FOO = 400;
@@ -624,6 +642,75 @@ RSpec.describe JsxRosetta::IR::Lowering do
       child = ir.body.children.first
       expect(child).to be_a(JsxRosetta::IR::RenderProp)
       expect(child.params).to eq(%w[fields helpers])
+    end
+  end
+
+  describe "module imports" do
+    it "captures `import { Foo } from 'bar'` as a named ModuleImport" do
+      ir = lower(<<~JSX)
+        import { Foo } from "bar";
+        function X() { return <p>{Foo}</p>; }
+      JSX
+
+      expect(ir.module_imports).to include(
+        JsxRosetta::IR::ModuleImport.new(name: "Foo", source: "bar", kind: :named)
+      )
+    end
+
+    it "captures the local name when the import is renamed" do
+      ir = lower(<<~JSX)
+        import { foo as renamedFoo } from "bar";
+        function X() { return <p>{renamedFoo}</p>; }
+      JSX
+
+      expect(ir.module_imports.map(&:name)).to include("renamedFoo")
+    end
+
+    it "captures default imports as :default" do
+      ir = lower(<<~JSX)
+        import DefaultThing from "module-b";
+        function X() { return <p>{DefaultThing}</p>; }
+      JSX
+
+      expect(ir.module_imports).to include(
+        JsxRosetta::IR::ModuleImport.new(name: "DefaultThing", source: "module-b", kind: :default)
+      )
+    end
+
+    it "captures namespace imports as :namespace" do
+      ir = lower(<<~JSX)
+        import * as styles from "./X.module.css";
+        function X() { return <p />; }
+      JSX
+
+      expect(ir.module_imports).to include(
+        JsxRosetta::IR::ModuleImport.new(name: "styles", source: "./X.module.css", kind: :namespace)
+      )
+    end
+
+    it "captures side-effect imports as nothing (no specifier name)" do
+      # `import "./x"` brings no name into scope — there's nothing to record.
+      ir = lower(<<~JSX)
+        import "./side-effect.css";
+        function X() { return <p />; }
+      JSX
+
+      expect(ir.module_imports).to eq([])
+    end
+
+    it "attaches imports identically to every component when the file has multiple" do
+      ir = JsxRosetta::IR::Lowering.lower_all(JsxRosetta.parse(<<~JSX), source: <<~JSX)
+        import styles from "./X.module.css";
+        function A() { return <p />; }
+        function B() { return <p />; }
+      JSX
+        import styles from "./X.module.css";
+        function A() { return <p />; }
+        function B() { return <p />; }
+      JSX
+
+      expect(ir.map(&:module_imports).map(&:length)).to eq([1, 1])
+      expect(ir.map { |c| c.module_imports.first.name }).to eq(%w[styles styles])
     end
   end
 
@@ -1640,6 +1727,9 @@ RSpec.describe JsxRosetta::IR::Lowering do
         local_bindings: [],
         local_binding_names: [],
         module_bindings: [],
+        module_imports: [
+          JsxRosetta::IR::ModuleImport.new(name: "React", source: "react", kind: :default)
+        ],
         stimulus_methods: [
           JsxRosetta::IR::StimulusMethod.new(
             name: "onClick",

@@ -22,6 +22,11 @@ module JsxRosetta
       #     lowering time but not modeled in IR) translate to a `nil`
       #     placeholder with an inline `# TODO: local 'name'` marker — the
       #     file still loads, but the reviewer sees what to fill in.
+      #   * Names in `imported_names` (top-level `import` declarations) are
+      #     treated the same as local bindings — `nil` at leaf position, bail
+      #     at member-chain root. Without this, `styles.listContainer` from
+      #     `import styles from "./X.module.css"` snake-cases to a bare
+      #     `styles` reference that NameErrors at render time.
       #   * Anything else translates to the bare snake_case identifier and
       #     is recorded as unresolved.
       #
@@ -77,10 +82,11 @@ module JsxRosetta
         # underlying prop name. `"data-testid": dataTestId` records
         # `{ "dataTestId" => "data-testid" }` so the use site of
         # `dataTestId` resolves to the prop's `@data_testid` ivar.
-        def initialize(prop_names:, local_binding_names: [], prop_aliases: {})
+        def initialize(prop_names:, local_binding_names: [], prop_aliases: {}, imported_names: [])
           @prop_names = prop_names.to_set
           @local_binding_names = local_binding_names.to_set
           @prop_aliases = prop_aliases.dup
+          @imported_names = imported_names.to_set
           @local_stack = []
         end
 
@@ -335,10 +341,10 @@ module JsxRosetta
             "@#{AST::Inflector.underscore(@prop_aliases[name])}"
           elsif @prop_names.include?(name)
             "@#{snake}"
-          elsif @local_binding_names.include?(name)
-            # We know this binding exists locally (destructure, hook tuple)
-            # but can't model its value. As a leaf identifier, return `nil`
-            # so the file loads (a bare snake_case ref would NameError).
+          elsif @local_binding_names.include?(name) || @imported_names.include?(name)
+            # We know this binding exists (destructure, hook tuple, top-level
+            # import) but can't model its value. As a leaf identifier, return
+            # `nil` so the file loads (a bare snake_case ref would NameError).
             # As a member-chain root, `nil.member` would NoMethodError and
             # the bare-snake fallback would NameError — both crash at render
             # time. Bail so the whole expression fails translation and the
@@ -352,16 +358,16 @@ module JsxRosetta
           end
         end
 
-        # An identifier that we know to be a local binding (e.g. destructured
-        # from an untranslatable init) but whose value we can't model. The
-        # leaf-translates-to-nil path is safe in value positions (attribute
-        # kwargs, leaf interpolations) but compound contexts (unary, binary,
-        # member chain) must bail so callers emit a TODO instead of silently
-        # changing semantics.
+        # An identifier we know to be defined locally (destructure, hook
+        # tuple) or pulled in via a top-level `import`, but whose value we
+        # can't model. The leaf-translates-to-nil path is safe in value
+        # positions (attribute kwargs, leaf interpolations) but compound
+        # contexts (unary, binary, member chain) must bail so callers emit
+        # a TODO instead of silently changing semantics.
         def unresolvable_local?(source)
           return false unless source.match?(IDENTIFIER)
 
-          @local_binding_names.include?(source) &&
+          (@local_binding_names.include?(source) || @imported_names.include?(source)) &&
             !in_local_scope?(source) &&
             !@prop_names.include?(source)
         end

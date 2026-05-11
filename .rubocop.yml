@@ -4,6 +4,7 @@ AllCops:
   SuggestExtensions: false
   Exclude:
     - "spec/fixtures/**/*"
+    - "tmp/**/*"
 
 Style/StringLiterals:
   EnforcedStyle: double_quotes
@@ -36,3 +37,6 @@ Metrics/PerceivedComplexity:
 
 Metrics/ParameterLists:
   Max: 6
+
+Metrics/ModuleLength:
+  Max: 120

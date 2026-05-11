@@ -239,7 +239,8 @@ module JsxRosetta
         ExpressionTranslator.new(
           prop_names: prop_names,
           local_binding_names: component.local_binding_names,
-          prop_aliases: prop_aliases
+          prop_aliases: prop_aliases,
+          imported_names: component.module_imports.map(&:name) + component.module_bindings.map(&:name)
         )
       end
 

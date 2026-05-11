@@ -308,9 +308,6 @@ generated Ruby parsed but didn't behave like the source JSX.
 
 ### Stress test outcome
 
-- 929-file Phlex stress run on `reserv-web`: 887/929 clean translations
-  (unchanged — rejection logic untouched), **0/1224 syntax failures**
-  (down from 25 on v0.3.0). All emitted `.rb` files now pass `ruby -c`.
 - Five residual bugs were caught during the v0.4.0 stress rerun and
   fixed inline:
   - Prop default expressions that translated to `nil # TODO: ...` inside
@@ -336,10 +333,8 @@ generated Ruby parsed but didn't behave like the source JSX.
 
 ## [0.3.0] - 2026-05-10
 
-Driven by a 929-file stress run against the entire `reserv-web` codebase
-(`reserv-web/src/` + `reserv-web/pages/` + `packages/`). Baseline outcome
-on v0.2.0: 838/929 (90.2%) clean exit, 91 hard failures across 5 distinct
-error categories. This release ships fixes for all five plus a follow-up
+Baseline outcome on v0.2.0: 838/929 (90.2%) clean exit, 91 hard failures across
+5 distinct error categories. This release ships fixes for all five plus a follow-up
 that opens up lowercase JSX-returning helpers as components, lifting the
 corpus to **887/929 (95.5%) clean exit**. The 42 remaining failures are
 non-component modules (utility/hook libraries, AG-Grid column
@@ -421,10 +416,8 @@ initializers); each now reports a classifier-tagged error that explains
 
 ## [0.2.0] - 2026-05-10
 
-Driven by an empirical probe of v0.1.0 against a 39-file Next.js production
-slice (`reserv-web/src/components/rolloverbook`). The slice exposed three
-return-shape gaps and a crash on nested destructure; this release fixes all
-four. Probe outcome: 33/39 → **39/39 emit**.
+The slice exposed three return-shape gaps and a crash on nested destructure;
+this release fixes all four. Probe outcome: 33/39 → **39/39 emit**.
 
 ### Fixed
 

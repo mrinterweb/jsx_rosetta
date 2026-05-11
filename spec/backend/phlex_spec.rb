@@ -526,6 +526,184 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     end
   end
 
+  describe "imported-identifier bailout (closes NameError leaks at render time)" do
+    it "emits `nil` for a bare reference to a default import" do
+      source = <<~JSX
+        import CMS_NAME from "@/lib/constants";
+        function X() { return <p>{CMS_NAME}</p>; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("plain nil")
+      expect(content).not_to match(/plain cms_name(?!\w)/)
+    end
+
+    it "bails out of a member chain whose root is a CSS-module import in an attribute context" do
+      # `import styles from "./X.module.css"` plus `data-x={styles.foo}` used
+      # to snake-case to a bare `styles.foo` reference that NameErrors at
+      # render time. Member-chain root bailout fires now, dropping the
+      # attribute with a TODO.
+      source = <<~JSX
+        import styles from "./Foo.module.css";
+        function X() { return <div data-x={styles.foo} />; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      # The attribute splices its value through the translator; with bailout,
+      # the value is nil and the TODO surfaces the verbatim JS.
+      expect(content).to include('# TODO: attribute "data-x" dropped — couldn\'t translate: styles.foo')
+      expect(content).to include("data_x: nil")
+      # And no executable `styles.foo` reference outside the comment.
+      expect(content.lines.reject { |l| l.lstrip.start_with?("#") }.join).not_to include("styles.foo")
+    end
+
+    it "bails out of a CSS-module member chain referenced from a JSX child" do
+      source = <<~JSX
+        import styles from "./Foo.module.css";
+        function X() { return <p>{styles.foo}</p>; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("[untranslated: styles.foo]")
+      expect(content.lines.reject { |l| l.lstrip.start_with?("#") }.join).not_to include("plain styles.foo")
+    end
+
+    it "bails out of a member chain whose root is a PascalCase namespace import" do
+      # TS enum imports referenced in expression context — e.g.
+      # `AlertStatusEnum.Pending` — used to snake-case to `alert_status_enum.pending`
+      # which NameErrors. Bailout drops the chain with a TODO.
+      source = <<~JSX
+        import { AlertStatusEnum } from "src/__gql__/graphql";
+        function X({ status }) {
+          return <div>{status === AlertStatusEnum.Pending && <p>pending</p>}</div>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).not_to include("alert_status_enum.pending")
+      expect(content).to include("# TODO: translate condition: status === AlertStatusEnum.Pending")
+    end
+
+    it "bails out when an imported identifier appears as a unary operand" do
+      # `!Foo` where Foo is imported used to translate to `!foo` (NameError)
+      # or `!Foo` (also NameError under Ruby). The unary-bailout path now
+      # fires, the whole expression fails translation, and the caller emits
+      # the safe TODO fallback.
+      source = <<~JSX
+        import { Foo } from "bar";
+        function X() {
+          return <div>{!Foo && <p>missing</p>}</div>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).not_to match(/^\s*if !foo\s*$/)
+      expect(content).to include("# TODO: translate condition: !Foo")
+    end
+
+    it "bails out of a reference to a sibling helper function (not an import)" do
+      # `function onError(){}` at module level is captured as a module
+      # binding. References from inside the JSX used to NameError as a bare
+      # `on_error` ref — the bailout now emits `nil` plus a TODO. The
+      # receiving tag here is PascalCase (a component, not an HTML element)
+      # so the `onError` reference doesn't get promoted to a Stimulus method.
+      source = <<~JSX
+        function onError(e) { console.error(e); }
+        function X() { return <ErrorBoundary onError={onError}>x</ErrorBoundary>; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to match(/on_error: nil/)
+      expect(content.lines.reject { |l| l.lstrip.start_with?("#") }.join).not_to match(/on_error: on_error/)
+    end
+
+    it "doesn't break translation when an import is shadowed by a local of the same name" do
+      # A render-prop parameter named the same as an imported value should
+      # take precedence — inside the block, the param resolves locally, not
+      # to a bailout. (Edge case worth pinning.)
+      source = <<~JSX
+        import { fields } from "bar";
+        function X() {
+          return <Form.List>{(fields) => <p>{fields}</p>}</Form.List>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      # Inside the block, `fields` is the param, so the leaf should be
+      # `plain fields` — not `plain nil` and not a TODO.
+      expect(content).to match(/plain fields(?!\w)/)
+    end
+  end
+
+  describe "guard-ladder collapse (closes `if false / elsif false / else` semantic inversion)" do
+    it "collapses a chain of untranslatable `return null` guards to a TODO header plus the main render" do
+      # PaymentWarning shape: multiple early-return guards with conditions
+      # the translator can't model, followed by the happy-path render. The
+      # naive emission `if false; ''; elsif false; ''; else <main>` would
+      # silently always render `main` — the source semantic was the
+      # OPPOSITE. Collapse to a TODO + just the main render so the user
+      # sees what guards used to gate it and wires them up Rails-side.
+      source = <<~JSX
+        import { Alert } from "@mui/material";
+        import { useFragment } from "@apollo/client";
+        export default function X({ from }) {
+          const { complete, data } = useFragment({ from });
+          if (!complete) return null;
+          if (data.cancelledAt) return null;
+          return <Alert>paid</Alert>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: 2 render guard(s) couldn't translate")
+      expect(content).to include("#   !complete")
+      expect(content).to include("#   data.cancelledAt")
+      # No `if false` chain remains.
+      expect(content).not_to match(/^\s*if false\b/)
+      # The main render is at the same indent as `view_template` body.
+      expect(content).to include("render Alert.new")
+    end
+
+    it "leaves the chain alone when at least one test translates (we keep the structure)" do
+      # Mixed: one translatable condition + one untranslatable. The
+      # collapse only fires when EVERY test is untranslatable; otherwise
+      # we'd drop a real branch and silently lose behavior.
+      source = <<~JSX
+        import { useFragment } from "@apollo/client";
+        export default function X({ shown }) {
+          const { complete } = useFragment({});
+          if (!shown) return null;
+          if (!complete) return null;
+          return <p>x</p>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      # `shown` translates to `@shown` (real test), so the chain stays as
+      # if/elsif/else and the collapse doesn't fire.
+      expect(content).to match(/if !@shown/)
+      expect(content).not_to include("render guard(s)")
+    end
+
+    it "leaves single-branch conditionals (no else) alone — only ladders with an else collapse" do
+      # `cond && <X/>` without an else isn't a guard ladder. The source
+      # semantic IS "render the span only when cond is truthy"; an
+      # untranslatable cond means we can't replicate that decision. The
+      # `if false` form correctly renders nothing as a safe default.
+      source = <<~JSX
+        import { useFragment } from "@apollo/client";
+        export default function X() {
+          const { complete } = useFragment({});
+          return <div>{complete && <span>x</span>}</div>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("if false")
+      expect(content).not_to include("render guard(s)")
+    end
+  end
+
   describe "Gap J: member-expression destructuring" do
     it "resolves `const { Content } = Layout; <Content/>` to `Layout::Content.new`" do
       source = <<~JSX

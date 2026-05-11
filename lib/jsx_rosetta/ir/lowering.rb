@@ -173,7 +173,8 @@ module JsxRosetta
 
         name, function = candidates.first
         module_bindings = capture_module_bindings(file.program, candidates)
-        attach_module_bindings(lower_component(name, function), module_bindings)
+        module_imports = capture_module_imports(file.program)
+        attach_module_metadata(lower_component(name, function), module_bindings, module_imports)
       end
 
       def lower_all_components(file)
@@ -181,8 +182,9 @@ module JsxRosetta
         raise no_component_error(file.program) if candidates.empty?
 
         module_bindings = capture_module_bindings(file.program, candidates)
+        module_imports = capture_module_imports(file.program)
         candidates.map do |name, function|
-          attach_module_bindings(lower_component(name, function), module_bindings)
+          attach_module_metadata(lower_component(name, function), module_bindings, module_imports)
         end
       end
 
@@ -206,10 +208,27 @@ module JsxRosetta
         case stmt.type
         when "VariableDeclaration"
           stmt[:declarations].each { |d| record_module_binding(stmt, d, component_names, bindings) }
-        when "ExportNamedDeclaration"
+        when "FunctionDeclaration"
+          record_module_function_binding(stmt, component_names, bindings)
+        when "ExportNamedDeclaration", "ExportDefaultDeclaration"
           decl = stmt[:declaration]
           walk_module_binding(decl, component_names, bindings) if decl.is_a?(AST::Node)
         end
+      end
+
+      # Top-level `function onError(){}` helpers — non-component, non-hook
+      # functions declared in the same file as the component. Without
+      # capture, a `<Button onClick={onError}>` use site translates to
+      # `on_click: on_error` which NameErrors at render time because
+      # nothing binds `on_error`. Recording the name here threads it into
+      # the translator's bailout set so the reference becomes `on_click: nil`
+      # plus a visible TODO.
+      def record_module_function_binding(stmt, component_names, bindings)
+        name = stmt[:id]&.[](:name)
+        return unless name
+        return if component_names.include?(name)
+
+        bindings << LocalBinding.new(name: name, source: source_of(stmt).strip)
       end
 
       def record_module_binding(stmt, declarator, component_names, bindings)
@@ -228,10 +247,37 @@ module JsxRosetta
         bindings << LocalBinding.new(name: name, source: source_of(stmt).strip)
       end
 
-      def attach_module_bindings(component, module_bindings)
-        return component if module_bindings.empty?
+      def attach_module_metadata(component, module_bindings, module_imports)
+        component.with(module_bindings: module_bindings, module_imports: module_imports)
+      end
 
-        component.with(module_bindings: module_bindings)
+      # Capture every top-level `import` declaration so the translator can
+      # recognize use-site references at expression-context. Without this,
+      # an import like `import styles from "./X.module.css"` lets every
+      # `styles.listContainer` use snake-case to a bare `styles` reference
+      # that NameErrors at render time.
+      def capture_module_imports(program)
+        imports = []
+        program.body.each do |stmt|
+          next unless stmt.is_a?(AST::Node) && stmt.type == "ImportDeclaration"
+
+          source = stmt[:source]&.[](:value).to_s
+          (stmt[:specifiers] || []).each do |spec|
+            name = spec[:local]&.[](:name)
+            next unless name
+
+            imports << ModuleImport.new(name: name, source: source, kind: import_specifier_kind(spec))
+          end
+        end
+        imports
+      end
+
+      def import_specifier_kind(spec)
+        case spec.type
+        when "ImportDefaultSpecifier" then :default
+        when "ImportNamespaceSpecifier" then :namespace
+        else :named
+        end
       end
 
       private
@@ -479,6 +525,7 @@ module JsxRosetta
           local_bindings: @local_bindings,
           local_binding_names: (@local_binding_names + unconsumed_arrow_names).uniq,
           module_bindings: [],
+          module_imports: [],
           stimulus_methods: @stimulus_methods,
           react_hooks: @react_hooks,
           render_methods: @render_methods,

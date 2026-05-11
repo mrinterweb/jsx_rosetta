@@ -99,10 +99,15 @@ module JsxRosetta
         prop_aliases = component.props.each_with_object({}) do |prop, hash|
           hash[prop.alias_name] = prop.name if prop.alias_name
         end
+        # `imported_names` covers both top-level `import` declarations AND
+        # top-level helper bindings (`function onError(){}`, `const FOO = …`).
+        # They behave identically at the use site — the translator bails out
+        # to `nil` rather than emitting a bare snake_case ref that NameErrors.
         ViewComponent::ExpressionTranslator.new(
           prop_names: prop_names,
           local_binding_names: component.local_binding_names,
-          prop_aliases: prop_aliases
+          prop_aliases: prop_aliases,
+          imported_names: component.module_imports.map(&:name) + component.module_bindings.map(&:name)
         )
       end
 
@@ -508,10 +513,70 @@ module JsxRosetta
       end
 
       def render_conditional(conditional, translator, indent:)
+        if guard_ladder?(conditional, translator)
+          return render_guard_ladder_collapse(conditional, translator, indent: indent)
+        end
+
         lines = []
         emit_conditional_branches(conditional, translator, indent, lines, leading_keyword: "if")
         lines << "#{spaces(indent)}end"
         lines.join("\n")
+      end
+
+      # A guard ladder is a chain of `if/elsif` branches whose tests are all
+      # untranslatable AND whose consequents are all "render nothing" (the
+      # lowered form of `return null` in a guard), terminating in a real
+      # else branch. Emitted naively as `if false / elsif false / .../ else
+      # <main>`, the else *always* fires — silently inverting the source
+      # semantic ("render nothing when any guard hits") into "render main
+      # unconditionally." Collapse to a single TODO block + just the else
+      # so the reviewer sees what guards used to gate the render, and the
+      # main render is at least visible without the misleading `if false`s.
+      def guard_ladder?(conditional, translator)
+        branches, else_branch = walk_conditional_chain(conditional)
+        return false unless else_branch
+        return false if branches.empty?
+
+        branches.all? do |b|
+          test_translates_to_untranslatable?(b[:test], translator) && empty_consequent?(b[:consequent])
+        end
+      end
+
+      def render_guard_ladder_collapse(conditional, translator, indent:)
+        branches, else_branch = walk_conditional_chain(conditional)
+        lines = ["#{spaces(indent)}# TODO: #{branches.length} render guard(s) couldn't translate; wire up Rails-side:"]
+        branches.each do |b|
+          compact = b[:test].tr("\n", " ").squeeze(" ")
+          lines << "#{spaces(indent)}#   #{compact}"
+        end
+        lines << render_ir_node(else_branch, translator, indent: indent)
+        lines.join("\n")
+      end
+
+      def walk_conditional_chain(conditional)
+        branches = []
+        node = conditional
+        while node.is_a?(IR::Conditional)
+          branches << { test: node.test.expression, consequent: node.consequent }
+          node = node.alternate
+        end
+        [branches, node]
+      end
+
+      def test_translates_to_untranslatable?(expression, translator)
+        translated = translator.translate(expression)
+        translated.nil? || translated.ruby == "nil"
+      end
+
+      # An empty consequent is what `return null` (the JS guard idiom) lowers
+      # to. Detected as either a literal empty Text node or a Fragment whose
+      # children are all empty.
+      def empty_consequent?(node)
+        case node
+        when IR::Text then node.value.to_s.empty?
+        when IR::Fragment then node.children.all? { |c| empty_consequent?(c) }
+        else false
+        end
       end
 
       # Walk a Conditional and its `alternate` chain, emitting `if` for the
@@ -859,9 +924,7 @@ module JsxRosetta
       #      template literals with method calls). Same TODO + nil path.
       def interpolated_attribute_value(name, value, translator, todos:)
         translated = translator.translate(value.expression)
-        if translated && !uppercase_unresolved?(translated.unresolved_identifiers)
-          return translated.ruby
-        end
+        return translated.ruby if translated && !uppercase_unresolved?(translated.unresolved_identifiers)
 
         compact = value.expression.tr("\n", " ").squeeze(" ")
         todos << "attribute #{name.inspect} dropped — couldn't translate: #{compact}"
