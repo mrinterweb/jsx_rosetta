@@ -69,7 +69,7 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     it "renders a leaf element with literal attributes as kwargs" do
       content = file_contents('function X() { return <a href="/about" />; }', "x.rb")
 
-      expect(content).to include('a(href: "/about")')
+      expect(content).to include("a(href: '/about')")
     end
 
     it "renders interpolated attribute values via the translator" do
@@ -81,21 +81,21 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     it "renders an Element with children inside a do/end block" do
       content = file_contents("function X() { return <p>Hello</p>; }", "x.rb")
 
-      expect(content).to include("p do\n      plain \"Hello\"\n    end")
+      expect(content).to include("p do\n      plain 'Hello'\n    end")
     end
 
     it "emits hyphenated attributes as snake_case kwargs (Phlex auto-converts to hyphens at render time)" do
       content = file_contents('function X() { return <div data-testid="x" aria-label="y"/>; }', "x.rb")
 
-      expect(content).to include('data_testid: "x"')
-      expect(content).to include('aria_label: "y"')
+      expect(content).to include("data_testid: 'x'")
+      expect(content).to include("aria_label: 'y'")
       expect(content).not_to include("**{")
     end
 
     it "preserves camelCase attribute names verbatim (SVG attrs like viewBox stay unchanged)" do
       content = file_contents('function X() { return <svg viewBox="0 0 10 10" />; }', "x.rb")
 
-      expect(content).to include('viewBox: "0 0 10 10"')
+      expect(content).to include("viewBox: '0 0 10 10'")
       # Phlex only hyphenates underscores; camelCase stays camelCase, which
       # is what SVG attributes need.
       expect(content).not_to include("view_box")
@@ -104,7 +104,7 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     it "treats className with a string literal as a class: kwarg" do
       content = file_contents('function X() { return <div className="btn primary"/>; }', "x.rb")
 
-      expect(content).to include('class: "btn primary"')
+      expect(content).to include("class: 'btn primary'")
     end
 
     it "drops React `key` (DOM-irrelevant)" do
@@ -156,10 +156,10 @@ RSpec.describe JsxRosetta::Backend::Phlex do
   end
 
   describe "ComponentInvocation" do
-    it "renders <Card title=\"x\"/> as `render Card.new(title: \"x\")` (default mode)" do
+    it "renders <Card title=\"x\"/> as `render Card.new(title: 'x')` (default mode)" do
       content = file_contents('function X() { return <Card title="x"/>; }', "x.rb")
 
-      expect(content).to include('render Card.new(title: "x")')
+      expect(content).to include("render Card.new(title: 'x')")
     end
 
     it "appends the suffix to the invoked component class in suffix mode" do
@@ -230,8 +230,8 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     it "stamps data-controller / data-action on the root element as snake_case kwargs" do
       content = file_contents(source, "x.rb")
 
-      expect(content).to include('data_controller: "x"')
-      expect(content).to include('data_action: "click->x#clickHandler"')
+      expect(content).to include("data_controller: 'x'")
+      expect(content).to include("data_action: 'click->x#clickHandler'")
     end
 
     it "skeleton controller exports an extends Controller class with the inferred method" do
@@ -302,7 +302,7 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       content = file_contents(source, "x.rb")
 
       expect(content).to include("# TODO: translate")
-      expect(content).to include("plain \"[untranslated:")
+      expect(content).to include("plain '[untranslated:")
     end
   end
 
@@ -318,13 +318,15 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("if false")
     end
 
-    it "translates a comparison test (value !== null) to Ruby (@value != nil)" do
+    it "translates a comparison test (value !== null) to idiomatic `!@value.nil?`" do
       # Binary/logical operator translation handles `!==`, `===`, `<`, `>`,
-      # `&&`, `||`, `??`, etc. — these used to bail to `if false` placeholders.
+      # `&&`, `||`, `??`, etc. — these used to bail to `if false`. We now
+      # also rewrite `x == nil` / `x != nil` to `x.nil?` / `!x.nil?` so the
+      # output passes Style/NilComparison without user intervention.
       source = "function X({ value }) { return value !== null ? <p>have</p> : <NilValue />; }"
       content = file_contents(source, "x.rb")
 
-      expect(content).to include("if @value != nil")
+      expect(content).to include("if !@value.nil?")
       expect(content).not_to include("# TODO: translate condition")
     end
 
@@ -356,7 +358,7 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       source = "function X({ status }) { return status === \"open\" ? <a /> : <b />; }"
       content = file_contents(source, "x.rb")
 
-      expect(content).to include('if @status == "open"')
+      expect(content).to include("if @status == 'open'")
     end
 
     it "translates `??` to `||`" do
@@ -431,7 +433,7 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       JS
       content = file_contents(source, "x.rb")
 
-      expect(content).to include('options: [{ value: 10, label: "a" }, { value: 25, label: "b" }]')
+      expect(content).to include("options: [{ value: 10, label: 'a' }, { value: 25, label: 'b' }]")
       expect(content).not_to include("# TODO: attribute \"options\" dropped")
     end
 
@@ -474,22 +476,53 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("data_x: nil")
     end
 
-    it "does NOT emit `nil.member` when a local binding appears as a member-chain root" do
-      # `token.blue` previously translated to `nil.blue` (NoMethodError at
-      # render time) because the local-binding nil-substitution kicked in
-      # for the root. Member chains now fall through to the snake_case
-      # bare reference, which surfaces as a NameError — still wrong but
-      # at least debuggable.
+    it "fails translation when a local binding appears as a member-chain root" do
+      # `token.blue` used to translate to bare `token.blue` (NameError at
+      # render time). Translation now bails so the caller emits a TODO
+      # with the verbatim source, the file loads, and the reviewer sees
+      # what to fill in — no NameError, no NoMethodError, no silent flip.
       source = <<~JSX
         function X() {
           const { token } = useToken();
-          return <div style={{ color: token.blue }} />;
+          return <p>{token.blue}</p>;
         }
       JSX
       content = file_contents(source, "x.rb")
 
       expect(content).not_to include("nil.blue")
-      expect(content).to include("token.blue")
+      expect(content).not_to match(/plain token\.blue(?!\w)/)
+      expect(content).to include("[untranslated: token.blue]")
+    end
+
+    it "fails translation for a unary on an unresolvable local (no silent !nil flip)" do
+      # `!fieldValue` used to translate to `!nil` (always true), silently
+      # flipping the guard's truthiness. Translation now bails so the
+      # caller emits a TODO and falls through to the safe fallback.
+      source = <<~JSX
+        function X() {
+          const { fieldValue } = customField;
+          return <div>{!fieldValue && <span>missing</span>}</div>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).not_to match(/^\s*if !nil\s*$/)
+      expect(content).to include("# TODO: translate condition: !fieldValue")
+      expect(content).to include("if false")
+    end
+
+    it "fails translation for a binary on an unresolvable local (no nil > 0)" do
+      source = <<~JSX
+        function X() {
+          const { count } = useStuff();
+          return <div>{count > 0 && <span>some</span>}</div>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).not_to include("nil > 0")
+      expect(content).to include("# TODO: translate condition: count > 0")
+      expect(content).to include("if false")
     end
   end
 
@@ -558,7 +591,7 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       JSX
       content = file_contents(source, "x.rb")
 
-      expect(content).to include('["a", "b"].each do |x|')
+      expect(content).to include("['a', 'b'].each do |x|")
       expect(content).not_to include("[].each do")
     end
   end
@@ -578,7 +611,7 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       JS
       content = file_contents(source, "x.rb")
 
-      expect(content).to include('options: [{ value: 10, data_label: "10 / page" }]')
+      expect(content).to include("options: [{ value: 10, data_label: '10 / page' }]")
     end
 
     it "translates a nested object literal" do
@@ -650,7 +683,7 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("def create_columns(token: nil)")
       expect(content).not_to include("def view_template")
       expect(content).not_to include("def initialize")
-      expect(content).to include("data_index: \"name\"")
+      expect(content).to include("data_index: 'name'")
     end
 
     it "extracts JSX render-lambdas inside the data array to private methods" do
@@ -691,7 +724,7 @@ RSpec.describe JsxRosetta::Backend::Phlex do
         "x.rb"
       )
 
-      expect(content).to include('options: [{ value: 10, label: "a" }]')
+      expect(content).to include("options: [{ value: 10, label: 'a' }]")
       # Ensure no spurious wrap.
       expect(content).not_to match(/options: \[\n/)
     end
@@ -831,6 +864,40 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     end
   end
 
+  describe "inner arrow handlers on PascalCase component props" do
+    # `const handleClick = () => ...` attached to a `<PascalCase>` component
+    # used to leak as bare `handle_click` (NameError at render time) — Gap B
+    # correctly avoided Stimulus promotion for component tags, but the inner
+    # arrow was never wired into anything. Lowering now adds unconsumed
+    # arrow names to local_binding_names so the use site emits `nil`.
+    it "emits nil for an inline-arrow handler bound to a PascalCase component's on*" do
+      source = <<~JSX
+        function X() {
+          const handleClick = () => { foo(); };
+          return <CustomButton onClick={handleClick}>Go</CustomButton>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("on_click: nil")
+      expect(content).not_to include("on_click: handle_click")
+    end
+
+    it "leaves Stimulus promotion intact for the lowercase HTML case" do
+      # Regression check — `<button onClick={handleClick}>` still promotes
+      # to a Stimulus method (the Gap B fix is unaffected by the addition).
+      source = <<~JSX
+        function X() {
+          const handleClick = () => { foo(); };
+          return <button onClick={handleClick}>Go</button>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to match(/data_action: 'click->x#handleClick'/)
+    end
+  end
+
   describe "Identifier-bound hook locals at use sites" do
     # `const handleChange = useCallback(...)` is a hook with an Identifier
     # binding (not a destructure). Without recording the name, the use
@@ -868,7 +935,7 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("  private\n")
       expect(content).to include("def render_header")
       expect(content).to include("h1 do")
-      expect(content).to include("plain \"Header\"")
+      expect(content).to include("plain 'Header'")
       # use site:
       expect(content).to match(/^\s+render_header$/)
       expect(content).not_to include("[untranslated:")
@@ -893,6 +960,44 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       content = file_contents(source, "x.rb")
 
       expect(content).to include("[untranslated: externalFn()]")
+    end
+  end
+
+  describe "camelCase rest-prop / aliased-prop ivar matching" do
+    # `{ ...descriptionProps }` used to emit `**descriptionProps` in the
+    # initializer signature and `@descriptionProps = descriptionProps` for
+    # the ivar — but the body referenced `**(@description_props || {})`.
+    # The camelCase/snake_case mismatch silently dropped the splat. The
+    # initializer kwarg + ivar are now snake_cased to match the body.
+    it "snake_cases the rest-prop kwarg and ivar to match the body reference" do
+      source = <<~JSX
+        function X({ size, ...descriptionProps }) {
+          return <Descriptions size={size} {...descriptionProps} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("**description_props)")
+      expect(content).to include("@description_props = description_props")
+      expect(content).to include("**(@description_props || {})")
+      expect(content).not_to include("@descriptionProps")
+      expect(content).not_to include("**descriptionProps")
+    end
+
+    # `"data-testid": dataTestId` binds the prop's value to a renamed
+    # local. Use sites of the alias used to leak as bare `data_test_id`
+    # (NameError). The translator now resolves the alias to the prop's
+    # `@data_testid` ivar.
+    it "resolves a renamed prop alias to the prop's ivar" do
+      source = <<~JSX
+        function X({ "data-testid": dataTestId }) {
+          return <FlashyHeader data-testid={dataTestId}>x</FlashyHeader>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("data_testid: @data_testid")
+      expect(content).not_to include("data_test_id")
     end
   end
 
@@ -962,7 +1067,7 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       source = 'function X({ label = "Click" }) { return <button>{label}</button>; }'
       content = file_contents(source, "x.rb")
 
-      expect(content).to include('def initialize(label: "Click")')
+      expect(content).to include("def initialize(label: 'Click')")
     end
 
     it "skips the initializer entirely when the component takes no props" do

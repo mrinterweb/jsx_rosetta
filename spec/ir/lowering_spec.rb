@@ -1347,8 +1347,8 @@ RSpec.describe JsxRosetta::IR::Lowering do
       ir = lower("function X({ a, b }) { return <div />; }")
 
       expect(ir.props).to eq([
-                               JsxRosetta::IR::Prop.new(name: "a", default: nil),
-                               JsxRosetta::IR::Prop.new(name: "b", default: nil)
+                               JsxRosetta::IR::Prop.new(name: "a", default: nil, alias_name: nil),
+                               JsxRosetta::IR::Prop.new(name: "b", default: nil, alias_name: nil)
                              ])
     end
 
@@ -1358,11 +1358,13 @@ RSpec.describe JsxRosetta::IR::Lowering do
       expect(ir.props).to eq([
                                JsxRosetta::IR::Prop.new(
                                  name: "variant",
-                                 default: JsxRosetta::IR::Interpolation.new(expression: '"primary"')
+                                 default: JsxRosetta::IR::Interpolation.new(expression: '"primary"'),
+                                 alias_name: nil
                                ),
                                JsxRosetta::IR::Prop.new(
                                  name: "size",
-                                 default: JsxRosetta::IR::Interpolation.new(expression: "4")
+                                 default: JsxRosetta::IR::Interpolation.new(expression: "4"),
+                                 alias_name: nil
                                )
                              ])
     end
@@ -1370,13 +1372,13 @@ RSpec.describe JsxRosetta::IR::Lowering do
     it "lowers a single-identifier params bag" do
       ir = lower("function X(props) { return <div />; }")
 
-      expect(ir.props).to eq([JsxRosetta::IR::Prop.new(name: "props", default: nil)])
+      expect(ir.props).to eq([JsxRosetta::IR::Prop.new(name: "props", default: nil, alias_name: nil)])
     end
 
     it "captures the rest-binding name into rest_prop_name and excludes it from props" do
       ir = lower("function X({ a, ...rest }) { return <div />; }")
 
-      expect(ir.props).to eq([JsxRosetta::IR::Prop.new(name: "a", default: nil)])
+      expect(ir.props).to eq([JsxRosetta::IR::Prop.new(name: "a", default: nil, alias_name: nil)])
       expect(ir.rest_prop_name).to eq("rest")
     end
 
@@ -1390,21 +1392,21 @@ RSpec.describe JsxRosetta::IR::Lowering do
       ir = lower("function X({ record: { claimNumber, claim }, accountSlug }) { return <div />; }")
 
       expect(ir.props).to eq([
-                               JsxRosetta::IR::Prop.new(name: "record", default: nil),
-                               JsxRosetta::IR::Prop.new(name: "accountSlug", default: nil)
+                               JsxRosetta::IR::Prop.new(name: "record", default: nil, alias_name: nil),
+                               JsxRosetta::IR::Prop.new(name: "accountSlug", default: nil, alias_name: nil)
                              ])
     end
 
     it "lowers a renamed-destructured prop using the source-side key" do
       ir = lower("function X({ outer: inner }) { return <div />; }")
 
-      expect(ir.props).to eq([JsxRosetta::IR::Prop.new(name: "outer", default: nil)])
+      expect(ir.props).to eq([JsxRosetta::IR::Prop.new(name: "outer", default: nil, alias_name: "inner")])
     end
 
     it "lowers a StringLiteral destructure key (e.g. `data-testid`)" do
       ir = lower('function X({ "data-testid": testId }) { return <div data-testid={testId} />; }')
 
-      expect(ir.props).to eq([JsxRosetta::IR::Prop.new(name: "data-testid", default: nil)])
+      expect(ir.props).to eq([JsxRosetta::IR::Prop.new(name: "data-testid", default: nil, alias_name: "testId")])
     end
 
     it "lowers a StringLiteral destructure key with a default" do
@@ -1413,7 +1415,8 @@ RSpec.describe JsxRosetta::IR::Lowering do
       expect(ir.props).to eq([
                                JsxRosetta::IR::Prop.new(
                                  name: "data-testid",
-                                 default: JsxRosetta::IR::Interpolation.new(expression: '"x"')
+                                 default: JsxRosetta::IR::Interpolation.new(expression: '"x"'),
+                                 alias_name: "testId"
                                )
                              ])
     end
@@ -1482,17 +1485,32 @@ RSpec.describe JsxRosetta::IR::Lowering do
   end
 
   describe "inline styles" do
-    it "lowers `style={{ fontSize: 12, color: \"red\" }}` to IR::Style" do
+    it "lowers `style={{ fontSize: 12, color: \"red\" }}` to IR::Style with `px` for unit-bearing numerics" do
       ir = lower('function X() { return <div style={{ fontSize: 12, color: "red" }} />; }')
 
       expect(ir.body.attributes).to eq([
                                          JsxRosetta::IR::Style.new(
                                            declarations: [
-                                             JsxRosetta::IR::StyleDeclaration.new(property: "font-size", value: "12"),
+                                             JsxRosetta::IR::StyleDeclaration.new(property: "font-size", value: "12px"),
                                              JsxRosetta::IR::StyleDeclaration.new(property: "color", value: "red")
                                            ]
                                          )
                                        ])
+    end
+
+    it "leaves unitless properties (e.g. `zIndex`, `lineHeight`, `opacity`) bare" do
+      # React's isUnitlessNumber table — these properties take a bare
+      # number, not a length.
+      ir = lower("function X() { return <div style={{ zIndex: 5, lineHeight: 1.4, opacity: 0.5 }} />; }")
+
+      values = ir.body.attributes.first.declarations.map(&:value)
+      expect(values).to eq(%w[5 1.4 0.5])
+    end
+
+    it "leaves 0 bare (no `0px` clutter — `0` is unitless in CSS)" do
+      ir = lower("function X() { return <div style={{ marginBottom: 0 }} />; }")
+
+      expect(ir.body.attributes.first.declarations.first.value).to eq("0")
     end
 
     it "lowers identifier values to IR::Interpolation in StyleDeclaration" do
@@ -1599,11 +1617,12 @@ RSpec.describe JsxRosetta::IR::Lowering do
       expected = JsxRosetta::IR::Component.new(
         name: "Button",
         props: [
-          JsxRosetta::IR::Prop.new(name: "children", default: nil),
-          JsxRosetta::IR::Prop.new(name: "onClick", default: nil),
+          JsxRosetta::IR::Prop.new(name: "children", default: nil, alias_name: nil),
+          JsxRosetta::IR::Prop.new(name: "onClick", default: nil, alias_name: nil),
           JsxRosetta::IR::Prop.new(
             name: "variant",
-            default: JsxRosetta::IR::Interpolation.new(expression: '"primary"')
+            default: JsxRosetta::IR::Interpolation.new(expression: '"primary"'),
+            alias_name: nil
           )
         ],
         body: JsxRosetta::IR::Element.new(

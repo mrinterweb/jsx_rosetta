@@ -83,12 +83,7 @@ module JsxRosetta
       end
 
       def emit(component)
-        prop_names = component.props.map(&:name)
-        prop_names << component.rest_prop_name if component.rest_prop_name
-        translator = ExpressionTranslator.new(
-          prop_names: prop_names, local_binding_names: component.local_binding_names
-        )
-
+        translator = build_translator(component)
         base_name = "#{AST::Inflector.underscore(component.name)}_component"
         @stimulus_identifier = component.stimulus_methods.any? ? stimulus_identifier(component) : nil
 
@@ -235,6 +230,19 @@ module JsxRosetta
 
       private
 
+      def build_translator(component)
+        prop_names = component.props.map(&:name)
+        prop_names << component.rest_prop_name if component.rest_prop_name
+        prop_aliases = component.props.each_with_object({}) do |prop, hash|
+          hash[prop.alias_name] = prop.name if prop.alias_name
+        end
+        ExpressionTranslator.new(
+          prop_names: prop_names,
+          local_binding_names: component.local_binding_names,
+          prop_aliases: prop_aliases
+        )
+      end
+
       def initializable_props(component)
         component.props.reject { |prop| prop.name == DEFAULT_SLOT_NAME }
       end
@@ -310,14 +318,15 @@ module JsxRosetta
       end
 
       def render_ruby_class_with_props(component, props, rest_name, translator)
+        rest_snake = rest_name && AST::Inflector.underscore(rest_name)
         kwargs = props.map { |prop| ruby_kwarg(prop, translator) }
-        kwargs << "**#{rest_name}" if rest_name
+        kwargs << "**#{rest_snake}" if rest_snake
 
         assignments = props.map do |prop|
           snake = AST::Inflector.underscore(prop.name)
           "    @#{snake} = #{snake}"
         end
-        assignments << "    @#{rest_name} = #{rest_name}" if rest_name
+        assignments << "    @#{rest_snake} = #{rest_snake}" if rest_snake
 
         <<~RUBY
           # frozen_string_literal: true
@@ -816,7 +825,7 @@ module JsxRosetta
       # literal portions literally and the interpolations as ERB tags.
       def plain_attribute_value_erb(interpolation, translator)
         translated = translator.translate(interpolation.expression)
-        if double_quoted_ruby_string?(translated&.ruby) && translated.unresolved_identifiers.empty?
+        if quoted_ruby_string?(translated&.ruby) && translated.unresolved_identifiers.empty?
           inlined_ruby_string(translated.ruby)
         else
           interpolation_to_erb(interpolation, translator)
@@ -825,7 +834,7 @@ module JsxRosetta
 
       def render_style_binding(binding, translator)
         translated = translator.translate(binding.expression)
-        if double_quoted_ruby_string?(translated&.ruby)
+        if quoted_ruby_string?(translated&.ruby)
           %(class="#{inlined_ruby_string(translated.ruby)}")
         elsif translated
           %(class="<%= #{translated.ruby} %>")
@@ -834,8 +843,11 @@ module JsxRosetta
         end
       end
 
-      def double_quoted_ruby_string?(ruby)
-        ruby.is_a?(String) && ruby.start_with?('"') && ruby.end_with?('"')
+      def quoted_ruby_string?(ruby)
+        ruby.is_a?(String) && (
+          (ruby.start_with?('"') && ruby.end_with?('"')) ||
+          (ruby.start_with?("'") && ruby.end_with?("'"))
+        )
       end
 
       # Given a Ruby double-quoted string with #{...} interpolations, emit it

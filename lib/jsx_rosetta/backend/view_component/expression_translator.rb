@@ -73,9 +73,14 @@ module JsxRosetta
 
         Result = Data.define(:ruby, :unresolved_identifiers)
 
-        def initialize(prop_names:, local_binding_names: [])
+        # prop_aliases maps a local-binding name (the alias) to the
+        # underlying prop name. `"data-testid": dataTestId` records
+        # `{ "dataTestId" => "data-testid" }` so the use site of
+        # `dataTestId` resolves to the prop's `@data_testid` ivar.
+        def initialize(prop_names:, local_binding_names: [], prop_aliases: {})
           @prop_names = prop_names.to_set
           @local_binding_names = local_binding_names.to_set
+          @prop_aliases = prop_aliases.dup
           @local_stack = []
         end
 
@@ -106,12 +111,34 @@ module JsxRosetta
         # Returns nil when the source needs the compound-form dispatcher.
         def translate_simple_form(source, unresolved)
           return SIMPLE_LITERALS[source] if SIMPLE_LITERALS.key?(source)
-          return source if source.match?(NUMBER_LITERAL) || source.match?(STRING_LITERAL)
+          return source if source.match?(NUMBER_LITERAL)
+          return reemit_string_literal(source) if source.match?(STRING_LITERAL)
           return translate_this_props_chain(::Regexp.last_match(:rest)) if THIS_PROPS_CHAIN.match(source)
           return translate_this_state_chain(::Regexp.last_match(:rest)) if THIS_STATE_CHAIN.match(source)
           return translate_identifier(source, unresolved) if source.match?(IDENTIFIER)
 
           nil
+        end
+
+        # Convert a JS string-literal source (`"foo"` or `'foo'`) into its
+        # rubocop-preferred Ruby form: single-quoted when the body has no
+        # escapes, embedded quotes of the matching kind, or non-printable
+        # characters. Keeps the verbatim source otherwise — JS and Ruby
+        # double-quoted escape sequences mostly overlap, so passing through
+        # preserves semantics; rewriting `\n` from JS-single-quoted to Ruby
+        # would corrupt the literal.
+        def reemit_string_literal(source)
+          quote = source[0]
+          inner = source[1...-1]
+          # Backslashes, embedded single quotes, and interpolation markers
+          # all complicate the rewrite — keep the original literal as-is.
+          # Non-ASCII (emojis, unicode) is fine in single-quoted Ruby
+          # strings, so we don't bail for that.
+          return source if inner.include?("\\") || inner.include?("'") ||
+                           inner.include?("\#{") || inner.match?(/[\x00-\x1f\x7f]/)
+          return source if quote == "'"
+
+          "'#{inner}'"
         end
 
         # Handle the recursive / multi-segment shapes: member chains,
@@ -149,7 +176,14 @@ module JsxRosetta
         end
 
         def translate_unary(operator, operand, unresolved)
-          inner = translate_ruby(operand.strip, unresolved)
+          operand_clean = operand.strip
+          # `!fieldValue` where `fieldValue` is a known-but-unresolved local
+          # would translate to `!nil` (always true) and silently flip the
+          # condition's truthiness. Bail so the caller emits a TODO with
+          # the verbatim source.
+          return nil if unresolvable_local?(operand_clean)
+
+          inner = translate_ruby(operand_clean, unresolved)
           inner && "#{operator}#{inner}"
         end
 
@@ -163,18 +197,45 @@ module JsxRosetta
             match = find_top_level_operator(source, operators)
             next unless match
 
-            start_idx, end_idx, js_op = match
-            lhs = source[0...start_idx].strip
-            rhs = source[end_idx..].strip
-            return nil if lhs.empty? || rhs.empty?
-
-            lhs_ruby = translate_ruby(lhs, unresolved)
-            rhs_ruby = translate_ruby(rhs, unresolved)
-            return nil unless lhs_ruby && rhs_ruby
-
-            return "#{lhs_ruby} #{ruby_binary_operator(js_op)} #{rhs_ruby}"
+            result = translate_binary_at(source, match, unresolved)
+            return result if result
           end
           nil
+        end
+
+        def translate_binary_at(source, match, unresolved)
+          start_idx, end_idx, js_op = match
+          lhs = source[0...start_idx].strip
+          rhs = source[end_idx..].strip
+          return nil if lhs.empty? || rhs.empty?
+          # `count > 0` where `count` is a known-but-unresolved local
+          # translates to `nil > 0` and NoMethodErrors at render time.
+          return nil if unresolvable_local?(lhs) || unresolvable_local?(rhs)
+
+          lhs_ruby = translate_ruby(lhs, unresolved)
+          rhs_ruby = translate_ruby(rhs, unresolved)
+          return nil unless lhs_ruby && rhs_ruby
+          # `value === null || value === undefined` both translate to
+          # `@value.nil?` — collapse idempotent duplication for `||` / `&&`.
+          return lhs_ruby if %w[|| &&].include?(js_op) && lhs_ruby == rhs_ruby
+
+          rewrite_nil_comparison(lhs_ruby, rhs_ruby, js_op) ||
+            "#{lhs_ruby} #{ruby_binary_operator(js_op)} #{rhs_ruby}"
+        end
+
+        # `x === null` / `x === undefined` → `x.nil?` (and `!==` → `!x.nil?`).
+        # JSX commonly compares values against `null`/`undefined`; emitting
+        # the literal `x == nil` form is valid Ruby but trips the
+        # Style/NilComparison cop. The `.nil?` form is idiomatic and reads
+        # better, so rewrite when either side is literally `nil`.
+        def rewrite_nil_comparison(lhs_ruby, rhs_ruby, js_op)
+          return nil unless %w[=== !== == !=].include?(js_op)
+
+          if rhs_ruby == "nil" && lhs_ruby != "nil"
+            js_op.start_with?("!") ? "!#{lhs_ruby}.nil?" : "#{lhs_ruby}.nil?"
+          elsif lhs_ruby == "nil" && rhs_ruby != "nil"
+            js_op.start_with?("!") ? "!#{rhs_ruby}.nil?" : "#{rhs_ruby}.nil?"
+          end
         end
 
         def ruby_binary_operator(js_op)
@@ -270,31 +331,45 @@ module JsxRosetta
           snake = AST::Inflector.underscore(name)
           if in_local_scope?(name)
             snake
+          elsif @prop_aliases.key?(name)
+            "@#{AST::Inflector.underscore(@prop_aliases[name])}"
           elsif @prop_names.include?(name)
             "@#{snake}"
           elsif @local_binding_names.include?(name)
             # We know this binding exists locally (destructure, hook tuple)
             # but can't model its value. As a leaf identifier, return `nil`
             # so the file loads (a bare snake_case ref would NameError).
-            # As a member-chain root, `nil.member` would NoMethodError at
-            # render time — worse. Fall back to the snake_case bare ref
-            # and let it surface as a NameError (caller adds an unresolved
-            # marker), which is at least debuggable. The TODO marker for
-            # the binding source already lives in the comment block.
-            if member_chain_root
-              unresolved << name
-              snake
-            else
-              "nil"
-            end
+            # As a member-chain root, `nil.member` would NoMethodError and
+            # the bare-snake fallback would NameError — both crash at render
+            # time. Bail so the whole expression fails translation and the
+            # caller emits a TODO comment with the verbatim source.
+            return nil if member_chain_root
+
+            "nil"
           else
             unresolved << name
             snake
           end
         end
 
+        # An identifier that we know to be a local binding (e.g. destructured
+        # from an untranslatable init) but whose value we can't model. The
+        # leaf-translates-to-nil path is safe in value positions (attribute
+        # kwargs, leaf interpolations) but compound contexts (unary, binary,
+        # member chain) must bail so callers emit a TODO instead of silently
+        # changing semantics.
+        def unresolvable_local?(source)
+          return false unless source.match?(IDENTIFIER)
+
+          @local_binding_names.include?(source) &&
+            !in_local_scope?(source) &&
+            !@prop_names.include?(source)
+        end
+
         def translate_member_chain(root, rest, unresolved)
           translated_root = translate_identifier(root, unresolved, member_chain_root: true)
+          return nil unless translated_root
+
           # Underscore each chain segment so JS camelCase identifiers map to
           # Ruby snake_case (`post.coverImage` → `post.cover_image`). Map
           # optional-chaining `?.` to Ruby's safe-nav `&.` so a nil receiver
@@ -316,7 +391,16 @@ module JsxRosetta
             match = ::Regexp.last_match
             literal = content[last_pos...match.begin(0)]
             parts << escape_ruby_string_literal(literal) unless literal.empty?
-            parts << "\#{#{translate_template_interpolation(match[1], unresolved)}}"
+            translated = translate_template_interpolation(match[1], unresolved)
+            # An interpolation segment that itself fails translation (nil)
+            # or resolves to literal `nil` (known-but-unresolvable local)
+            # would emit `\#{}` / `\#{nil}` — empty or semantically empty
+            # interpolation that rubocop flags and that loses the source's
+            # intent. Bail so the whole template literal falls through to
+            # the caller's TODO path with the verbatim JS source visible.
+            return nil if translated.nil? || translated == "nil"
+
+            parts << "\#{#{translated}}"
             last_pos = match.end(0)
           end
           trailing = content[last_pos..]

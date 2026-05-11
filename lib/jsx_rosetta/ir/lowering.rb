@@ -100,6 +100,21 @@ module JsxRosetta
 
       JSX_NODE_TYPES = %w[JSXElement JSXFragment JSXText JSXExpressionContainer].freeze
 
+      # Mirrors React's `isUnitlessNumber` table — CSS properties that take
+      # a bare number rather than a length. Numeric style values for any
+      # property NOT in this set get a `px` suffix appended at lowering time.
+      UNITLESS_CSS_PROPERTIES = %w[
+        animation-iteration-count aspect-ratio border-image-outset
+        border-image-slice border-image-width box-flex box-flex-group
+        box-ordinal-group column-count columns flex flex-grow flex-negative
+        flex-order flex-positive flex-shrink font-weight grid-area
+        grid-column grid-column-end grid-column-span grid-column-start
+        grid-row grid-row-end grid-row-span grid-row-start line-clamp
+        line-height opacity order orphans scale tab-size widows z-index
+        zoom fill-opacity flood-opacity stop-opacity stroke-dasharray
+        stroke-dashoffset stroke-miterlimit stroke-opacity stroke-width
+      ].to_set.freeze
+
       # Pre-lowering AST scan: maps a node type to a callable returning the
       # AST nodes that contribute return values. Used by body_returns_jsx?.
       JSX_RETURN_PROBES = {
@@ -388,7 +403,7 @@ module JsxRosetta
 
         prop_names = []
         scan_this_props(body, prop_names)
-        prop_names.uniq.map { |name| Prop.new(name: name, default: nil) }
+        prop_names.uniq.map { |name| Prop.new(name: name, default: nil, alias_name: nil) }
       end
 
       def scan_this_props(node, accumulator)
@@ -449,22 +464,20 @@ module JsxRosetta
         @prop_names = props.map(&:name)
         absorb_class_metadata(name, function, props) if function.of_type?("ClassMethod", "MethodDefinition")
 
-        factory_array = extract_data_factory_array(function)
-        if factory_array
-          body = lower_value_expression(factory_array)
-          mode = :data_factory
-        else
-          body = lower_function_body(function[:body])
-          mode = :view
-        end
-
+        body, mode = lower_component_body(function)
+        # Unconsumed local arrows (`const handleClick = () => ...` that didn't
+        # become a Stimulus method or a render-method) are still real bindings
+        # in the source. Add their names here so the translator treats use
+        # sites as known-unresolvable — `on_click: handle_click` (NameError)
+        # becomes `on_click: nil` (file loads, marker visible upstream).
+        unconsumed_arrow_names = @local_arrows.keys
         Component.new(
           name: name,
           props: props,
           body: body,
           rest_prop_name: rest_prop_name,
           local_bindings: @local_bindings,
-          local_binding_names: @local_binding_names.uniq,
+          local_binding_names: (@local_binding_names + unconsumed_arrow_names).uniq,
           module_bindings: [],
           stimulus_methods: @stimulus_methods,
           react_hooks: @react_hooks,
@@ -481,6 +494,13 @@ module JsxRosetta
       # backend emit a snake_case method that returns the data, instead of
       # a `view_template`. JSX inside object properties still extracts to
       # private methods on the class via the IR::Lambda extraction.
+      def lower_component_body(function)
+        factory_array = extract_data_factory_array(function)
+        return [lower_value_expression(factory_array), :data_factory] if factory_array
+
+        [lower_function_body(function[:body]), :view]
+      end
+
       def extract_data_factory_array(function)
         body = function[:body]
         return nil unless body.is_a?(AST::Node)
@@ -538,7 +558,7 @@ module JsxRosetta
         # in a multi-param signature fall through to legacy first-param-
         # only handling so we don't regress files that used to translate.
         if params.size > 1 && params.all? { |p| multi_param_supported?(p) }
-          return [params.map { |p| Prop.new(name: multi_param_name(p), default: nil) }, nil]
+          return [params.map { |p| Prop.new(name: multi_param_name(p), default: nil, alias_name: nil) }, nil]
         end
 
         first_param = params.first
@@ -546,7 +566,7 @@ module JsxRosetta
         when "ObjectPattern"
           lower_object_pattern_params(first_param)
         when "Identifier"
-          [[Prop.new(name: first_param[:name], default: nil)], nil]
+          [[Prop.new(name: first_param[:name], default: nil, alias_name: nil)], nil]
         else
           raise lowering_error("unsupported parameter shape: #{first_param.type}", node: first_param)
         end
@@ -589,7 +609,20 @@ module JsxRosetta
         # `nil # TODO: ...`. The trailing `#` comment inside a method
         # parameter list swallows the closing `)` and breaks Ruby syntax.
         default = (lower_value_expression(value[:right]) if value.type == "AssignmentPattern")
-        Prop.new(name: prop_name, default: default)
+        alias_name = destructure_alias_for(prop_name, value)
+        Prop.new(name: prop_name, default: default, alias_name: alias_name)
+      end
+
+      # `{ "data-testid": dataTestId }` — extract the alias so use sites of
+      # `dataTestId` resolve to the prop's `@data_testid` ivar instead of
+      # leaking as a bare snake_case ref. Returns nil for the non-aliased
+      # case (`{ loading }` — key.name == value.name).
+      def destructure_alias_for(prop_name, value)
+        target = value.type == "AssignmentPattern" ? value[:left] : value
+        return nil unless AST::Node.matches?(target, "Identifier")
+        return nil if target[:name] == prop_name
+
+        target[:name]
       end
 
       def lower_function_body(body)
@@ -1421,19 +1454,31 @@ module JsxRosetta
           end
         return nil if property_name.nil?
 
-        value = lower_style_value(property[:value])
+        value = lower_style_value(property[:value], property_name)
         return nil if value.nil?
 
         StyleDeclaration.new(property: property_name, value: value)
       end
 
-      def lower_style_value(value)
+      def lower_style_value(value, property_name)
         case value.type
         when "StringLiteral" then value[:value]
-        when "NumericLiteral" then value[:value].to_s
+        when "NumericLiteral" then numeric_style_value(value[:value], property_name)
         when "Identifier", "MemberExpression"
           Interpolation.new(expression: source_of(value))
         end
+      end
+
+      # Mirrors React's `isUnitlessNumber` table: properties that take bare
+      # numbers (`zIndex: 5`) rather than lengths. Everything else gets a
+      # `px` suffix appended when the JSX source provides a unitless number
+      # — `marginBottom: 16` → `margin-bottom: 16px;`. Without this, the
+      # browser silently ignores the declaration as invalid CSS.
+      def numeric_style_value(number, property_name)
+        return number.to_s if number.zero?
+        return number.to_s if UNITLESS_CSS_PROPERTIES.include?(property_name)
+
+        "#{number}px"
       end
 
       def css_property_from_camel(name)

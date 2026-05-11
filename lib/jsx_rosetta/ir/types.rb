@@ -110,9 +110,12 @@ module JsxRosetta
 
     # A component prop, possibly with a default value.
     #
-    # name    : String
-    # default : Interpolation | nil
-    Prop = Data.define(:name, :default) do
+    # name       : String — the prop name on the parent (e.g. "data-testid").
+    # default    : Interpolation | nil
+    # alias_name : String | nil — the local binding name inside the body when
+    #              the destructure renames it (`"data-testid": dataTestId`).
+    #              Use sites of the alias resolve to the prop's ivar.
+    Prop = Data.define(:name, :default, :alias_name) do
       include Node
     end
 

@@ -200,7 +200,7 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       files = files_for('function X({ size = 4, label = "hi" }) { return <div />; }')
 
       expect(files["x_component.rb"]).to include("size: 4")
-      expect(files["x_component.rb"]).to include('label: "hi"')
+      expect(files["x_component.rb"]).to include("label: 'hi'")
     end
 
     it "emits `nil` (no inline TODO) for non-trivial default expressions" do
@@ -264,7 +264,7 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       files = files_for("function X({ rest }) { return <button className=\"x\" {...rest}>Click</button>; }")
 
       erb = files["x_component.html.erb"]
-      expect(erb).to include("<%= tag.button(class: \"x\", **(@rest || {})) do %>")
+      expect(erb).to include("<%= tag.button(class: 'x', **(@rest || {})) do %>")
       expect(erb).to include("<% end %>")
       expect(erb).not_to include("<button class=")
     end
