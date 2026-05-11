@@ -312,6 +312,166 @@ RSpec.describe JsxRosetta::IR::Lowering do
 
       expect(ir.local_bindings).to eq([])
     end
+
+    it "exposes hook destructure names in local_binding_names so the translator can recognize them" do
+      # Gap A: `const [open, setOpen] = useState(false); ... {open}` would
+      # otherwise emit a bare `open` reference that NameErrors at render time.
+      # Translator awareness is the cure; the TODO duplication is avoided by
+      # keeping these names out of `local_bindings` (the reviewer already
+      # sees the hook source in the hooks TODO block).
+      ir = lower(<<~JSX)
+        function X() {
+          const [open, setOpen] = useState(false);
+          return <div />;
+        }
+      JSX
+
+      expect(ir.local_binding_names).to contain_exactly("open", "setOpen")
+    end
+  end
+
+  describe "Gap A: destructure pattern capture" do
+    it "records ArrayPattern destructured names as local bindings" do
+      ir = lower(<<~JSX)
+        function X() {
+          const [first, second] = someTuple;
+          return <p>{first}</p>;
+        }
+      JSX
+
+      expect(ir.local_binding_names).to include("first", "second")
+      expect(ir.local_bindings.map(&:name)).to include("first", "second")
+    end
+
+    it "records ObjectPattern destructured names as local bindings" do
+      ir = lower(<<~JSX)
+        function X() {
+          const { foo, bar } = thing;
+          return <p>{foo}{bar}</p>;
+        }
+      JSX
+
+      expect(ir.local_binding_names).to include("foo", "bar")
+      expect(ir.local_bindings.map(&:name)).to include("foo", "bar")
+    end
+
+    it "records aliased ObjectPattern names against the alias, not the source key" do
+      ir = lower(<<~JSX)
+        function X() {
+          const { foo: aliased } = thing;
+          return <p>{aliased}</p>;
+        }
+      JSX
+
+      expect(ir.local_binding_names).to include("aliased")
+      expect(ir.local_binding_names).not_to include("foo")
+    end
+
+    it "follows AssignmentPattern defaults to the bound name" do
+      ir = lower(<<~JSX)
+        function X() {
+          const [first = 0, second = 1] = tuple;
+          return <p>{first}</p>;
+        }
+      JSX
+
+      expect(ir.local_binding_names).to include("first", "second")
+    end
+
+    it "captures RestElement in destructure patterns" do
+      ir = lower(<<~JSX)
+        function X() {
+          const { a, ...rest } = thing;
+          return <p>{a}</p>;
+        }
+      JSX
+
+      expect(ir.local_binding_names).to include("a", "rest")
+    end
+  end
+
+  describe "Gap E: module-level constants" do
+    it "captures `const FOO = 400` outside the component into module_bindings" do
+      ir = described_class.lower(JsxRosetta.parse(<<~JSX), source: <<~JSX)
+        const FOO = 400;
+        function X() { return <p>{FOO}</p>; }
+      JSX
+        const FOO = 400;
+        function X() { return <p>{FOO}</p>; }
+      JSX
+
+      expect(ir.module_bindings.map(&:name)).to include("FOO")
+    end
+
+    it "doesn't capture the component itself as a module binding" do
+      ir = described_class.lower(JsxRosetta.parse(<<~JSX), source: <<~JSX)
+        const X = () => <p />;
+      JSX
+        const X = () => <p />;
+      JSX
+
+      expect(ir.module_bindings).to eq([])
+    end
+
+    it "captures multiple module bindings preserving source order" do
+      ir = described_class.lower(JsxRosetta.parse(<<~JSX), source: <<~JSX)
+        const FOO = 400;
+        const BAR = "x";
+        function X() { return <p />; }
+      JSX
+        const FOO = 400;
+        const BAR = "x";
+        function X() { return <p />; }
+      JSX
+
+      expect(ir.module_bindings.map(&:name)).to eq(%w[FOO BAR])
+    end
+  end
+
+  describe "Gap D: render-prop / function-as-children" do
+    it "lowers `<Form.List>{(fields) => <p>{fields}</p>}</Form.List>` to RenderProp" do
+      ir = lower(<<~JSX)
+        function X() {
+          return <Form.List>{(fields) => <p>{fields}</p>}</Form.List>;
+        }
+      JSX
+
+      child = ir.body.children.first
+      expect(child).to be_a(JsxRosetta::IR::RenderProp)
+      expect(child.params).to eq(["fields"])
+      expect(child.body).to be_a(JsxRosetta::IR::Element)
+      expect(child.body.tag).to eq("p")
+    end
+
+    it "captures multiple params" do
+      ir = lower(<<~JSX)
+        function X() {
+          return <Form.List>{(fields, helpers) => <p />}</Form.List>;
+        }
+      JSX
+
+      child = ir.body.children.first
+      expect(child).to be_a(JsxRosetta::IR::RenderProp)
+      expect(child.params).to eq(%w[fields helpers])
+    end
+  end
+
+  describe "Gap J: member-expression destructuring" do
+    it "resolves `const { Content } = Layout; <Content/>` to `Layout::Content`" do
+      # Without this, the lowering would treat `<Content/>` as a bare
+      # component invocation and emit `ContentComponent.new` — wrong, since
+      # Content is actually a sub-component of Layout.
+      ir = lower(<<~JSX)
+        function X() {
+          const { Content, Header } = Layout;
+          return <Content><Header>x</Header></Content>;
+        }
+      JSX
+
+      expect(ir.body).to be_a(JsxRosetta::IR::ComponentInvocation)
+      expect(ir.body.name).to eq("Layout.Content")
+      expect(ir.body.children.first.name).to eq("Layout.Header")
+    end
   end
 
   describe "polymorphic tag (asChild pattern) synthesis" do
@@ -414,6 +574,56 @@ RSpec.describe JsxRosetta::IR::Lowering do
 
       method_names = ir.stimulus_methods.map(&:name)
       expect(method_names).to eq(%w[clickHandler clickHandler2])
+    end
+
+    it "records the original (pre-uniquification) name on each StimulusMethod" do
+      # When two handlers share a base name, both retain the original
+      # base name in `original_name`. Backends use this to emit a
+      # collision marker in the generated controller JS so the silent
+      # rename is visible to the human reviewer.
+      ir = lower(<<~JSX)
+        function X({ handleReset }) {
+          return (
+            <div>
+              <button onClick={handleReset}>a</button>
+              <button onClick={handleReset}>b</button>
+            </div>
+          );
+        }
+      JSX
+
+      methods = ir.stimulus_methods
+      expect(methods.map(&:name)).to eq(%w[handleReset handleReset2])
+      expect(methods.map(&:original_name)).to eq(%w[handleReset handleReset])
+    end
+
+    it "does NOT promote on*={...} to Stimulus when the tag is a component (PascalCase)" do
+      # Stimulus action descriptors only fire on real DOM events. A
+      # `data-action="change->foo#h"` on a Ruby component invocation
+      # would never trigger — the receiving component must explicitly
+      # accept the prop and decide what to do with it.
+      ir = lower("function X({ onChange }) { return <Select onChange={onChange} />; }")
+
+      attr = ir.body.props.first
+      expect(attr).to be_a(JsxRosetta::IR::Attribute)
+      expect(attr.name).to eq("onChange")
+      expect(ir.stimulus_methods).to eq([])
+    end
+
+    it "does NOT promote on*={...} to Stimulus when the tag is a member-expression component" do
+      ir = lower("function X({ onSubmit }) { return <Form.Root onSubmit={onSubmit} />; }")
+
+      attr = ir.body.props.first
+      expect(attr).to be_a(JsxRosetta::IR::Attribute)
+      expect(attr.name).to eq("onSubmit")
+      expect(ir.stimulus_methods).to eq([])
+    end
+
+    it "still promotes on*={...} to Stimulus when the tag is a lowercase HTML element" do
+      ir = lower("function X({ onClick }) { return <button onClick={onClick} />; }")
+
+      attr = ir.body.attributes.first
+      expect(attr).to be_a(JsxRosetta::IR::StimulusBinding)
     end
   end
 
@@ -1172,8 +1382,14 @@ RSpec.describe JsxRosetta::IR::Lowering do
         ),
         rest_prop_name: nil,
         local_bindings: [],
+        local_binding_names: [],
+        module_bindings: [],
         stimulus_methods: [
-          JsxRosetta::IR::StimulusMethod.new(name: "onClick", body_source: "// originally bound to: onClick")
+          JsxRosetta::IR::StimulusMethod.new(
+            name: "onClick",
+            body_source: "// originally bound to: onClick",
+            original_name: "onClick"
+          )
         ],
         react_hooks: []
       )

@@ -46,9 +46,13 @@ module JsxRosetta
       def emit(component)
         prop_names = component.props.map(&:name)
         prop_names << component.rest_prop_name if component.rest_prop_name
-        translator = ViewComponent::ExpressionTranslator.new(prop_names: prop_names)
+        translator = ViewComponent::ExpressionTranslator.new(
+          prop_names: prop_names, local_binding_names: component.local_binding_names
+        )
 
         @stimulus_identifier = component.stimulus_methods.any? ? stimulus_identifier(component) : nil
+        @lambda_methods = []
+        @lambda_method_counts = {}
 
         files = [File.new(path: ruby_path(component), contents: render_ruby_class(component, translator))]
         if component.stimulus_methods.any?
@@ -86,7 +90,22 @@ module JsxRosetta
 
       def render_ruby_class(component, translator)
         class_body = render_class_body(component, translator)
-        wrap_in_namespace(class_body)
+        prefix = render_module_bindings_prefix(component)
+        wrap_in_namespace("#{prefix}#{class_body}")
+      end
+
+      # Top-level `const`/`let` declarations outside the component
+      # function — captured at lowering time and surfaced here as a TODO
+      # comment block above the class definition. We don't try to
+      # translate the JS; the human reviewer either copies the value as
+      # a Ruby constant or moves it to a Rails initializer.
+      def render_module_bindings_prefix(component)
+        return "" if component.module_bindings.empty?
+
+        lines = ["# TODO: module-level constants — translate to Ruby constants " \
+                 "or move to a Rails initializer:"]
+        component.module_bindings.each { |b| lines.concat(comment_lines(b.source)) }
+        "#{lines.join("\n")}\n"
       end
 
       def wrap_in_namespace(body)
@@ -99,9 +118,30 @@ module JsxRosetta
       def render_class_body(component, translator)
         initializer = render_initializer(component, translator)
         template = render_view_template(component, translator)
+        # Render lambdas only AFTER the template — `@lambda_methods` is
+        # populated as attribute values are rendered.
+        lambda_methods = render_lambda_method_definitions(translator)
 
-        sections = [initializer, template].compact.join("\n\n")
+        sections = [initializer, template, lambda_methods].compact.join("\n\n")
         "class #{class_name(component)} < #{PHLEX_BASE_CLASS}\n#{sections}\nend\n"
+      end
+
+      def render_lambda_method_definitions(translator)
+        return nil if @lambda_methods.nil? || @lambda_methods.empty?
+
+        defs = @lambda_methods.map do |entry|
+          render_lambda_method_definition(entry[:method_name], entry[:lambda], translator)
+        end
+        "  private\n\n#{defs.join("\n\n")}"
+      end
+
+      def render_lambda_method_definition(method_name, lambda, translator)
+        snake_params = lambda.params.map { |p| AST::Inflector.underscore(p) }
+        signature = snake_params.empty? ? method_name : "#{method_name}(#{snake_params.join(", ")})"
+        body = translator.with_locals(lambda.params) do
+          render_ir_node(lambda.body, translator, indent: 4)
+        end
+        "  def #{signature}\n#{body}\n  end"
       end
 
       def render_initializer(component, translator)
@@ -134,8 +174,18 @@ module JsxRosetta
       def ruby_default_for(prop, translator)
         return "nil" if prop.default.nil?
 
-        translated = translator.translate(prop.default.expression)
-        translated ? translated.ruby : "nil # TODO: translate #{prop.default.expression.inspect}"
+        case prop.default
+        when IR::Interpolation
+          translated = translator.translate(prop.default.expression)
+          translated ? translated.ruby : "nil"
+        when IR::ObjectLiteral, IR::ArrayLiteral, IR::Lambda
+          # Inline values: route through the recursive renderer. Pass an
+          # empty todos array — TODO markers wouldn't be safe inside a
+          # parameter-list anyway.
+          render_inline_value(prop.default, translator, todos: [], attr_name: prop.name)
+        else
+          "nil"
+        end
       end
 
       def render_view_template(component, translator)
@@ -198,10 +248,21 @@ module JsxRosetta
         when IR::Fragment then render_fragment(node, translator, indent: indent)
         when IR::Conditional then render_conditional(node, translator, indent: indent)
         when IR::Loop then render_loop(node, translator, indent: indent)
+        when IR::RenderProp then render_orphan_render_prop(node, translator, indent: indent)
         when IR::Slot then render_slot(node, indent: indent)
         when IR::Text then render_text(node, indent: indent)
         when IR::Interpolation then render_interpolation(node, translator, indent: indent)
         when IR::Comment then render_comment(node, indent: indent)
+        end
+      end
+
+      # An orphan RenderProp (i.e. one that didn't get consumed as a block
+      # by a parent ComponentInvocation). Emit the body inline within the
+      # appropriate translator scope; the param names are pushed but no
+      # block syntax is generated.
+      def render_orphan_render_prop(render_prop, translator, indent:)
+        translator.with_locals(render_prop.params) do
+          render_ir_node(render_prop.body, translator, indent: indent)
         end
       end
 
@@ -226,7 +287,10 @@ module JsxRosetta
         class_ref = component_class_reference(invocation.name)
         new_call = kwargs.empty? ? "#{class_ref}.new" : "#{class_ref}.new(#{kwargs})"
 
-        body = if invocation.children.empty?
+        render_prop = invocation.children.find { |c| c.is_a?(IR::RenderProp) }
+        body = if render_prop
+                 render_with_render_prop(new_call, render_prop, translator, indent)
+               elsif invocation.children.empty?
                  "#{spaces(indent)}render #{new_call}"
                else
                  inner = invocation.children.map { |c| render_ir_node(c, translator, indent: indent + 2) }.join("\n")
@@ -234,6 +298,20 @@ module JsxRosetta
                end
 
         prepend_attribute_todos(todos, indent, body)
+      end
+
+      # Emit a render-prop child as a Ruby block on the parent `render` call.
+      # `<Form.List>{(fields) => <p/>}</Form.List>` →
+      # `render Form::List.new do |fields|\n  p\nend`. Param names are
+      # snake_cased and pushed into the translator scope so identifier
+      # references inside the body resolve to the block locals.
+      def render_with_render_prop(new_call, render_prop, translator, indent)
+        snake_params = render_prop.params.map { |p| AST::Inflector.underscore(p) }
+        param_str = snake_params.empty? ? "" : " |#{snake_params.join(", ")}|"
+        inner = translator.with_locals(render_prop.params) do
+          render_ir_node(render_prop.body, translator, indent: indent + 2)
+        end
+        "#{spaces(indent)}render #{new_call} do#{param_str}\n#{inner}\n#{spaces(indent)}end"
       end
 
       def prepend_attribute_todos(todos, indent, body)
@@ -271,7 +349,7 @@ module JsxRosetta
       end
 
       def render_loop(loop_node, translator, indent:)
-        iterable_ruby, todo = safe_test_expression(loop_node.iterable.expression, translator, fallback: "[]")
+        iterable_ruby, todo = render_loop_iterable(loop_node.iterable, translator)
         js_bindings = [loop_node.item_binding, loop_node.index_binding].compact
         ruby_bindings = js_bindings.map { |name| AST::Inflector.underscore(name) }
         binding_str = ruby_bindings.size == 1 ? "|#{ruby_bindings.first}|" : "|#{ruby_bindings.join(", ")}|"
@@ -286,6 +364,21 @@ module JsxRosetta
         lines << body
         lines << "#{spaces(indent)}end"
         lines.join("\n")
+      end
+
+      # Translate the iterable side of a `.each` call. Handles both the
+      # traditional Interpolation form and the new ArrayLiteral form
+      # (literal array `.map(...)`) introduced by Gap H. Returns
+      # [ruby_source, todo_text]; todo_text is nil when translation succeeded.
+      def render_loop_iterable(iterable, translator)
+        case iterable
+        when IR::ArrayLiteral
+          [render_array_literal_value(iterable, translator, todos: []), nil]
+        when IR::Interpolation
+          safe_test_expression(iterable.expression, translator, fallback: "[]")
+        else
+          ["[]", iterable.inspect]
+        end
       end
 
       # Translate an expression intended to drive an `if` or `.each` call.
@@ -322,12 +415,24 @@ module JsxRosetta
 
         unresolved = translated.unresolved_identifiers
         if unresolved.empty?
-          "#{spaces(indent)}plain #{translated.ruby}"
+          "#{spaces(indent)}plain #{translated.ruby}#{react_node_hint(translated.ruby)}"
         else
           names = unresolved.map(&:inspect).join(", ")
           "#{spaces(indent)}# TODO: unresolved identifier #{names}\n" \
             "#{spaces(indent)}plain #{translated.ruby}"
         end
+      end
+
+      # Gap G: when the translated value is a bare `@ivar` reference, the
+      # prop may be a ReactNode (children-typed prop) rather than a plain
+      # string. `plain` HTML-escapes its argument; `raw` doesn't. We can't
+      # tell at translation time which is intended, so default to `plain`
+      # (safe for string props) and emit a comment hint pointing at `raw`.
+      def react_node_hint(ruby)
+        return "" unless ruby.is_a?(String)
+        return "" unless ruby.match?(/\A@[a-z_][a-z0-9_]*\z/)
+
+        " # NOTE: use `raw` instead of `plain` if this is a ReactNode-typed prop"
       end
 
       # The original JS expression couldn't be translated to Ruby. We can't
@@ -343,7 +448,9 @@ module JsxRosetta
       end
 
       def render_comment(comment, indent:)
-        "#{spaces(indent)}# #{comment.text}"
+        # Multi-line JSX comments need every line prefixed with `# ` — a
+        # bare first-line `#` would leave subsequent lines as Ruby code.
+        comment.text.split("\n").map { |line| "#{spaces(indent)}# #{line}" }.join("\n")
       end
 
       # Build the Ruby attribute list — `(id: @id, class: @class, ...)`  —
@@ -426,7 +533,83 @@ module JsxRosetta
         when true then "true"
         when String then value.inspect
         when IR::Interpolation then interpolated_attribute_value(name, value, translator, todos: todos)
+        when IR::ObjectLiteral then render_object_literal_value(value, translator, todos: todos)
+        when IR::ArrayLiteral then render_array_literal_value(value, translator, todos: todos)
+        when IR::Lambda then render_lambda_method_reference(value, translator, attr_name: name)
         end
+      end
+
+      # Render an ObjectLiteral as a Ruby hash literal. Identifier-keyed
+      # entries become Ruby kwargs (snake_cased to match Ruby convention);
+      # non-identifier keys (numeric, hyphenated) fall back to string keys.
+      def render_object_literal_value(object_literal, translator, todos:)
+        parts = object_literal.properties.map do |(key, value)|
+          render_object_property(key, value, translator, todos: todos)
+        end
+        "{ #{parts.join(", ")} }"
+      end
+
+      def render_object_property(key, value, translator, todos:)
+        value_ruby = render_inline_value(value, translator, todos: todos, attr_name: key)
+        snake = AST::Inflector.underscore(key)
+        if snake.match?(VALID_IDENTIFIER)
+          "#{snake}: #{value_ruby}"
+        else
+          "#{key.inspect} => #{value_ruby}"
+        end
+      end
+
+      def render_array_literal_value(array_literal, translator, todos:)
+        parts = array_literal.elements.map do |el|
+          el.nil? ? "nil" : render_inline_value(el, translator, todos: todos, attr_name: nil)
+        end
+        "[#{parts.join(", ")}]"
+      end
+
+      # An inline value can appear as a kwarg value, an array element, or a
+      # hash property value. Recursive shapes route back through the new IR
+      # types; primitives fall through the same paths as attribute_value_to_ruby.
+      def render_inline_value(value, translator, todos:, attr_name:)
+        case value
+        when IR::ObjectLiteral then render_object_literal_value(value, translator, todos: todos)
+        when IR::ArrayLiteral then render_array_literal_value(value, translator, todos: todos)
+        when IR::Lambda then render_lambda_method_reference(value, translator, attr_name: attr_name)
+        when IR::Interpolation then interpolated_attribute_value(attr_name || "<element>", value, translator,
+                                                                 todos: todos)
+        when String then value.inspect
+        when true then "true"
+        else
+          "nil"
+        end
+      end
+
+      # An IR::Lambda lives inside an object/array literal as a value. We
+      # extract it to a method on the class (so it has access to the
+      # Phlex tag.* helpers) and reference it via `method(:name)` in the
+      # value position. Method names are deterministic so re-runs produce
+      # stable output: `<attr-name>_renderer<N>` where N is a per-attr index.
+      def render_lambda_method_reference(lambda, translator, attr_name:)
+        @lambda_methods ||= []
+        base = lambda_method_base(attr_name)
+        @lambda_methods << { base: base, lambda: lambda, translator: translator }
+        # Index is the position within `@lambda_methods` so re-renders are
+        # deterministic in the order encountered.
+        method_name = unique_lambda_method_name(base)
+        @lambda_methods.last[:method_name] = method_name
+        "method(:#{method_name})"
+      end
+
+      def lambda_method_base(attr_name)
+        return "render_lambda" if attr_name.nil? || attr_name.empty?
+
+        "render_#{AST::Inflector.underscore(attr_name)}"
+      end
+
+      def unique_lambda_method_name(base)
+        @lambda_method_counts ||= {}
+        @lambda_method_counts[base] ||= 0
+        @lambda_method_counts[base] += 1
+        @lambda_method_counts[base] == 1 ? base : "#{base}#{@lambda_method_counts[base]}"
       end
 
       # Attribute-position interpolation. Two failure modes:
@@ -496,9 +679,14 @@ module JsxRosetta
         "#{decl.property}: #{value};"
       end
 
+      # Wrap the spread expression in `(… || {})` so a nil-valued prop
+      # default doesn't raise at render time. `<div {...maybeNil}>` →
+      # `**(@maybe_nil || {})`. Cheap to emit unconditionally; the
+      # `|| {}` shortcuts on non-nil values.
       def render_spread(expression, translator)
         translated = translator.translate(expression)
-        translated ? translated.ruby : expression
+        ruby = translated ? translated.ruby : expression
+        "(#{ruby} || {})"
       end
 
       # Build the `data_action: "..."` kwarg. Phlex auto-hyphenates the
@@ -548,7 +736,12 @@ module JsxRosetta
       def stimulus_method_lines(method)
         body_lines = method.body_source.strip.split("\n")
         commented = body_lines.map { |line| "  //   #{line}" }
-        ["  // TODO: translate from the original JSX handler:"] + commented + [
+        header = ["  // TODO: translate from the original JSX handler:"]
+        if method.name != method.original_name
+          header.unshift("  // NOTE: method renamed from #{method.original_name.inspect} " \
+                         "to avoid collision with an earlier handler")
+        end
+        header + commented + [
           "  #{method.name}(event) {",
           "    // ...",
           "  }"

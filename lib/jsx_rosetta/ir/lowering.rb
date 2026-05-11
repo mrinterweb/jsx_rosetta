@@ -105,8 +105,10 @@ module JsxRosetta
         @prop_names = []
         @local_jsx = {}
         @local_bindings = []
+        @local_binding_names = []
         @local_arrows = {}
         @local_polymorphic_tags = {}
+        @local_destructures = {}
         @stimulus_methods = []
         @stimulus_seen_names = {}
         @react_hooks = []
@@ -117,14 +119,66 @@ module JsxRosetta
         raise no_component_error(file.program) if candidates.empty?
 
         name, function = candidates.first
-        lower_component(name, function)
+        module_bindings = capture_module_bindings(file.program, candidates)
+        attach_module_bindings(lower_component(name, function), module_bindings)
       end
 
       def lower_all_components(file)
         candidates = find_component_functions(file.program)
         raise no_component_error(file.program) if candidates.empty?
 
-        candidates.map { |name, function| lower_component(name, function) }
+        module_bindings = capture_module_bindings(file.program, candidates)
+        candidates.map do |name, function|
+          attach_module_bindings(lower_component(name, function), module_bindings)
+        end
+      end
+
+      # Walk the program body for top-level `const`/`let` declarations that
+      # aren't component declarations. Capture each as a LocalBinding so
+      # backends can emit them as Ruby constants (or as a TODO comment for
+      # non-literal initializers) before the class definition. Without
+      # this, `const FOO = 400; function X() { return <p>{FOO}</p> }` would
+      # silently drop the FOO declaration and emit an unbacked `foo`
+      # reference inside the view template.
+      def capture_module_bindings(program, candidates)
+        component_names = candidates.to_set(&:first)
+        bindings = []
+        program.body.each do |stmt|
+          walk_module_binding(stmt, component_names, bindings)
+        end
+        bindings
+      end
+
+      def walk_module_binding(stmt, component_names, bindings)
+        case stmt.type
+        when "VariableDeclaration"
+          stmt[:declarations].each { |d| record_module_binding(stmt, d, component_names, bindings) }
+        when "ExportNamedDeclaration"
+          decl = stmt[:declaration]
+          walk_module_binding(decl, component_names, bindings) if decl.is_a?(AST::Node)
+        end
+      end
+
+      def record_module_binding(stmt, declarator, component_names, bindings)
+        init = declarator[:init]
+        return unless init.is_a?(AST::Node)
+
+        # Component declarators (`const Foo = () => ...`) are handled by
+        # the component pipeline; skip them here so the source doesn't
+        # show up twice.
+        return if %w[ArrowFunctionExpression FunctionExpression].include?(init.type) &&
+                  component_names.include?(declarator[:id]&.[](:name))
+
+        name = declarator[:id]&.[](:name)
+        return unless name
+
+        bindings << LocalBinding.new(name: name, source: source_of(stmt).strip)
+      end
+
+      def attach_module_bindings(component, module_bindings)
+        return component if module_bindings.empty?
+
+        component.with(module_bindings: module_bindings)
       end
 
       private
@@ -229,8 +283,10 @@ module JsxRosetta
         props, rest_prop_name = lower_params(function[:params])
         @prop_names = props.map(&:name)
         @local_bindings = []
+        @local_binding_names = []
         @local_arrows = {}
         @local_polymorphic_tags = {}
+        @local_destructures = {}
         @stimulus_methods = []
         @stimulus_seen_names = {}
         @react_hooks = []
@@ -243,6 +299,8 @@ module JsxRosetta
           body: body,
           rest_prop_name: rest_prop_name,
           local_bindings: @local_bindings,
+          local_binding_names: @local_binding_names.uniq,
+          module_bindings: [],
           stimulus_methods: @stimulus_methods,
           react_hooks: @react_hooks
         )
@@ -283,7 +341,12 @@ module JsxRosetta
         key = property[:key]
         prop_name = key.type == "StringLiteral" ? key[:value] : key[:name]
         value = property[:value]
-        default = (Interpolation.new(expression: source_of(value[:right])) if value.type == "AssignmentPattern")
+        # Route prop default expressions through the recursive value
+        # lowering so object/array literals translate cleanly, instead of
+        # producing an opaque Interpolation that the backend would emit as
+        # `nil # TODO: ...`. The trailing `#` comment inside a method
+        # parameter list swallows the closing `)` and breaks Ruby syntax.
+        default = (lower_value_expression(value[:right]) if value.type == "AssignmentPattern")
         Prop.new(name: prop_name, default: default)
       end
 
@@ -534,6 +597,7 @@ module JsxRosetta
         @local_jsx = {}
         @local_arrows = {}
         @local_polymorphic_tags = {}
+        @local_destructures = {}
         seen_other_stmts = {}
 
         statements.each do |stmt|
@@ -550,12 +614,27 @@ module JsxRosetta
         init = declarator[:init]
         return unless init.is_a?(AST::Node)
 
-        if hook_call?(init)
-          @react_hooks << ReactHookCall.new(hook: init[:callee][:name], source: source_of(stmt).strip)
+        is_hook = hook_call?(init)
+        @react_hooks << ReactHookCall.new(hook: init[:callee][:name], source: source_of(stmt).strip) if is_hook
+
+        id_node = declarator[:id]
+        if destructure_pattern?(id_node)
+          # Capture destructured names so the ExpressionTranslator recognizes
+          # them as known-local bindings and emits a `nil` placeholder
+          # instead of a bare unresolved reference (which NameErrors at
+          # render time). Hook destructures (`const [open, setOpen] = useState(0)`)
+          # contribute names but not a separate LocalBinding TODO — the
+          # hook's source already shows the binding to the reviewer.
+          # Also track member-expression destructures (Gap J) so
+          # `const { Content } = Layout` lets `<Content/>` resolve to
+          # `Layout::Content`.
+          record_destructured_names(stmt, declarator, init: init, seen: seen, is_hook: is_hook)
           return
         end
 
-        name = declarator[:id]&.[](:name)
+        return if is_hook
+
+        name = id_node&.[](:name)
         return unless name
 
         case init.type
@@ -568,6 +647,71 @@ module JsxRosetta
           poly ? (@local_polymorphic_tags[name] = poly) : record_local_other_binding(stmt, name, seen)
         else
           record_local_other_binding(stmt, name, seen)
+        end
+      end
+
+      def destructure_pattern?(node)
+        AST::Node.matches?(node, "ArrayPattern", "ObjectPattern")
+      end
+
+      def record_destructured_names(stmt, declarator, init:, seen:, is_hook:)
+        pattern = declarator[:id]
+        names = destructured_names_of(pattern)
+        return if names.empty?
+
+        # Member-expression-style destructuring (Gap J): `const { Content } = Layout`
+        # binds `Content` to `Layout.Content`. Record those so JSX use sites
+        # resolve to the right component.
+        track_member_destructures(pattern, init) if AST::Node.matches?(init, "Identifier")
+
+        @local_binding_names.concat(names)
+        return if is_hook
+
+        seen[stmt.start_pos] ||= source_of(stmt).strip
+        names.each { |name| @local_bindings << LocalBinding.new(name: name, source: seen[stmt.start_pos]) }
+      end
+
+      # Return the flat list of Identifier names bound by a destructuring
+      # pattern. Nested patterns recurse. RestElement / aliased properties
+      # are included; defaults (AssignmentPattern) are followed to their
+      # left-hand identifier.
+      def destructured_names_of(pattern)
+        return [] unless pattern.is_a?(AST::Node)
+
+        case pattern.type
+        when "Identifier" then [pattern[:name]]
+        when "ArrayPattern"
+          pattern[:elements].flat_map { |element| element ? destructured_names_of(element) : [] }
+        when "ObjectPattern"
+          pattern[:properties].flat_map { |prop| destructured_names_from_property(prop) }
+        when "RestElement"
+          destructured_names_of(pattern[:argument])
+        when "AssignmentPattern"
+          destructured_names_of(pattern[:left])
+        else
+          []
+        end
+      end
+
+      def destructured_names_from_property(prop)
+        case prop.type
+        when "ObjectProperty" then destructured_names_of(prop[:value])
+        when "RestElement" then destructured_names_of(prop[:argument])
+        else []
+        end
+      end
+
+      def track_member_destructures(pattern, source_identifier)
+        return unless AST::Node.matches?(pattern, "ObjectPattern")
+
+        source_name = source_identifier[:name]
+        pattern[:properties].each do |prop|
+          next unless prop.type == "ObjectProperty"
+
+          value = prop[:value]
+          next unless AST::Node.matches?(value, "Identifier")
+
+          @local_destructures[value[:name]] = source_name
         end
       end
 
@@ -610,6 +754,7 @@ module JsxRosetta
       def record_local_other_binding(stmt, name, seen)
         seen[stmt.start_pos] ||= source_of(stmt).strip
         @local_bindings << LocalBinding.new(name: name, source: seen[stmt.start_pos])
+        @local_binding_names << name
       end
 
       def lower_jsx(node)
@@ -625,7 +770,7 @@ module JsxRosetta
 
       def lower_jsx_element(element)
         tag = element.tag_name
-        attributes = element.opening_element.attributes.filter_map { |attr| lower_attribute(attr) }
+        attributes = element.opening_element.attributes.filter_map { |attr| lower_attribute(attr, tag: tag) }
         # `key` is a React-only reconciliation hint; never emit it to the DOM
         # or to ViewComponent invocations.
         attributes = attributes.reject { |attr| attr.is_a?(Attribute) && attr.name == "key" }
@@ -633,6 +778,10 @@ module JsxRosetta
 
         if (poly = @local_polymorphic_tags[tag])
           lower_polymorphic_tag_use(poly, attributes, children)
+        elsif (parent = @local_destructures[tag])
+          # Gap J: `const { Content } = Layout; <Content/>` should resolve
+          # to `Layout::Content`, not a bare `ContentComponent`.
+          ComponentInvocation.new(name: "#{parent}.#{tag}", props: attributes, children: children)
         elsif html_element?(tag)
           Element.new(tag: tag, attributes: attributes, children: children)
         else
@@ -717,9 +866,28 @@ module JsxRosetta
         when "ConditionalExpression" then lower_ternary_expression(expression)
         when "Identifier" then lower_identifier_expression(expression)
         when "CallExpression" then lower_call_expression(expression)
+        when "ArrowFunctionExpression", "FunctionExpression" then lower_render_prop(expression)
         else
           Interpolation.new(expression: source_of(expression))
         end
+      end
+
+      # Recognize the render-prop / function-as-children pattern:
+      #   <Form.List>{(fields, helpers) => <div>{fields}</div>}</Form.List>
+      # Returns nil (caller falls back to verbatim interpolation) when the
+      # arrow has zero or too many params, or when the body doesn't lower
+      # cleanly to a JSX child.
+      def lower_render_prop(arrow)
+        params = arrow[:params]
+        return Interpolation.new(expression: source_of(arrow)) if params.size > 4
+        unless params.all? { |p| AST::Node.matches?(p, "Identifier") }
+          return Interpolation.new(expression: source_of(arrow))
+        end
+
+        body = lower_arrow_body(arrow[:body])
+        return Interpolation.new(expression: source_of(arrow)) unless body
+
+        RenderProp.new(params: params.map { |p| p[:name] }, body: body)
       end
 
       def lower_jsx_comment(empty_expression)
@@ -749,11 +917,21 @@ module JsxRosetta
         return nil unless body
 
         Loop.new(
-          iterable: Interpolation.new(expression: source_of(callee[:object])),
+          iterable: lower_loop_iterable(callee[:object]),
           item_binding: params[0][:name],
           index_binding: params[1] && params[1][:name],
           body: body
         )
+      end
+
+      # Recognize ArrayExpression/ObjectExpression iterables so a literal-
+      # rooted `.map(...)` doesn't bail at translation time. Falls back to
+      # the verbatim Interpolation for everything else.
+      def lower_loop_iterable(object)
+        case object.type
+        when "ArrayExpression" then lower_array_literal(object)
+        else Interpolation.new(expression: source_of(object))
+        end
       end
 
       def map_loop_arrow(args)
@@ -830,21 +1008,27 @@ module JsxRosetta
         end
       end
 
-      def lower_attribute(attr)
+      def lower_attribute(attr, tag:)
         case attr
         when AST::JSXAttribute
-          lower_jsx_attribute(attr)
+          lower_jsx_attribute(attr, tag: tag)
         when AST::JSXSpreadAttribute
           SpreadAttribute.new(expression: source_of(attr.argument))
         end
       end
 
-      def lower_jsx_attribute(attr)
+      # When the JSX tag is a component (PascalCase or member-expression),
+      # `on*` props are NOT DOM events — they're callback props the receiving
+      # Ruby component decides how to handle. Stimulus action descriptors
+      # only fire on real DOM events, so promoting them would generate
+      # never-firing `data-action="change->foo#h"` markup. Pass through as
+      # a regular component-prop kwarg instead.
+      def lower_jsx_attribute(attr, tag:)
         name = attr.attribute_name
 
         return lower_class_name(attr.value) if name == "className"
         return lower_style_attribute_or_fallback(attr.value) if name == "style"
-        if event_attribute?(name) && attr.value.is_a?(AST::JSXExpressionContainer)
+        if event_attribute?(name) && attr.value.is_a?(AST::JSXExpressionContainer) && html_element?(tag)
           return lower_event_attribute(name, attr.value)
         end
 
@@ -982,9 +1166,12 @@ module JsxRosetta
       end
 
       def promote_arrow_to_stimulus(attr_name, event, arrow_node, name_hint:)
-        method_name = stimulus_method_name(name_hint || default_stimulus_method_name(attr_name))
+        base = name_hint || default_stimulus_method_name(attr_name)
+        method_name = stimulus_method_name(base)
         body_source = source_of(arrow_node[:body])
-        @stimulus_methods << StimulusMethod.new(name: method_name, body_source: body_source)
+        @stimulus_methods << StimulusMethod.new(
+          name: method_name, body_source: body_source, original_name: base
+        )
         @local_arrows.delete(name_hint) if name_hint
         StimulusBinding.new(event: event, method_name: method_name)
       end
@@ -996,7 +1183,9 @@ module JsxRosetta
 
         method_name = stimulus_method_name(identifier_name)
         body_source = "// originally bound to: #{identifier_name}"
-        @stimulus_methods << StimulusMethod.new(name: method_name, body_source: body_source)
+        @stimulus_methods << StimulusMethod.new(
+          name: method_name, body_source: body_source, original_name: identifier_name
+        )
         StimulusBinding.new(event: event, method_name: method_name)
       end
 
@@ -1017,10 +1206,84 @@ module JsxRosetta
         when nil
           true
         when AST::JSXExpressionContainer
-          Interpolation.new(expression: source_of(value.expression))
+          lower_value_expression(value.expression)
         else
           value.raw["value"]
         end
+      end
+
+      # Recursively lower an arbitrary JS expression into structured IR
+      # when possible: ObjectExpression → ObjectLiteral, ArrayExpression
+      # → ArrayLiteral, ArrowFunctionExpression / FunctionExpression →
+      # Lambda. Everything else falls back to the verbatim Interpolation
+      # so simpler ExpressionTranslator paths still get a crack at it.
+      def lower_value_expression(expression)
+        case expression.type
+        when "ObjectExpression" then lower_object_literal(expression)
+        when "ArrayExpression" then lower_array_literal(expression)
+        when "ArrowFunctionExpression", "FunctionExpression" then lower_value_lambda(expression)
+        else
+          Interpolation.new(expression: source_of(expression))
+        end
+      end
+
+      def lower_object_literal(object_expression)
+        properties = []
+        object_expression[:properties].each do |prop|
+          # Spreads inside object literals, computed keys, getters/setters,
+          # methods — fall back to a verbatim Interpolation since we can't
+          # represent them as a simple key-value pair.
+          return Interpolation.new(expression: source_of(object_expression)) unless prop.type == "ObjectProperty"
+          return Interpolation.new(expression: source_of(object_expression)) if prop.raw["computed"]
+
+          key_name = object_property_key_name(prop[:key])
+          return Interpolation.new(expression: source_of(object_expression)) if key_name.nil?
+
+          properties << [key_name, lower_value_expression(prop[:value])]
+        end
+        ObjectLiteral.new(properties: properties)
+      end
+
+      def object_property_key_name(key_node)
+        case key_node.type
+        when "Identifier" then key_node[:name]
+        when "StringLiteral" then key_node[:value]
+        when "NumericLiteral" then key_node[:value].to_s
+        end
+      end
+
+      def lower_array_literal(array_expression)
+        elements = array_expression[:elements].map do |el|
+          next nil if el.nil? # `[1, , 3]` holes — Ruby has no equivalent
+
+          lower_value_expression(el)
+        end
+        ArrayLiteral.new(elements: elements)
+      end
+
+      def lower_value_lambda(arrow)
+        params = arrow[:params]
+        return Interpolation.new(expression: source_of(arrow)) if params.size > 4
+        unless params.all? { |p| AST::Node.matches?(p, "Identifier") }
+          return Interpolation.new(expression: source_of(arrow))
+        end
+
+        body = lower_lambda_body(arrow[:body])
+        return Interpolation.new(expression: source_of(arrow)) unless body
+
+        Lambda.new(params: params.map { |p| p[:name] }, body: body)
+      end
+
+      def lower_lambda_body(body)
+        return lower_jsx(body) if %w[JSXElement JSXFragment].include?(body.type)
+
+        return unless body.type == "BlockStatement"
+
+        return_stmt = body[:body].find { |s| s.type == "ReturnStatement" }
+        return nil unless return_stmt && return_stmt[:argument]
+
+        arg = return_stmt[:argument]
+        %w[JSXElement JSXFragment].include?(arg.type) ? lower_jsx(arg) : nil
       end
 
       def style_binding_expression(value)

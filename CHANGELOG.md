@@ -2,38 +2,123 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-11
+
+Closes nine translation gaps identified during a sample review of 12
+random Phlex outputs from the v0.3.0 stress run. Each gap was a silent
+drop, a render-time NameError, or a semantic mistranslation — the
+generated Ruby parsed but didn't behave like the source JSX.
+
 ### Added
 
-- **Phlex 2.x backend** — `--as=phlex` emits a single-file Phlex
-  `view_template` Ruby class (no separate ERB sidecar). The JSX
-  template lives as method calls inside `view_template`; attributes
-  become snake_case kwargs (`h1(class: "foo", data_testid: @x)` —
-  Phlex auto-hyphenates underscores in symbol keys at render time);
-  control flow uses native Ruby (`if`, `.each`); children pass
-  through `yield`. camelCase JSX attrs (`viewBox`, `preserveAspectRatio`)
-  preserve verbatim so SVG works correctly. Three mutually exclusive
-  naming strategies:
-    * **default** — `class FlashyHeader < Phlex::HTML`, `flashy_header.rb`
-    * **suffix** — `--phlex-suffix=Component` → `FlashyHeaderComponent`,
-      `flashy_header_component.rb`. Defaults to `"Component"` if the
-      flag is passed without a value.
-    * **namespace** — `--phlex-namespace=Components` →
-      `module Components; class FlashyHeader < Phlex::HTML`. Component
-      cross-references inside the namespace stay bare (`render Card.new`)
-      and resolve via Ruby's constant lookup.
-  Stimulus handlers still emit a sibling `_controller.js` skeleton with
-  the original JSX handler body preserved as a TODO comment.
+- **Render-prop / function-as-children support.**
+  `<Form.List>{(fields) => <p>{fields}</p>}</Form.List>` now lowers to a
+  new `IR::RenderProp` and emits as a Ruby block on the parent `render`
+  call: `render Form::List.new do |fields| ... end`. Both Phlex and
+  ViewComponent backends emit the block; param names snake_case to match
+  Ruby convention. Previously dropped as `plain "[untranslated: ...]"`.
+- **Recursive object/array/lambda translation in attribute values.**
+  New IR types `ObjectLiteral`, `ArrayLiteral`, and `Lambda` mean that
+  `<Select options={[{ value: 10, label: "10 / page" }]} />` now emits
+  `options: [{ value: 10, label: "10 / page" }]` (Ruby array of hashes)
+  instead of `options: nil` with a TODO. Identifier keys snake_case
+  (`dataLabel` → `data_label`); nested literals recurse. Function-valued
+  properties — e.g. AG-Grid `render: (v) => <Tag>{v}</Tag>` — extract to
+  private methods on the class (`def render_render(v); span do; ...; end`)
+  and the property emits as `render: method(:render_render)` so the
+  body has access to the Phlex tag.* helpers.
+- **Module-level constants captured into `Component#module_bindings`.**
+  `const FOO = 400; function X() { return <p>{FOO}</p>; }` no longer
+  silently drops the FOO declaration — the backend emits a TODO comment
+  block above the class with the original source so the reviewer either
+  translates it to a Ruby constant or moves it to a Rails initializer.
+- **Destructure-pattern names recognized by the translator.**
+  `const [count, setCount] = useState(0); <p>{count}</p>` previously
+  emitted a bare `plain count` that NameErrored at render time. The
+  destructured names are now captured in `Component#local_binding_names`
+  and the `ExpressionTranslator` emits a `nil` placeholder for them so
+  the file at least loads. Covers `ArrayPattern`, `ObjectPattern`
+  (including aliased properties, `AssignmentPattern` defaults, and
+  `RestElement`), and hook-tuple destructures.
+- **Member-expression destructure resolution.** `const { Content } = Layout`
+  followed by `<Content/>` now resolves to `Layout::Content`, not a
+  free-floating `ContentComponent`. Multiple destructured names from the
+  same parent identifier all resolve correctly.
+
+### Fixed
+
+- **Component-prop callbacks no longer over-promote to Stimulus.**
+  `<Select onChange={onChange} />` (PascalCase tag) previously emitted
+  `data-action="change->foo#onChange"` — a Stimulus action descriptor
+  that never fires because the receiving component is a Ruby class, not
+  a DOM element. The lowering now checks `html_element?(tag)` before
+  promoting `on*` attrs and treats component-prop callbacks as regular
+  `IR::Attribute` kwargs. Stimulus promotion still applies to lowercase
+  HTML tags as before. Closes a regression introduced by the v0.3.0
+  prop-handler Stimulus promotion.
+- **Spread-of-nil no longer raises at render time.** `<div {...maybeNil}>`
+  used to emit `**@maybe_nil`, which raises when the prop is `nil`. Both
+  Phlex and ViewComponent backends now wrap as `**(@maybe_nil || {})`.
+  Cheap to emit unconditionally and idempotent.
+- **Duplicate handler names are no longer silently renamed.** Two
+  `onClick={handleReset}` handlers in one component previously produced
+  `handleReset` / `handleReset2` with no marker. `StimulusMethod` now
+  carries an `original_name` field, and the generated controller JS
+  emits a `// NOTE: method renamed from "handleReset"` comment above the
+  renamed method.
+- **ReactNode-typed props get a `raw` hint comment.** When an
+  interpolation translates to a bare `@ivar` reference (likely a prop),
+  the Phlex backend emits a comment hint —
+  `plain @extra # NOTE: use \`raw\` instead of \`plain\` if this is a
+  ReactNode-typed prop`. `plain` HTML-escapes its argument, which is
+  wrong for prebuilt-markup props but right for strings; we can't tell
+  at translation time, so we default to safe (`plain`) and surface the
+  choice.
+
+### Investigation
+
+- **Sibling named exports — not a gap.** Probed four shapes of
+  `export default Foo; export function Loading() {}` against the gem;
+  all four shapes correctly emit both `foo.rb` and `loading.rb`. Closed
+  the suspected gap as a false positive from the random sample.
 
 ### Refactored
 
-- `Lowering` class shrunk by ~150 lines: pure-heuristic
-  `ModuleShapeClassifier` lives in its own file; helper methods
-  `AST::Node#child`, `#of_type?`, `Node.matches?` replaced ~25
-  defensive `is_a?(AST::Node) && type ==` checks; class/style
-  rendering in the ViewComponent backend deduplicated across
-  HTML-vs-Ruby output formats; `tag_builder_data_action` replaced
-  its "parse what I just emitted" heuristic with a structured
-  `EventDescriptor` intermediate.
+- `Lowering` class shrunk by ~150 lines (v0.3.0 prep, now shipping):
+  pure-heuristic `ModuleShapeClassifier` lives in its own file; helper
+  methods `AST::Node#child`, `#of_type?`, `Node.matches?` replaced ~25
+  defensive `is_a?(AST::Node) && type ==` checks; class/style rendering
+  in the ViewComponent backend deduplicated across HTML-vs-Ruby output
+  formats; `tag_builder_data_action` replaced its "parse what I just
+  emitted" heuristic with a structured `EventDescriptor` intermediate.
+
+### Stress test outcome
+
+- 929-file Phlex stress run on `reserv-web`: 887/929 clean translations
+  (unchanged — rejection logic untouched), **0/1224 syntax failures**
+  (down from 25 on v0.3.0). All emitted `.rb` files now pass `ruby -c`.
+- Five residual bugs were caught during the v0.4.0 stress rerun and
+  fixed inline:
+  - Prop default expressions that translated to `nil # TODO: ...` inside
+    `initialize(...)` swallowed the closing `)`. Prop defaults now route
+    through the same recursive lowering as attribute values.
+  - Multi-line JSX comments only prefixed the first line with `#`. Every
+    line of a comment now gets a `#` prefix.
+  - Template literals with inner `"` or `\\` characters could break the
+    surrounding Ruby string. Literal segments now escape both.
+  - `token.blue` (where `token` was a captured local binding) translated
+    to `nil.blue` — `NoMethodError` at render time. Member-chain roots
+    that resolve to a known-local binding now fall through to the
+    snake_case bare reference with an unresolved marker rather than the
+    `nil` placeholder.
+  - `["a", "b"].map((x) => <li/>)` lost the array literal and emitted
+    `[].each` because the translator can't parse `[...]`. The lowering
+    now recognizes ArrayExpression iterables and routes them through
+    the recursive ArrayLiteral path.
+
+### Spec count
+
+- Up to 343 examples (from 304), all green. `bundle exec rubocop` clean.
 
 ## [0.3.0] - 2026-05-10
 

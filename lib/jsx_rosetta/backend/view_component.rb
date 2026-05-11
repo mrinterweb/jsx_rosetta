@@ -59,7 +59,9 @@ module JsxRosetta
       def emit(component)
         prop_names = component.props.map(&:name)
         prop_names << component.rest_prop_name if component.rest_prop_name
-        translator = ExpressionTranslator.new(prop_names: prop_names)
+        translator = ExpressionTranslator.new(
+          prop_names: prop_names, local_binding_names: component.local_binding_names
+        )
 
         base_name = "#{AST::Inflector.underscore(component.name)}_component"
         @stimulus_identifier = component.stimulus_methods.any? ? stimulus_identifier(component) : nil
@@ -107,7 +109,12 @@ module JsxRosetta
       def stimulus_method_lines(method)
         body_lines = method.body_source.strip.split("\n")
         commented = body_lines.map { |line| "  //   #{line}" }
-        ["  // TODO: translate from the original JSX handler:"] + commented + [
+        header = ["  // TODO: translate from the original JSX handler:"]
+        if method.name != method.original_name
+          header.unshift("  // NOTE: method renamed from #{method.original_name.inspect} " \
+                         "to avoid collision with an earlier handler")
+        end
+        header + commented + [
           "  #{method.name}(event) {",
           "    // ...",
           "  }"
@@ -124,16 +131,41 @@ module JsxRosetta
         props = initializable_props(component)
         rest_name = component.rest_prop_name
 
-        if props.empty? && rest_name.nil?
-          <<~RUBY
-            # frozen_string_literal: true
+        body = if props.empty? && rest_name.nil?
+                 <<~RUBY
+                   # frozen_string_literal: true
 
-            class #{component.name}Component < ::ViewComponent::Base
-            end
-          RUBY
-        else
-          render_ruby_class_with_props(component, props, rest_name, translator)
-        end
+                   class #{component.name}Component < ::ViewComponent::Base
+                   end
+                 RUBY
+               else
+                 render_ruby_class_with_props(component, props, rest_name, translator)
+               end
+
+        prefix = render_module_bindings_prefix(component)
+        prefix.empty? ? body : insert_module_bindings_prefix(body, prefix)
+      end
+
+      def render_module_bindings_prefix(component)
+        return "" if component.module_bindings.empty?
+
+        lines = ["# TODO: module-level constants — translate to Ruby constants " \
+                 "or move to a Rails initializer:"]
+        component.module_bindings.each { |b| lines.concat(comment_lines(b.source)) }
+        "#{lines.join("\n")}\n"
+      end
+
+      # The class body already starts with the magic comment — splice the
+      # module-bindings prefix in between so it lands above the class.
+      def insert_module_bindings_prefix(body, prefix)
+        magic = "# frozen_string_literal: true\n\n"
+        return "#{prefix}#{body}" unless body.start_with?(magic)
+
+        "#{magic}#{prefix}#{body[magic.length..]}"
+      end
+
+      def comment_lines(source)
+        source.split("\n").map { |line| "#   #{line}" }
       end
 
       def render_ruby_class_with_props(component, props, rest_name, translator)
@@ -166,8 +198,41 @@ module JsxRosetta
       def ruby_default_for(prop, translator)
         return "nil" if prop.default.nil?
 
-        translated = translator.translate(prop.default.expression)
-        translated ? translated.ruby : "nil # TODO: translate #{prop.default.expression.inspect}"
+        case prop.default
+        when IR::Interpolation
+          translated = translator.translate(prop.default.expression)
+          translated ? translated.ruby : "nil"
+        when IR::ObjectLiteral then render_object_literal_default(prop.default, translator)
+        when IR::ArrayLiteral then render_array_literal_default(prop.default, translator)
+        else "nil"
+        end
+      end
+
+      def render_object_literal_default(object_literal, translator)
+        pairs = object_literal.properties.map do |(key, value)|
+          snake = AST::Inflector.underscore(key)
+          key_str = snake.match?(/\A[a-z_][a-z0-9_]*\z/i) ? "#{snake}:" : "#{key.inspect} =>"
+          "#{key_str} #{render_default_inline_value(value, translator)}"
+        end
+        "{ #{pairs.join(", ")} }"
+      end
+
+      def render_array_literal_default(array_literal, translator)
+        parts = array_literal.elements.map { |el| el.nil? ? "nil" : render_default_inline_value(el, translator) }
+        "[#{parts.join(", ")}]"
+      end
+
+      def render_default_inline_value(value, translator)
+        case value
+        when IR::ObjectLiteral then render_object_literal_default(value, translator)
+        when IR::ArrayLiteral then render_array_literal_default(value, translator)
+        when IR::Interpolation
+          translated = translator.translate(value.expression)
+          translated ? translated.ruby : "nil"
+        when String then value.inspect
+        when true then "true"
+        else "nil"
+        end
       end
 
       def render_erb_template(component, translator)
@@ -217,6 +282,7 @@ module JsxRosetta
         when IR::Fragment then render_fragment(node, translator, indent: indent)
         when IR::Conditional then render_conditional(node, translator, indent: indent)
         when IR::Loop then render_loop(node, translator, indent: indent)
+        when IR::RenderProp then render_orphan_render_prop(node, translator, indent: indent)
         when IR::Slot then render_slot(node, indent: indent)
         when IR::Text then "#{spaces(indent)}#{node.value}"
         when IR::Interpolation then "#{spaces(indent)}#{interpolation_to_erb(node, translator)}"
@@ -224,8 +290,14 @@ module JsxRosetta
         end
       end
 
+      def render_orphan_render_prop(render_prop, translator, indent:)
+        translator.with_locals(render_prop.params) do
+          render_ir_node(render_prop.body, translator, indent: indent)
+        end
+      end
+
       def render_loop(loop_node, translator, indent:)
-        iterable_ruby = render_test_expression(loop_node.iterable, translator)
+        iterable_ruby = render_loop_iterable(loop_node.iterable, translator)
         js_bindings = [loop_node.item_binding, loop_node.index_binding].compact
         ruby_bindings = js_bindings.map { |name| AST::Inflector.underscore(name) }
         binding_str = "|#{ruby_bindings.join(", ")}|"
@@ -239,6 +311,14 @@ module JsxRosetta
           body,
           "#{spaces(indent)}<% end %>"
         ].join("\n")
+      end
+
+      def render_loop_iterable(iterable, translator)
+        case iterable
+        when IR::ArrayLiteral then render_array_literal_default(iterable, translator)
+        when IR::Interpolation then render_test_expression(iterable, translator)
+        else "[]"
+        end
       end
 
       def render_element(element, translator, indent:)
@@ -351,9 +431,14 @@ module JsxRosetta
         descriptor.kind == :literal ? descriptor.body : "\#{#{descriptor.body}}"
       end
 
+      # Wrap the spread expression in `(… || {})` so a nil-valued prop
+      # default doesn't raise at render time. `<div {...maybeNil}>` →
+      # `**(@maybe_nil || {})`. Cheap to emit unconditionally; the
+      # `|| {}` shortcuts on non-nil values.
       def tag_builder_spread(expression, translator)
         translated = translator.translate(expression)
-        translated ? translated.ruby : expression
+        ruby = translated ? translated.ruby : expression
+        "(#{ruby} || {})"
       end
 
       def render_component_invocation(invocation, translator, indent:)
@@ -364,12 +449,24 @@ module JsxRosetta
         class_name = component_class_name(invocation.name)
         new_call = kwargs.empty? ? "#{class_name}.new" : "#{class_name}.new(#{kwargs})"
 
-        if invocation.children.empty?
+        render_prop = invocation.children.find { |c| c.is_a?(IR::RenderProp) }
+        if render_prop
+          render_component_with_render_prop(new_call, render_prop, translator, indent)
+        elsif invocation.children.empty?
           "#{spaces(indent)}<%= render #{new_call} %>"
         else
           inner = invocation.children.map { |child| render_ir_node(child, translator, indent: indent + 2) }.join("\n")
           "#{spaces(indent)}<%= render #{new_call} do %>\n#{inner}\n#{spaces(indent)}<% end %>"
         end
+      end
+
+      def render_component_with_render_prop(new_call, render_prop, translator, indent)
+        snake_params = render_prop.params.map { |p| AST::Inflector.underscore(p) }
+        param_str = snake_params.empty? ? "" : " |#{snake_params.join(", ")}|"
+        inner = translator.with_locals(render_prop.params) do
+          render_ir_node(render_prop.body, translator, indent: indent + 2)
+        end
+        "#{spaces(indent)}<%= render #{new_call} do#{param_str} %>\n#{inner}\n#{spaces(indent)}<% end %>"
       end
 
       # JSX `<Foo.Bar>` → Ruby `Foo::BarComponent`. Plain `<Card>` stays as

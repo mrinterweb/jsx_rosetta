@@ -248,6 +248,27 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("// TODO: translate from the original JSX handler:")
       expect(content).to include("doThing()")
     end
+
+    it "emits a collision marker when a handler name was uniquified" do
+      # Two `onClick={handleReset}` handlers in one component would
+      # silently rename the second to `handleReset2`. Without a
+      # marker, the human reviewer wouldn't know the rename happened.
+      collision_source = <<~JSX
+        function X({ handleReset }) {
+          return (
+            <div>
+              <button onClick={handleReset}>a</button>
+              <button onClick={handleReset}>b</button>
+            </div>
+          );
+        }
+      JSX
+      content = file_contents(collision_source, "x_controller.js")
+
+      expect(content).to include("handleReset(event) {")
+      expect(content).to include("handleReset2(event) {")
+      expect(content).to include('// NOTE: method renamed from "handleReset"')
+    end
   end
 
   describe "TODO markers" do
@@ -324,7 +345,9 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("icon: nil")
     end
 
-    it "emits a TODO comment line above the element when an array-literal prop can't translate" do
+    it "recursively translates an array-of-objects literal prop into a Ruby array of hashes" do
+      # Pre-Gap-H, this emitted a TODO + `options: nil`. With recursive
+      # object/array lowering, the actual data shape carries through.
       source = <<~JS
         function X() {
           return <Select options={[{ value: 10, label: "a" }, { value: 25, label: "b" }]} />;
@@ -332,8 +355,8 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       JS
       content = file_contents(source, "x.rb")
 
-      expect(content).to include("# TODO: attribute \"options\" dropped")
-      expect(content).to include("options: nil")
+      expect(content).to include('options: [{ value: 10, label: "a" }, { value: 25, label: "b" }]')
+      expect(content).not_to include("# TODO: attribute \"options\" dropped")
     end
 
     it "does NOT emit a TODO when an attribute interpolation translates cleanly" do
@@ -341,6 +364,292 @@ RSpec.describe JsxRosetta::Backend::Phlex do
 
       expect(content).not_to include("# TODO:")
       expect(content).to include("hidden: @open")
+    end
+  end
+
+  describe "Gap A: known-local-but-unmodeled bindings" do
+    it "emits `nil` instead of a bare snake_case reference for a hook-tuple name" do
+      # `const [count, setCount] = useState(0); ... {count}` — without
+      # capture, `plain count` NameErrors at render time. With capture,
+      # we emit `plain nil` so the file at least loads, and the hook
+      # TODO block hints at what to fill in.
+      source = <<~JSX
+        function X() {
+          const [count, setCount] = useState(0);
+          return <p>{count}</p>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("plain nil")
+      expect(content).not_to match(/plain count(?!\w)/)
+    end
+
+    it "emits `nil` for an object-destructured local in an attribute position" do
+      source = <<~JSX
+        function X() {
+          const { className } = props;
+          return <p data-x={className} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      # Attribute splice — `data_x: nil` is valid Ruby, file loads.
+      expect(content).to include("data_x: nil")
+    end
+
+    it "does NOT emit `nil.member` when a local binding appears as a member-chain root" do
+      # `token.blue` previously translated to `nil.blue` (NoMethodError at
+      # render time) because the local-binding nil-substitution kicked in
+      # for the root. Member chains now fall through to the snake_case
+      # bare reference, which surfaces as a NameError — still wrong but
+      # at least debuggable.
+      source = <<~JSX
+        function X() {
+          const { token } = useToken();
+          return <div style={{ color: token.blue }} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).not_to include("nil.blue")
+      expect(content).to include("token.blue")
+    end
+  end
+
+  describe "Gap J: member-expression destructuring" do
+    it "resolves `const { Content } = Layout; <Content/>` to `Layout::Content.new`" do
+      source = <<~JSX
+        function X() {
+          const { Content } = Layout;
+          return <Content>x</Content>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("render Layout::Content.new")
+    end
+  end
+
+  describe "Gap residuals: comment + template-literal escaping" do
+    it "comments every line of a multi-line JSX comment" do
+      # A bare `# ` on the first line only would leave subsequent lines
+      # as raw Ruby code — broke `ruby -c` parsing in two stress-test files.
+      source = <<~JSX
+        function X() {
+          return (
+            <div>
+              {/* TODO:
+                  <Foo bar={baz} />
+                  next line */}
+            </div>
+          );
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      content.lines.each do |line|
+        # Inside the view_template body, any line that isn't the open/close
+        # of the function or the wrapping div should either be empty or
+        # start with `#` (a comment) — no raw `<Foo` etc.
+        next if line.strip.empty? || line.strip.start_with?("class", "end", "def", "div")
+
+        expect(line.strip).to start_with("#") if line.include?("<Foo")
+      end
+    end
+
+    it "escapes `\"` inside the literal portions of a translated template literal" do
+      # `\`with "quoted" \${name} text\`` would translate to
+      # `"with "quoted" #{@name} text"` — the inner `"` terminates the
+      # Ruby string and breaks `ruby -c`. We escape `"` and `\`.
+      source = 'function X({ name }) { return <p>{`hi "${name}" there`}</p>; }'
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include(%q(plain "hi \"#{@name}\" there"))
+    end
+  end
+
+  describe "Gap H array-literal as `.map(...)` iterable" do
+    it "translates `[\"a\", \"b\"].map((x) => <li/>)` into a literal-array iteration" do
+      # Before this fix, the iterable lowered to a verbatim Interpolation
+      # whose source couldn't translate (the translator only handles
+      # bare identifiers / member chains), bailed to `[]`, and emitted
+      # `[].each do |x|` — dropping the actual elements.
+      source = <<~JSX
+        function X() {
+          return <ul>{["a", "b"].map((x) => <li>{x}</li>)}</ul>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include('["a", "b"].each do |x|')
+      expect(content).not_to include("[].each do")
+    end
+  end
+
+  describe "Gap H: recursive object/array/lambda translation" do
+    it "translates a simple numeric array prop into a Ruby array" do
+      content = file_contents("function X() { return <Select tabs={[1, 2, 3]} />; }", "x.rb")
+
+      expect(content).to include("tabs: [1, 2, 3]")
+    end
+
+    it "translates an array-of-hashes prop and snake_cases identifier keys" do
+      source = <<~JS
+        function X() {
+          return <Select options={[{ value: 10, dataLabel: "10 / page" }]} />;
+        }
+      JS
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include('options: [{ value: 10, data_label: "10 / page" }]')
+    end
+
+    it "translates a nested object literal" do
+      source = <<~JS
+        function X() {
+          return <Form initialValues={{ outer: { inner: 1 } }} />;
+        }
+      JS
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("initial_values: { outer: { inner: 1 } }")
+    end
+
+    it "extracts a function-valued property to a method on the class" do
+      source = <<~JS
+        function X({ value }) {
+          return <Table columns={[{ title: "Y", render: (v) => <span>{v}</span> }]} />;
+        }
+      JS
+      content = file_contents(source, "x.rb")
+
+      # Lambda extracted to a private method, referenced by method(:name).
+      expect(content).to include("method(:render_render)")
+      expect(content).to include("def render_render(v)")
+      expect(content).to include("span do")
+      expect(content).to include("private")
+    end
+
+    it "uses deterministic method names per attribute name when multiple lambdas appear" do
+      source = <<~JS
+        function X() {
+          return <Table columns={[
+            { title: "A", render: (v) => <p>{v}</p> },
+            { title: "B", render: (v) => <span>{v}</span> }
+          ]} />;
+        }
+      JS
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("render_render")
+      expect(content).to include("render_render2")
+    end
+
+    it "preserves verbatim Interpolation behavior for unsupported shapes (spread inside object)" do
+      # Spread inside object literal isn't recognized — falls back to verbatim.
+      source = <<~JS
+        function X({ extra }) {
+          return <Card props={{ ...extra, a: 1 }} />;
+        }
+      JS
+      content = file_contents(source, "x.rb")
+
+      # Falls back to TODO + nil (translator can't parse `...extra` in the
+      # expression-string path either).
+      expect(content).to include("# TODO: attribute \"props\" dropped")
+    end
+  end
+
+  describe "Gap G: plain/raw hint for ReactNode-typed props" do
+    it "emits a `raw` comment hint when an interpolation resolves to a bare @ivar prop" do
+      # `plain @children` HTML-escapes the value, which corrupts ReactNode-
+      # typed props (children, icons, prebuilt markup). We can't tell at
+      # translation time, so default to safe `plain` and surface a hint.
+      content = file_contents("function X({ extra }) { return <p>{extra}</p>; }", "x.rb")
+
+      expect(content).to include("plain @extra # NOTE: use `raw` instead of `plain`")
+    end
+
+    it "does NOT emit a hint when the interpolation resolves to a member chain" do
+      # `plain @post.title` is unambiguously a string-ish leaf; no hint needed.
+      content = file_contents("function X({ post }) { return <p>{post.title}</p>; }", "x.rb")
+
+      expect(content).to include("plain @post.title")
+      expect(content).not_to include("ReactNode-typed")
+    end
+
+    it "does NOT emit a hint on plain string-literal text" do
+      content = file_contents("function X() { return <p>hello</p>; }", "x.rb")
+
+      expect(content).not_to include("ReactNode-typed")
+    end
+  end
+
+  describe "Gap E: module-level constants" do
+    it "emits a TODO comment block above the class for top-level const declarations" do
+      source = <<~JSX
+        const FOO = 400;
+        function X() { return <p>{FOO}</p>; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: module-level constants")
+      expect(content).to include("const FOO = 400;")
+      # And the prefix lands above the class definition.
+      expect(content.index("# TODO: module-level constants")).to be < content.index("class X")
+    end
+
+    it "doesn't emit a prefix when there are no module-level constants" do
+      content = file_contents("function X() { return <p />; }", "x.rb")
+
+      expect(content).not_to include("module-level constants")
+    end
+  end
+
+  describe "Gap D: render-prop / function-as-children" do
+    it "emits a Ruby block with snake_cased params on the parent render call" do
+      source = <<~JSX
+        function X() {
+          return <Form.List>{(fields) => <p>{fields}</p>}</Form.List>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("render Form::List.new do |fields|")
+      expect(content).to include("plain fields")
+      expect(content).to include("end")
+    end
+
+    it "snake_cases camelCase params" do
+      source = <<~JSX
+        function X() {
+          return <Form.List>{(fieldList) => <p />}</Form.List>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("do |field_list|")
+    end
+  end
+
+  describe "Gap F: spread-of-nil wrapper" do
+    it "wraps a spread expression in `(… || {})` so a nil prop default doesn't crash render" do
+      # `<div {...maybeNil}>` lowers to a spread of `maybeNil`. If
+      # `maybeNil` is `nil` at render time, `**nil` raises. Wrapping
+      # in `(… || {})` is cheap and idempotent.
+      source = "function X({ gridOptions }) { return <div {...gridOptions} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("**(@grid_options || {})")
+      expect(content).not_to match(/\*\*@grid_options(?!\s*\|)/)
+    end
+
+    it "wraps spread on a component invocation as well" do
+      source = "function X({ rest }) { return <Card {...rest} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("**(@rest || {})")
     end
   end
 

@@ -20,6 +20,15 @@ module JsxRosetta
     #                  the component body. Backends typically render these as
     #                  a TODO comment block since arbitrary JS-to-Ruby
     #                  translation isn't attempted.
+    # local_binding_names : [String] — flat list of all names bound by the
+    #                  component body (destructure patterns, hook tuples,
+    #                  ordinary const bindings). Backends pass this into the
+    #                  ExpressionTranslator so an identifier reference like
+    #                  `count` resolves to a `nil` placeholder instead of
+    #                  a bare unresolved snake_case identifier that NameErrors
+    #                  at render time. Includes hook destructures (e.g.
+    #                  `open` and `setOpen` from `useState`) even though
+    #                  those names don't appear in `local_bindings`.
     # stimulus_methods : [StimulusMethod] — event handlers extracted from
     #                  inline arrows / const-bound arrows used in onX={...}.
     #                  When non-empty, backends should emit a sibling
@@ -30,8 +39,18 @@ module JsxRosetta
     #                  Surfaced as a distinct TODO block so the human
     #                  reviewer knows to translate behavior to Stimulus
     #                  and state to server-side rendering.
+    # module_bindings : [LocalBinding] — top-level `const`/`let` declarations
+    #                  outside the component function that aren't themselves
+    #                  components. Captured so backends can either translate
+    #                  to Ruby constants (literal initializers) or surface
+    #                  as a TODO comment block before the class definition.
+    #                  Without this capture, references to module-level
+    #                  constants from inside the JSX silently drop and
+    #                  produce unbacked snake_case references at render time.
     Component = Data.define(:name, :props, :body, :rest_prop_name,
-                            :local_bindings, :stimulus_methods, :react_hooks) do
+                            :local_bindings, :local_binding_names,
+                            :module_bindings,
+                            :stimulus_methods, :react_hooks) do
       include Node
     end
 
@@ -250,11 +269,17 @@ module JsxRosetta
     # Body translation is deferred to the human reviewer; we preserve the
     # original JS body verbatim.
     #
-    # name        : String — camelCase Stimulus method name.
-    # body_source : String — verbatim JS body (the entire arrow function or
-    #               the function expression body), preserved as a comment in
-    #               the emitted controller skeleton.
-    StimulusMethod = Data.define(:name, :body_source) do
+    # name          : String — camelCase Stimulus method name (uniquified
+    #                 when two handlers collide on the same base name).
+    # body_source   : String — verbatim JS body (the entire arrow function
+    #                 or the function expression body), preserved as a
+    #                 comment in the emitted controller skeleton.
+    # original_name : String — the requested base name before uniquification.
+    #                 Equals `name` when there was no collision. When
+    #                 `name != original_name`, backends emit a collision
+    #                 marker comment in the generated controller JS so the
+    #                 reviewer can see the silent rename.
+    StimulusMethod = Data.define(:name, :body_source, :original_name) do
       include Node
     end
 
@@ -270,6 +295,52 @@ module JsxRosetta
     # index_binding : String | nil — name of the index parameter, if present.
     # body          : Node — the lowered IR node rendered for each iteration.
     Loop = Data.define(:iterable, :item_binding, :index_binding, :body) do
+      include Node
+    end
+
+    # An object-literal value (`{ key: value, ... }`) inside JSX. Lowered
+    # from a JSX attribute or expression value whose root is an
+    # ObjectExpression. Each property's key is a String; the value can be
+    # any IR node (recursive). Backends render as a Ruby Hash literal,
+    # snake_casing identifier keys to match Ruby kwarg conventions.
+    #
+    # properties : [[String key, Node value]] — preserved in source order.
+    ObjectLiteral = Data.define(:properties) do
+      include Node
+    end
+
+    # An array-literal value (`[a, b, ...]`) inside JSX. Lowered from a
+    # JSX attribute or expression value whose root is an ArrayExpression.
+    # Each element is an IR node (recursive). Backends render as a Ruby
+    # Array literal.
+    #
+    # elements : [Node]
+    ArrayLiteral = Data.define(:elements) do
+      include Node
+    end
+
+    # An arrow/function expression appearing as an inline value (not in
+    # JSX child or event-handler position). Typical example: a `render`
+    # property inside an array-of-config-objects passed to an AG-Grid
+    # column descriptor or antd Select option. Backends emit as a Ruby
+    # method on the class (deterministically named) and reference it via
+    # `method(:name)` in the value position, since lambdas don't carry
+    # the Phlex execution context required to call tag.* helpers.
+    #
+    # params : [String]
+    # body   : Node
+    Lambda = Data.define(:params, :body) do
+      include Node
+    end
+
+    # A render-prop child: `<Form.List>{(fields) => <div>{fields}</div>}</Form.List>`.
+    # Backends emit this as a Ruby block on the render call, with the params
+    # bound as block arguments. Distinct from Loop (which iterates an
+    # iterable) and from Slot (which yields without args).
+    #
+    # params : [String] — param names (camelCase preserved; backends snake_case).
+    # body   : Node — the lowered IR node produced by the arrow's body.
+    RenderProp = Data.define(:params, :body) do
       include Node
     end
   end

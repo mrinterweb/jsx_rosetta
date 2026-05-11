@@ -166,10 +166,15 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(files["x_component.rb"]).to include('label: "hi"')
     end
 
-    it "emits a TODO marker for non-trivial default expressions" do
+    it "emits `nil` (no inline TODO) for non-trivial default expressions" do
+      # An inline `# TODO: ...` comment inside the initialize(...) parameter
+      # list swallows the closing `)` and breaks Ruby syntax, so we just
+      # emit `nil` and leave the reviewer to consult the JSX source for
+      # what the original default was.
       files = files_for("function X({ items = computeItems() }) { return <div />; }")
 
-      expect(files["x_component.rb"]).to include("items: nil # TODO: translate")
+      expect(files["x_component.rb"]).to include("items: nil")
+      expect(files["x_component.rb"]).not_to include("# TODO: translate")
     end
   end
 
@@ -222,7 +227,7 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       files = files_for("function X({ rest }) { return <button className=\"x\" {...rest}>Click</button>; }")
 
       erb = files["x_component.html.erb"]
-      expect(erb).to include("<%= tag.button(class: \"x\", **@rest) do %>")
+      expect(erb).to include("<%= tag.button(class: \"x\", **(@rest || {})) do %>")
       expect(erb).to include("<% end %>")
       expect(erb).not_to include("<button class=")
     end
@@ -231,7 +236,7 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       files = files_for("function X({ rest }) { return <input type=\"text\" {...rest} />; }")
 
       erb = files["x_component.html.erb"]
-      expect(erb).to include("<%= tag.input(type: \"text\", **@rest) %>")
+      expect(erb).to include("<%= tag.input(type: \"text\", **(@rest || {})) %>")
       expect(erb).not_to include("<input")
     end
 
@@ -271,7 +276,7 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       files = files_for('function X({ rest, label }) { return <Link href="/" aria-label={label} {...rest}>Hi</Link>; }')
 
       erb = files["x_component.html.erb"]
-      expect(erb).to include('<%= link_to("/", "aria-label" => @label, **@rest) do %>')
+      expect(erb).to include('<%= link_to("/", "aria-label" => @label, **(@rest || {})) do %>')
     end
 
     it "respects an explicit helpers map override" do
@@ -336,14 +341,14 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       files = files_for("function X({ rest }) { return <Inner title=\"x\" {...rest} />; }")
 
       erb = files["x_component.html.erb"]
-      expect(erb).to include('<%= render InnerComponent.new(title: "x", **@rest) %>')
+      expect(erb).to include('<%= render InnerComponent.new(title: "x", **(@rest || {})) %>')
     end
 
     it "spreads a rest-destructured prop as **@rest_name (not **rest_name)" do
       files = files_for("function X({ a, ...props }) { return <Inner title={a} {...props} />; }")
 
       erb = files["x_component.html.erb"]
-      expect(erb).to include("**@props")
+      expect(erb).to include("**(@props || {})")
       expect(erb).not_to match(/\*\*props(?!\w)/) # bare `**props` would mean an undefined local
     end
 

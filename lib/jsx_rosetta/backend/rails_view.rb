@@ -18,7 +18,9 @@ module JsxRosetta
       def emit(component)
         prop_names = component.props.map(&:name)
         prop_names << component.rest_prop_name if component.rest_prop_name
-        translator = ExpressionTranslator.new(prop_names: prop_names)
+        translator = ExpressionTranslator.new(
+          prop_names: prop_names, local_binding_names: component.local_binding_names
+        )
 
         @stimulus_identifier = component.stimulus_methods.any? ? stimulus_identifier(component) : nil
 
