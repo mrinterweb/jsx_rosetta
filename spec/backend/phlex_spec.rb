@@ -896,5 +896,55 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("# TODO: translate JS to Ruby")
       expect(content).to include("const greeting = computeGreeting()")
     end
+
+    it "emits a dedicated Apollo TODO block with the operation name" do
+      source = <<~JS
+        function X() {
+          const { data, loading } = useQuery(GET_USERS_QUERY, { variables: { id } });
+          return <p>{loading}</p>;
+        }
+      JS
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: Apollo data-fetching hooks detected")
+      expect(content).to include("# Move the fetch to the Rails controller")
+      expect(content).to include("#   operation: GET_USERS_QUERY")
+      expect(content).to include("useQuery(GET_USERS_QUERY")
+      expect(content).not_to include("# TODO: React hooks detected")
+    end
+
+    it "emits a dedicated Next.js TODO block for navigation hooks" do
+      source = <<~JS
+        function X() {
+          const router = useRouter();
+          const path = usePathname();
+          return <p>{path}</p>;
+        }
+      JS
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: Next.js navigation hooks detected")
+      expect(content).to include("usePathname -> request.path")
+      expect(content).to include("const router = useRouter()")
+      expect(content).to include("const path = usePathname()")
+      expect(content).not_to include("# TODO: React hooks detected")
+    end
+
+    it "emits separate per-library blocks when React + Apollo + Next.js hooks coexist" do
+      source = <<~JS
+        function X() {
+          const [count, setCount] = useState(0);
+          const { data } = useQuery(LIST_POSTS);
+          const router = useRouter();
+          return <p>{count}</p>;
+        }
+      JS
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: React hooks detected")
+      expect(content).to include("# TODO: Apollo data-fetching hooks detected")
+      expect(content).to include("# TODO: Next.js navigation hooks detected")
+      expect(content).to include("#   operation: LIST_POSTS")
+    end
   end
 end

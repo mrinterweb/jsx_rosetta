@@ -372,6 +372,133 @@ RSpec.describe JsxRosetta::IR::Lowering do
       expect(ir.local_bindings).to be_empty
       expect(ir.react_hooks.map(&:hook)).to eq(%w[useCallback useRef useMemo])
     end
+
+    it "tags React hook calls with library: :react and no operation" do
+      ir = lower(<<~JSX)
+        function X() {
+          const [a, setA] = useState(0);
+          return <div />;
+        }
+      JSX
+
+      call = ir.react_hooks.first
+      expect(call.library).to eq(:react)
+      expect(call.operation).to be_nil
+    end
+  end
+
+  describe "Apollo hook detection" do
+    it "captures useQuery destructures with library: :apollo and the operation name" do
+      ir = lower(<<~JSX)
+        function X() {
+          const { data, loading, error } = useQuery(GET_USERS_QUERY, { variables: { id } });
+          return <div />;
+        }
+      JSX
+
+      expect(ir.react_hooks.size).to eq(1)
+      call = ir.react_hooks.first
+      expect(call.hook).to eq("useQuery")
+      expect(call.library).to eq(:apollo)
+      expect(call.operation).to eq("GET_USERS_QUERY")
+      expect(call.source).to include("useQuery(GET_USERS_QUERY")
+    end
+
+    it "captures useMutation as a tuple destructure with operation name" do
+      ir = lower(<<~JSX)
+        function X() {
+          const [createUser, { loading }] = useMutation(CREATE_USER_MUTATION);
+          return <div />;
+        }
+      JSX
+
+      call = ir.react_hooks.first
+      expect(call.hook).to eq("useMutation")
+      expect(call.library).to eq(:apollo)
+      expect(call.operation).to eq("CREATE_USER_MUTATION")
+    end
+
+    it "exposes Apollo destructure names in local_binding_names so use sites translate cleanly" do
+      ir = lower(<<~JSX)
+        function X() {
+          const { data, loading } = useQuery(GET_USERS_QUERY);
+          return <p>{loading}</p>;
+        }
+      JSX
+
+      expect(ir.local_binding_names).to include("data", "loading")
+      expect(ir.local_bindings).to be_empty
+    end
+
+    it "leaves operation as nil when the GraphQL document is an inline call (e.g. gql`...`)" do
+      ir = lower(<<~JSX)
+        function X() {
+          const { data } = useQuery(gql(`{ users { id } }`));
+          return <div />;
+        }
+      JSX
+
+      call = ir.react_hooks.first
+      expect(call.library).to eq(:apollo)
+      expect(call.operation).to be_nil
+    end
+
+    it "captures bare useLazyQuery / useSubscription calls too" do
+      ir = lower(<<~JSX)
+        function X() {
+          const [load] = useLazyQuery(LIST_POSTS);
+          useSubscription(POST_ADDED);
+          return <div />;
+        }
+      JSX
+
+      expect(ir.react_hooks.map(&:hook)).to eq(%w[useLazyQuery useSubscription])
+      expect(ir.react_hooks.map(&:library)).to eq(%i[apollo apollo])
+      expect(ir.react_hooks.map(&:operation)).to eq(%w[LIST_POSTS POST_ADDED])
+    end
+  end
+
+  describe "Next.js navigation hook detection" do
+    it "captures useRouter / usePathname / useSearchParams with library: :next_js" do
+      ir = lower(<<~JSX)
+        function X() {
+          const router = useRouter();
+          const path = usePathname();
+          const search = useSearchParams();
+          return <div />;
+        }
+      JSX
+
+      expect(ir.react_hooks.map(&:hook)).to eq(%w[useRouter usePathname useSearchParams])
+      expect(ir.react_hooks.map(&:library).uniq).to eq([:next_js])
+      expect(ir.react_hooks.map(&:operation)).to eq([nil, nil, nil])
+    end
+
+    it "exposes Next.js identifier-bound names in local_binding_names so use sites resolve" do
+      ir = lower(<<~JSX)
+        function X() {
+          const router = useRouter();
+          return <p>{router}</p>;
+        }
+      JSX
+
+      expect(ir.local_binding_names).to include("router")
+      expect(ir.local_bindings).to be_empty
+    end
+
+    it "captures useParams destructures" do
+      ir = lower(<<~JSX)
+        function X() {
+          const { id } = useParams();
+          return <p>{id}</p>;
+        }
+      JSX
+
+      call = ir.react_hooks.first
+      expect(call.hook).to eq("useParams")
+      expect(call.library).to eq(:next_js)
+      expect(ir.local_binding_names).to include("id")
+    end
   end
 
   describe "Gap A: destructure pattern capture" do

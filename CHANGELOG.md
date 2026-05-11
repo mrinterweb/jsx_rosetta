@@ -1,9 +1,46 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.0] - 2026-05-11
 
-Closes the four v0.5.0 candidate items from `ROADMAP.md` — the highest-
-leverage residuals from the v0.4.0 Phlex sample review.
+Closes the four v0.5.0-candidate items from the v0.4.0 Phlex sample
+review, plus the two larger features queued at the top of the roadmap:
+Apollo and Next.js hook hint translation.
+
+### Stress test outcome
+
+- 929-file Phlex stress rerun: 887/929 clean translations (unchanged
+  from v0.4.0 — rejection logic untouched), 0/1224 syntax failures
+  (unchanged). 221/929 files now carry an Apollo TODO block (281
+  GraphQL operation names captured); 105/929 carry a Next.js
+  navigation-hook block.
+
+### Added — framework hook hints
+
+- **Apollo data-fetching hooks recognized.** `useQuery`, `useLazyQuery`,
+  `useMutation`, `useSubscription`, and `useApolloClient` are now
+  detected at lowering time. Each call lands in `Component#react_hooks`
+  tagged `library: :apollo`, with the GraphQL operation name extracted
+  from a bare-Identifier first argument (`useQuery(GET_USERS_QUERY, …)`
+  → `operation: "GET_USERS_QUERY"`). Both backends emit a dedicated
+  Apollo TODO block above the template that points at the Rails analog
+  (move the fetch to the controller; mutations become form POSTs or
+  Turbo Stream responses). Operation names are echoed in the comment so
+  the reviewer can match the call back to its GraphQL document.
+  Destructured names (`{ data, loading, error }` from `useQuery`,
+  `[mutate, { loading }]` from `useMutation`) are captured in
+  `local_binding_names` so use sites translate to `nil` placeholders
+  instead of raising NameError at render time.
+- **Next.js navigation hooks recognized.** `useRouter`, `usePathname`,
+  `useSearchParams`, `useParams`, `useSelectedLayoutSegment`, and
+  `useSelectedLayoutSegments` get the same treatment — tagged
+  `library: :next_js`, surfaced in a dedicated TODO block listing each
+  hook's Rails equivalent (`useRouter` → `redirect_to`; `usePathname`
+  → `request.path`; `useSearchParams` / `useParams` → `params`;
+  `useSelectedLayoutSegment(s)` → pattern-match `request.path`).
+
+The `ReactHookCall` IR type gains `library` and `operation` fields;
+both backends group hooks by library and emit one TODO block per group.
+React-only files keep the unchanged single-block output.
 
 ### Added
 

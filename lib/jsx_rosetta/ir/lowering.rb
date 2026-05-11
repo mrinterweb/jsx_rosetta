@@ -68,6 +68,36 @@ module JsxRosetta
         useReducer useImperativeHandle useLayoutEffect useDebugValue
       ].freeze
 
+      # Apollo Client hooks. `useQuery` / `useLazyQuery` / `useSubscription`
+      # take a GraphQL document as the first argument; `useMutation` returns
+      # a `[mutate, { loading, ... }]` tuple. None of these have a direct
+      # translation — they encode data fetching, which in Rails lives in
+      # the controller/model. Captured here so the backend can emit a
+      # per-hook TODO with the operation name preserved when extractable.
+      APOLLO_HOOKS = %w[
+        useQuery useLazyQuery useMutation useSubscription useApolloClient
+      ].freeze
+
+      # Next.js navigation hooks (App Router and Pages Router). Each has a
+      # Rails-side analog:
+      #   useRouter        → controller actions / redirect_to
+      #   usePathname      → request.path
+      #   useSearchParams  → params
+      #   useParams        → params (route params)
+      #   useSelectedLayoutSegment(s) → not directly translatable; usually
+      #     used to highlight nav links — the Rails view can pattern-match
+      #     against request.path.
+      NEXT_HOOKS = %w[
+        useRouter usePathname useSearchParams useParams
+        useSelectedLayoutSegment useSelectedLayoutSegments
+      ].freeze
+
+      FRAMEWORK_HOOKS_BY_LIBRARY = {
+        react: REACT_HOOKS,
+        apollo: APOLLO_HOOKS,
+        next_js: NEXT_HOOKS
+      }.freeze
+
       JSX_NODE_TYPES = %w[JSXElement JSXFragment JSXText JSXExpressionContainer].freeze
 
       # Pre-lowering AST scan: maps a node type to a callable returning the
@@ -620,17 +650,26 @@ module JsxRosetta
         init = declarator[:init]
         return unless init.is_a?(AST::Node)
 
-        is_hook = hook_call?(init)
-        @react_hooks << ReactHookCall.new(hook: init[:callee][:name], source: source_of(stmt).strip) if is_hook
+        library = hook_library_for(init)
+        record_hook_call(stmt, init, library) if library
 
         id_node = declarator[:id]
-        return handle_destructure_binding(stmt, declarator, init, seen, is_hook) if destructure_pattern?(id_node)
-        return handle_identifier_hook_binding(id_node) if is_hook
+        return handle_destructure_binding(stmt, declarator, init, seen, !library.nil?) if destructure_pattern?(id_node)
+        return handle_identifier_hook_binding(id_node) if library
 
         name = id_node&.[](:name)
         return unless name
 
         dispatch_identifier_binding(stmt, init, name, seen)
+      end
+
+      def record_hook_call(stmt, call_expression, library)
+        @react_hooks << ReactHookCall.new(
+          hook: call_expression[:callee][:name],
+          source: source_of(stmt).strip,
+          library: library,
+          operation: apollo_operation_name(call_expression, library)
+        )
       end
 
       # `const [a, b] = ...` or `const { a, b } = ...`. Capture every bound
@@ -732,16 +771,50 @@ module JsxRosetta
 
       def detect_bare_hook_call(stmt)
         expr = stmt.child(:expression)
-        return unless expr&.of_type?("CallExpression") && hook_call?(expr)
+        return unless expr&.of_type?("CallExpression")
 
-        @react_hooks << ReactHookCall.new(hook: expr[:callee][:name], source: source_of(stmt).strip)
+        library = hook_library_for(expr)
+        return unless library
+
+        record_hook_call(stmt, expr, library)
       end
 
       def hook_call?(call_expression)
-        return false unless call_expression.of_type?("CallExpression")
+        !hook_library_for(call_expression).nil?
+      end
+
+      # Resolve a CallExpression to the library whose hook set its callee
+      # belongs to (`:react`, `:apollo`, `:next_js`), or nil when it isn't
+      # a recognized hook invocation. Lookup is by bare-Identifier callee
+      # only — member-expression callees (`Apollo.useQuery`) aren't
+      # recognized; we follow what production code actually writes.
+      def hook_library_for(call_expression)
+        return nil unless call_expression.is_a?(AST::Node) && call_expression.of_type?("CallExpression")
 
         callee = call_expression.child(:callee)
-        callee&.of_type?("Identifier") && REACT_HOOKS.include?(callee[:name])
+        return nil unless callee&.of_type?("Identifier")
+
+        name = callee[:name]
+        FRAMEWORK_HOOKS_BY_LIBRARY.each do |library, names|
+          return library if names.include?(name)
+        end
+        nil
+      end
+
+      # For Apollo's document-first hooks (`useQuery(GET_USERS, ...)`),
+      # extract the operation name from a bare-Identifier first argument
+      # so the backend can echo it in the TODO. Returns nil for inline
+      # documents (`gql\`...\``), member-expression args, or non-Apollo
+      # hooks — the caller already has the verbatim source in `source`,
+      # which surfaces those cases to the reviewer.
+      def apollo_operation_name(call_expression, library)
+        return nil unless library == :apollo
+
+        args = call_expression[:arguments]
+        first_arg = args.is_a?(Array) ? args.first : nil
+        return nil unless AST::Node.matches?(first_arg, "Identifier")
+
+        first_arg[:name]
       end
 
       # Recognize the asChild-style polymorphic tag pattern:

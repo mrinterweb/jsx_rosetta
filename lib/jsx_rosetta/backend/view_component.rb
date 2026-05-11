@@ -42,6 +42,32 @@ module JsxRosetta
         "Image" => { method: :image_tag, positional: :src }.freeze
       }.freeze
 
+      # Per-library TODO header lines surfaced above the verbatim hook
+      # source. Each library has a different Rails analog, so we don't
+      # collapse them into a single generic block. Keys must mirror the
+      # `:library` values produced by IR::Lowering. First line is rendered
+      # with the `<%#` opener; subsequent lines are indented continuation.
+      HOOK_TODO_HEADERS = {
+        react: [
+          "TODO: React hooks detected. None translate automatically. Hotwire/Stimulus",
+          "handles behavior; controllers/views handle state; turbo-frames handle async",
+          "loading. Original source:"
+        ].freeze,
+        apollo: [
+          "TODO: Apollo data-fetching hooks detected. None translate automatically.",
+          "Move the fetch to the Rails controller (or a model/service); pass the",
+          "result in as a prop. For useMutation, use a form POST + redirect or a",
+          "Turbo Stream response. Original source:"
+        ].freeze,
+        next_js: [
+          "TODO: Next.js navigation hooks detected. None translate automatically.",
+          "Rails analogs: useRouter -> redirect_to / form actions;",
+          "usePathname -> request.path; useSearchParams / useParams -> params;",
+          "useSelectedLayoutSegment(s) -> match against request.path in the view.",
+          "Original source:"
+        ].freeze
+      }.freeze
+
       def initialize(helpers: nil, layout: :sidecar)
         super()
         @helpers = case helpers
@@ -294,14 +320,20 @@ module JsxRosetta
       def render_react_hooks_todo(hooks)
         return "" if hooks.empty?
 
-        lines = [
-          "<%# TODO: React hooks detected. None translate automatically. Hotwire/Stimulus",
-          "    handles behavior; controllers/views handle state; turbo-frames handle async",
-          "    loading. Original source:"
-        ]
-        hooks.each { |hook| lines << "    #{hook.source}" }
+        blocks = hooks.group_by(&:library).map { |library, calls| hook_todo_block(library, calls) }
+        "#{blocks.join("\n")}\n"
+      end
+
+      def hook_todo_block(library, calls)
+        header_lines = HOOK_TODO_HEADERS.fetch(library, HOOK_TODO_HEADERS[:react])
+        lines = ["<%# #{header_lines.first}"]
+        header_lines.drop(1).each { |line| lines << "    #{line}" }
+        calls.each do |call|
+          lines << "    operation: #{call.operation}" if call.operation
+          lines << "    #{call.source}"
+        end
         lines << "%>"
-        "#{lines.join("\n")}\n"
+        lines.join("\n")
       end
 
       def render_ir_node(node, translator, indent:)

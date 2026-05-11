@@ -11,19 +11,12 @@ Items are tagged by source so the lineage is traceable:
 
 ## Next up
 
-All four v0.5.0 candidate items from the v0.4.0 review are done (see
-the Done section below). Next-up is open — pick from v0.5+ or
-Stress-test residuals.
+v0.5.0 is shipping. Apollo + Next.js hook hint translation are done
+(see the Done section). The next open larger features are class
+components, AG-Grid module emission, and pretty-printing.
 
 ## v0.5+ — Larger features
 
-- [ ] **Apollo `useQuery` / `useMutation` hint translation.** These hooks
-  encode data fetching; map to a TODO that points at the Rails
-  controller / model fetch they should become, with the GraphQL
-  operation name preserved. [plan-oos]
-- [ ] **Next.js navigation hooks hint pass** — `useRouter`,
-  `usePathname`, `useSearchParams`. Surface a per-hook TODO pointing at
-  the Rails analog (`request.path`, `params`, `redirect_to`). [plan-oos]
 - [ ] **`ClassDeclaration` → ViewComponent path.** The 4 class-based
   components currently rejected at lowering (`ErrorBoundary` and
   cousins) could lower if we handle `render() {}` method extraction. [plan-oos]
@@ -73,8 +66,9 @@ See [CHANGELOG.md](CHANGELOG.md). Major arcs to date:
 - **v0.4.0** — Closed nine gaps surfaced by a sample review of v0.3.0
   Phlex output (A, B, D, E, F, G, H, J, K); 0/1224 syntax failures
   (down from 25); 343 specs.
-- **Unreleased** — Closed the four v0.5.0 candidate items from the
-  v0.4.0 sample review:
+- **v0.5.0** — Closed the four v0.5.0 candidate items from the
+  v0.4.0 sample review **plus** the two larger features at the top
+  of the v0.5+ list (Apollo + Next.js hook hint translation):
   - useCallback / useRef / useMemo identifier-bound hook results captured
     in `local_binding_names` so use sites emit `nil` instead of bare
     snake_case refs to nonexistent methods.
@@ -85,3 +79,14 @@ See [CHANGELOG.md](CHANGELOG.md). Major arcs to date:
     ... {renderHeader()}`) extracted to private methods on the class.
   - `error && <X/>` guard on a known local no longer collapses to
     `if nil` — falls through to the TODO path.
+  - Apollo hooks (`useQuery` / `useLazyQuery` / `useMutation` /
+    `useSubscription` / `useApolloClient`) detected with the GraphQL
+    operation name extracted from a bare-Identifier first argument;
+    emitted as a dedicated TODO block pointing at the Rails controller
+    fetch. Stress-test impact: 221/929 files now carry the Apollo block
+    (281 operation names captured).
+  - Next.js navigation hooks (`useRouter` / `usePathname` /
+    `useSearchParams` / `useParams` / `useSelectedLayoutSegment(s)`)
+    detected and surfaced in a dedicated TODO block listing each
+    hook's Rails analog. Stress-test impact: 105/929 files now carry
+    the Next.js block.

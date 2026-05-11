@@ -488,6 +488,36 @@ RSpec.describe JsxRosetta::Backend::ViewComponent do
       expect(erb).to include("Hotwire/Stimulus")
     end
 
+    it "emits a separate Apollo TODO block with operation name when useQuery is present" do
+      files = files_for(<<~JSX)
+        function X() {
+          const { data } = useQuery(GET_USERS);
+          return <p>{data}</p>;
+        }
+      JSX
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include("Apollo data-fetching hooks detected")
+      expect(erb).to include("operation: GET_USERS")
+      expect(erb).to include("useQuery(GET_USERS)")
+      expect(erb).not_to include("React hooks detected")
+    end
+
+    it "emits a separate Next.js TODO block with Rails analogs for navigation hooks" do
+      files = files_for(<<~JSX)
+        function X() {
+          const path = usePathname();
+          return <p>{path}</p>;
+        }
+      JSX
+
+      erb = files["x_component.html.erb"]
+      expect(erb).to include("Next.js navigation hooks detected")
+      expect(erb).to include("usePathname -> request.path")
+      expect(erb).to include("usePathname()")
+      expect(erb).not_to include("React hooks detected")
+    end
+
     it "prepends a TODO comment listing non-JSX local bindings" do
       files = files_for(<<~JSX)
         function X({ raw }) {

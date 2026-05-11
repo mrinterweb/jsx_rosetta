@@ -31,6 +31,31 @@ module JsxRosetta
       VALID_IDENTIFIER = /\A[a-z_][a-z0-9_]*\z/i
       VOID_ELEMENTS = %w[area base br col embed hr img input link meta param source track wbr].freeze
 
+      # Per-library TODO header lines surfaced above the verbatim hook
+      # source. Each library has a different Rails analog, so we don't
+      # collapse them into a single generic block. Keys must mirror the
+      # `:library` values produced by IR::Lowering.
+      HOOK_TODO_HEADERS = {
+        react: [
+          "TODO: React hooks detected. None translate automatically.",
+          "Hotwire/Stimulus handles behavior; controllers/views handle state;",
+          "turbo-frames handle async loading. Original source:"
+        ].freeze,
+        apollo: [
+          "TODO: Apollo data-fetching hooks detected. None translate automatically.",
+          "Move the fetch to the Rails controller (or a model/service); pass the",
+          "result in as a prop. For useMutation, use a form POST + redirect or a",
+          "Turbo Stream response. Original source:"
+        ].freeze,
+        next_js: [
+          "TODO: Next.js navigation hooks detected. None translate automatically.",
+          "Rails analogs: useRouter -> redirect_to / form actions;",
+          "usePathname -> request.path; useSearchParams / useParams -> params;",
+          "useSelectedLayoutSegment(s) -> match against request.path in the view.",
+          "Original source:"
+        ].freeze
+      }.freeze
+
       # Structured intermediate for the data-action attribute — mirrors the
       # ViewComponent backend pattern (lib/jsx_rosetta/backend/view_component.rb).
       EventDescriptor = Data.define(:kind, :body)
@@ -226,12 +251,19 @@ module JsxRosetta
       def render_react_hooks_todo(hooks)
         return [] if hooks.empty?
 
-        lines = [
-          "# TODO: React hooks detected. None translate automatically.",
-          "# Hotwire/Stimulus handles behavior; controllers/views handle state;",
-          "# turbo-frames handle async loading. Original source:"
-        ]
-        hooks.each { |hook| lines.concat(comment_lines(hook.source)) }
+        # Preserve the source order of the first occurrence per library so
+        # the React block (typical) lands before Apollo/Next.js blocks when
+        # all three are present. group_by preserves first-seen order.
+        hooks.group_by(&:library).flat_map { |library, calls| hook_todo_block_lines(library, calls) }
+      end
+
+      def hook_todo_block_lines(library, calls)
+        header_lines = HOOK_TODO_HEADERS.fetch(library, HOOK_TODO_HEADERS[:react])
+        lines = header_lines.map { |line| "# #{line}" }
+        calls.each do |call|
+          lines << "#   operation: #{call.operation}" if call.operation
+          lines.concat(comment_lines(call.source))
+        end
         lines
       end
 

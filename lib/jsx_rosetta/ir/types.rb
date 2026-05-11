@@ -33,12 +33,19 @@ module JsxRosetta
     #                  inline arrows / const-bound arrows used in onX={...}.
     #                  When non-empty, backends should emit a sibling
     #                  Stimulus controller file alongside the .rb/.erb pair.
-    # react_hooks    : [ReactHookCall] — calls to React hooks (useState,
-    #                  useEffect, useRef, useContext, useMemo, useCallback,
-    #                  useReducer, useImperativeHandle, useLayoutEffect).
-    #                  Surfaced as a distinct TODO block so the human
-    #                  reviewer knows to translate behavior to Stimulus
-    #                  and state to server-side rendering.
+    # react_hooks    : [ReactHookCall] — every recognized hook invocation
+    #                  in the component body, regardless of library.
+    #                  Includes React's built-in hooks (useState, useEffect,
+    #                  useRef, useContext, useMemo, useCallback, useReducer,
+    #                  useImperativeHandle, useLayoutEffect), Apollo hooks
+    #                  (useQuery, useMutation, useLazyQuery, useSubscription,
+    #                  useApolloClient), and Next.js navigation hooks
+    #                  (useRouter, usePathname, useSearchParams, useParams,
+    #                  useSelectedLayoutSegment(s)). Each call carries a
+    #                  `library` tag so backends can group them and emit a
+    #                  library-specific TODO pointing at the right Rails
+    #                  analog (Stimulus/server-render for React; controller
+    #                  fetch for Apollo; request.path/params for Next.js).
     # module_bindings : [LocalBinding] — top-level `const`/`let` declarations
     #                  outside the component function that aren't themselves
     #                  components. Captured so backends can either translate
@@ -70,14 +77,26 @@ module JsxRosetta
       include Node
     end
 
-    # A React hook invocation detected in the component body (`useState`,
-    # `useEffect`, …). Surfaced separately from local_bindings so backends
-    # can emit a more specific TODO that points at the Stimulus / Hotwire
-    # / server-render alternative, instead of a generic "translate this JS".
+    # A hook invocation detected in the component body. Covers React's
+    # built-in hooks plus framework hooks we recognize (Apollo's `useQuery`/
+    # `useMutation`/etc., Next.js's `useRouter`/`usePathname`/etc.).
+    # Surfaced separately from local_bindings so backends can emit a more
+    # specific TODO pointing at the Rails equivalent for each library,
+    # instead of a generic "translate this JS".
     #
-    # hook   : String — hook function name (`"useState"`, `"useEffect"`, …)
-    # source : String — verbatim JS of the entire statement.
-    ReactHookCall = Data.define(:hook, :source) do
+    # hook      : String — hook function name (`"useState"`, `"useQuery"`, …)
+    # source    : String — verbatim JS of the entire statement.
+    # library   : Symbol — `:react`, `:apollo`, or `:next_js`. Backends
+    #             group hooks by library and emit one TODO block per group,
+    #             since each library maps to a different Rails analog.
+    # operation : String | nil — for Apollo hooks called with a bare-Identifier
+    #             first argument (`useQuery(GET_USERS_QUERY, …)`), the
+    #             captured operation name. nil when the first argument is
+    #             not a simple Identifier, or when the hook isn't Apollo.
+    #             Backends echo it in the TODO so the reviewer can match
+    #             the operation back to its GraphQL document and to the
+    #             Rails controller / model fetch it should become.
+    ReactHookCall = Data.define(:hook, :source, :library, :operation) do
       include Node
     end
 
