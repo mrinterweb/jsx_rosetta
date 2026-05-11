@@ -28,6 +28,12 @@ module JsxRosetta
       DEFAULT_SLOT_NAME = "children"
       VOID_ELEMENTS = %w[area base br col embed hr img input link meta param source track wbr].freeze
 
+      # Structured intermediate for tag_builder_data_action — avoids the
+      # fragile "parse what you just rendered" pattern. :literal is a raw
+      # action token like `"click->foo#bar"`; :ruby is a Ruby expression
+      # whose value is the action string (e.g. `event.handler.expression`).
+      EventDescriptor = Data.define(:kind, :body)
+
       # JSX component names that have a direct Rails view-helper analog.
       # Override per-instance via `ViewComponent.new(helpers: {...})`, or
       # disable by passing `helpers: false`.
@@ -312,13 +318,11 @@ module JsxRosetta
 
       def tag_builder_data_action(events, translator)
         descriptors = events.map { |event| tag_builder_event_descriptor(event, translator) }
-        all_literal = descriptors.all? { |d| d.start_with?('"') && d.end_with?('"') }
-        joined = if descriptors.size == 1
-                   descriptors.first
-                 elsif all_literal
-                   %("#{descriptors.map { |d| d[1..-2] }.join(" ")}")
+        joined = case descriptors
+                 in [single]
+                   render_single_event_descriptor(single)
                  else
-                   %("#{descriptors.map { |d| literal_to_interpolated(d) }.join(" ")}")
+                   %("#{descriptors.map { |d| descriptor_in_string(d) }.join(" ")}")
                  end
         %("data-action" => #{joined})
       end
@@ -327,18 +331,24 @@ module JsxRosetta
         case event
         when IR::EventBinding
           translated = translator.translate(event.handler.expression)
-          translated ? translated.ruby : event.handler.expression.inspect
+          if translated
+            EventDescriptor.new(:ruby, translated.ruby)
+          else
+            EventDescriptor.new(:ruby, event.handler.expression.inspect)
+          end
         when IR::StimulusBinding
-          %("#{event.event}->#{@stimulus_identifier}##{event.method_name}")
+          EventDescriptor.new(:literal, "#{event.event}->#{@stimulus_identifier}##{event.method_name}")
         end
       end
 
-      def literal_to_interpolated(descriptor)
-        if descriptor.start_with?('"') && descriptor.end_with?('"')
-          descriptor[1..-2]
-        else
-          "\#{#{descriptor}}"
-        end
+      def render_single_event_descriptor(descriptor)
+        descriptor.kind == :literal ? %("#{descriptor.body}") : descriptor.body
+      end
+
+      # Render a descriptor inline inside a Ruby string literal: literals
+      # are spliced verbatim, ruby expressions become `#{...}`.
+      def descriptor_in_string(descriptor)
+        descriptor.kind == :literal ? descriptor.body : "\#{#{descriptor.body}}"
       end
 
       def tag_builder_spread(expression, translator)
@@ -455,52 +465,53 @@ module JsxRosetta
       end
 
       def render_style(style, translator)
-        rendered = style.declarations.map { |decl| render_style_declaration(decl, translator) }.join(" ")
+        rendered = style.declarations.map { |decl| style_declaration(decl, translator, format: :erb) }.join(" ")
         %(style="#{rendered}")
       end
 
-      def render_style_declaration(decl, translator)
+      def render_class_list_attribute(class_list, translator)
+        parts = class_list.segments.map { |seg| class_segment(seg, translator, format: :erb) }
+        %(class="#{parts.join(" ")}")
+      end
+
+      def class_list_to_ruby_string(class_list, translator)
+        parts = class_list.segments.map { |seg| class_segment(seg, translator, format: :ruby_string) }
+        %("#{parts.join(" ")}")
+      end
+
+      # Render one IR::Style declaration in either ERB-template form
+      # (`color: <%= @c %>;`) or Ruby-string-interpolation form
+      # (`color: #{@c};`).
+      def style_declaration(decl, translator, format:)
         value = case decl.value
                 when String then decl.value
-                when IR::Interpolation
-                  translated = translator.translate(decl.value.expression)
-                  "<%= #{translated&.ruby || decl.value.expression} %>"
+                when IR::Interpolation then interpolation_value(decl.value.expression, translator, format: format)
                 end
         "#{decl.property}: #{value};"
       end
 
-      def render_class_list_attribute(class_list, translator)
-        parts = class_list.segments.map { |seg| class_segment_for_html(seg, translator) }
-        %(class="#{parts.join(" ")}")
-      end
-
-      def class_segment_for_html(segment, translator)
+      # Render one ClassList segment in either ERB-template form or Ruby
+      # string-interpolation form.
+      def class_segment(segment, translator, format:)
         case segment
         when String then segment
-        when IR::Interpolation
-          translated = translator.translate(segment.expression)
-          "<%= #{translated&.ruby || segment.expression} %>"
-        when IR::ConditionalSegment
-          cond_translated = translator.translate(segment.condition.expression)
-          cond_ruby = cond_translated&.ruby || segment.condition.expression
-          "<%= #{cond_ruby} ? #{segment.class_name.inspect} : '' %>"
+        when IR::Interpolation then interpolation_value(segment.expression, translator, format: format)
+        when IR::ConditionalSegment then conditional_class_segment(segment, translator, format: format)
         end
       end
 
-      def class_list_to_ruby_string(class_list, translator)
-        parts = class_list.segments.map { |seg| class_segment_for_ruby(seg, translator) }
-        %("#{parts.join(" ")}")
+      def interpolation_value(expression, translator, format:)
+        translated = translator.translate(expression)
+        ruby = translated&.ruby || expression
+        format == :erb ? "<%= #{ruby} %>" : "\#{#{ruby}}"
       end
 
-      def class_segment_for_ruby(segment, translator)
-        case segment
-        when String then segment
-        when IR::Interpolation
-          translated = translator.translate(segment.expression)
-          "\#{#{translated&.ruby || segment.expression}}"
-        when IR::ConditionalSegment
-          cond_translated = translator.translate(segment.condition.expression)
-          cond_ruby = cond_translated&.ruby || segment.condition.expression
+      def conditional_class_segment(segment, translator, format:)
+        cond_translated = translator.translate(segment.condition.expression)
+        cond_ruby = cond_translated&.ruby || segment.condition.expression
+        if format == :erb
+          "<%= #{cond_ruby} ? #{segment.class_name.inspect} : '' %>"
+        else
           %(\#{#{cond_ruby} ? #{segment.class_name.inspect} : ""})
         end
       end
@@ -598,15 +609,7 @@ module JsxRosetta
       end
 
       def style_to_ruby_string(style, translator)
-        parts = style.declarations.map do |decl|
-          value = case decl.value
-                  when String then decl.value
-                  when IR::Interpolation
-                    translated = translator.translate(decl.value.expression)
-                    "\#{#{translated&.ruby || decl.value.expression}}"
-                  end
-          "#{decl.property}: #{value};"
-        end
+        parts = style.declarations.map { |decl| style_declaration(decl, translator, format: :ruby_string) }
         %("#{parts.join(" ")}")
       end
 

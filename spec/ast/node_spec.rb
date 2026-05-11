@@ -98,4 +98,71 @@ RSpec.describe JsxRosetta::AST::Node do
       expect(a).to eq(b)
     end
   end
+
+  describe "#child" do
+    let(:node) do
+      described_class.wrap({
+                             "type" => "ExportNamedDeclaration",
+                             "declaration" => { "type" => "FunctionDeclaration" },
+                             "specifiers" => [],
+                             "source" => nil
+                           })
+    end
+
+    it "returns the wrapped Node when the field is a Node" do
+      expect(node.child(:declaration)).to be_a(described_class)
+      expect(node.child(:declaration).type).to eq("FunctionDeclaration")
+    end
+
+    it "returns nil when the field is missing" do
+      expect(node.child(:nonexistent)).to be_nil
+    end
+
+    it "returns nil when the field is non-Node-shaped (Array, Hash, String, nil)" do
+      expect(node.child(:specifiers)).to be_nil
+      expect(node.child(:source)).to be_nil
+    end
+  end
+
+  describe "#of_type?" do
+    let(:node) { described_class.wrap({ "type" => "IfStatement" }) }
+
+    it "is true when type matches" do
+      expect(node.of_type?("IfStatement")).to be true
+    end
+
+    it "is true when one of multiple types matches" do
+      expect(node.of_type?("ReturnStatement", "IfStatement")).to be true
+    end
+
+    it "is false when type doesn't match" do
+      expect(node.of_type?("ReturnStatement")).to be false
+    end
+  end
+
+  describe ".matches?" do
+    let(:node) { described_class.wrap({ "type" => "IfStatement" }) }
+
+    it "is true for a Node of the given type" do
+      expect(described_class.matches?(node, "IfStatement")).to be true
+    end
+
+    it "is true when one of multiple types matches" do
+      expect(described_class.matches?(node, "ReturnStatement", "IfStatement")).to be true
+    end
+
+    it "is false for nil" do
+      expect(described_class.matches?(nil, "IfStatement")).to be false
+    end
+
+    it "is false for non-Node values (Array, String, Hash)" do
+      expect(described_class.matches?([], "IfStatement")).to be false
+      expect(described_class.matches?("IfStatement", "IfStatement")).to be false
+      expect(described_class.matches?({ "type" => "IfStatement" }, "IfStatement")).to be false
+    end
+
+    it "is false for a Node whose type doesn't match" do
+      expect(described_class.matches?(node, "ReturnStatement")).to be false
+    end
+  end
 end

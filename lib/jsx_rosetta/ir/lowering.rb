@@ -1,29 +1,30 @@
 # frozen_string_literal: true
 
 require_relative "types"
+require_relative "module_shape_classifier"
 
 module JsxRosetta
   module IR
     # Lowers a parsed AST::File into an IR::Component tree.
     #
-    # Phase 2 scope:
-    #   - Single function-declaration component per file.
-    #   - JSX elements with lowercase tags lower to IR::Element; others to
-    #     IR::ComponentInvocation.
-    #   - className attributes lower to IR::StyleBinding; everything else
-    #     to IR::Attribute (event handlers like onClick are passed through
-    #     as Attribute for now and will be re-lowered to EventBinding in
-    #     a later phase).
-    #   - JS expressions are preserved as opaque source text via
-    #     IR::Interpolation. No JS-to-Ruby translation.
-    #   - Pure-whitespace JSXText between elements is dropped (matches
-    #     JSX runtime behavior); other text is preserved verbatim.
+    # Responsibilities:
+    #   - Component discovery — find function/arrow declarations whose
+    #     name and body shape qualify as a function component.
+    #   - Module-shape classification — when no component is found,
+    #     produce a triage-friendly error message via SHAPE_MESSAGES.
+    #   - Function-body lowering — turn return-bearing block statements,
+    #     if-chains, switch/try statements, and bare expression returns
+    #     into IR values (Conditional, Interpolation, Text, etc.).
+    #   - JSX-node lowering — turn JSXElement / JSXFragment / JSXText /
+    #     JSXExpressionContainer trees into IR::Element / Fragment /
+    #     ComponentInvocation / Conditional / Loop / etc.
+    #   - Pattern recognition — `cn()` / `clsx()` className helpers,
+    #     `items.map(...)` loops, `cond ? <A/> : <B/>` polymorphic tags,
+    #     React-hook calls, and onX={...} handlers promotable to
+    #     Stimulus methods.
     #
-    # Phase 4a additions:
-    #   - {children} where `children` is a prop lowers to IR::Slot.
-    #   - {cond && X}, {cond ? X : null}, and {cond ? X : Y} lower to
-    #     IR::Conditional. Other LogicalExpression operators (||, ??) are
-    #     left as opaque interpolations.
+    # Anything outside these patterns is preserved verbatim as a TODO
+    # so the human reviewer sees the original JS at the right spot.
     class Lowering
       # A failure during AST → IR lowering. Carries optional line/column
       # information when the failure can be tied to an AST node.
@@ -66,9 +67,7 @@ module JsxRosetta
         useReducer useImperativeHandle useLayoutEffect useDebugValue
       ].freeze
 
-      EXPORT_TYPES = %w[ExportNamedDeclaration ExportDefaultDeclaration].freeze
       JSX_NODE_TYPES = %w[JSXElement JSXFragment JSXText JSXExpressionContainer].freeze
-      HOC_NAMES = %w[memo forwardRef lazy observer].freeze
 
       # Pre-lowering AST scan: maps a node type to a callable returning the
       # AST nodes that contribute return values. Used by body_returns_jsx?.
@@ -135,131 +134,10 @@ module JsxRosetta
       end
 
       def no_component_error(program)
-        shape = classify_module_shape(program)
+        shape = ModuleShapeClassifier.classify(program)
         message = SHAPE_MESSAGES[shape]
         suffix = message ? " — #{message}" : ""
         lowering_error("no component function found in module#{suffix}")
-      end
-
-      # Heuristic classifier that labels a module whose top-level shape isn't
-      # a function component. Used only for the error message — does not
-      # affect what does or doesn't translate. Order matters: more specific
-      # shapes are checked first.
-      def classify_module_shape(program)
-        ast_shape = classify_ast_shape(program)
-        return ast_shape if ast_shape
-
-        classify_by_export_names(top_level_export_names(program), program)
-      end
-
-      def classify_ast_shape(program)
-        return :class_component if program.body.any? { |stmt| class_component?(stmt) }
-        return :hoc_wrapped if program.body.any? { |stmt| hoc_wrapped_export?(stmt) }
-        return :columns_data if program.body.any? { |stmt| array_literal_export?(stmt) }
-
-        nil
-      end
-
-      def classify_by_export_names(names, program)
-        export_label = classify_by_export_pattern(names)
-        return export_label if export_label
-
-        classify_non_export_module(program)
-      end
-
-      def classify_by_export_pattern(names)
-        any_hooks = names.any? { |n| hook_name?(n) }
-        any_helpers = names.any? { |n| /\A[a-z]/.match?(n) && !hook_name?(n) }
-        return :mixed_exports if any_hooks && any_helpers
-        return :hooks_only if any_hooks
-        return :utils_only if any_helpers
-
-        nil
-      end
-
-      # No function-shaped exports. Distinguish:
-      #   - side-effect-only (top-level calls like `LicenseManager.set(...)`)
-      #   - types-only       (TS types/interfaces and constants)
-      #   - unknown          (nothing top-level to look at)
-      def classify_non_export_module(program)
-        return :side_effects_only if program.body.any? { |s| side_effect_statement?(s) }
-        return :types_only if top_level_has_anything?(program)
-
-        :unknown
-      end
-
-      def side_effect_statement?(stmt)
-        stmt.is_a?(AST::Node) && stmt.type == "ExpressionStatement"
-      end
-
-      def hook_name?(name)
-        name.start_with?("use") && name.length > 3 && name[3] == name[3].upcase
-      end
-
-      def class_component?(stmt)
-        decl = EXPORT_TYPES.include?(stmt.type) ? stmt[:declaration] : stmt
-        decl.is_a?(AST::Node) && decl.type == "ClassDeclaration"
-      end
-
-      # Recognize `export const X = React.memo(...)` (export wrapper) or a
-      # top-level `const X = lazy(() => ...)` followed by `export default X`
-      # — a VariableDeclaration whose init is a CallExpression to a known HOC.
-      def hoc_wrapped_export?(stmt)
-        decl = EXPORT_TYPES.include?(stmt.type) ? stmt[:declaration] : stmt
-        return false unless decl.is_a?(AST::Node) && decl.type == "VariableDeclaration"
-
-        decl[:declarations].any? do |d|
-          init = d[:init]
-          init.is_a?(AST::Node) && init.type == "CallExpression" && hoc_callee?(init[:callee])
-        end
-      end
-
-      def hoc_callee?(callee)
-        return false unless callee.is_a?(AST::Node)
-
-        case callee.type
-        when "Identifier" then HOC_NAMES.include?(callee[:name])
-        when "MemberExpression"
-          property = callee[:property]
-          property.is_a?(AST::Node) && property.type == "Identifier" && HOC_NAMES.include?(property[:name])
-        else false
-        end
-      end
-
-      def array_literal_export?(stmt)
-        return false unless EXPORT_TYPES.include?(stmt.type)
-
-        decl = stmt[:declaration]
-        return true if decl.is_a?(AST::Node) && decl.type == "ArrayExpression"
-        return false unless decl.is_a?(AST::Node) && decl.type == "VariableDeclaration"
-
-        decl[:declarations].any? { |d| d[:init].is_a?(AST::Node) && d[:init].type == "ArrayExpression" }
-      end
-
-      # Does the program have any top-level non-import statements? Used to
-      # distinguish "types-only / empty module" from "mixed exports."
-      def top_level_has_anything?(program)
-        program.body.any? do |stmt|
-          stmt.is_a?(AST::Node) && stmt.type != "ImportDeclaration"
-        end
-      end
-
-      def top_level_export_names(program)
-        program.body.flat_map { |stmt| extract_top_level_names(stmt) }.compact
-      end
-
-      def extract_top_level_names(stmt)
-        case stmt.type
-        when "FunctionDeclaration"
-          [stmt[:id]&.[](:name)]
-        when "VariableDeclaration"
-          stmt[:declarations].map { |d| d[:id].is_a?(AST::Node) && d[:id].type == "Identifier" ? d[:id][:name] : nil }
-        when "ExportNamedDeclaration", "ExportDefaultDeclaration"
-          decl = stmt[:declaration]
-          decl.is_a?(AST::Node) ? extract_top_level_names(decl) : []
-        else
-          []
-        end
       end
 
       def find_component_functions(program)
@@ -285,6 +163,10 @@ module JsxRosetta
       def pascal_case?(name)
         first = name[0]
         first == first.upcase && first != first.downcase
+      end
+
+      def hook_name?(name)
+        name.start_with?("use") && name.length > 3 && name[3] == name[3].upcase
       end
 
       # Pre-lowering AST scan: does any return path in this body produce a
@@ -454,7 +336,7 @@ module JsxRosetta
       # around the base value as outer Conditionals. Returns nil when no shape
       # matches; caller raises.
       def lower_block_returns(statements)
-        return_idx = statements.index { |s| s.is_a?(AST::Node) && s.type == "ReturnStatement" }
+        return_idx = statements.index { |s| AST::Node.matches?(s, "ReturnStatement") }
 
         if return_idx
           return_arg = statements[return_idx][:argument]
@@ -492,20 +374,22 @@ module JsxRosetta
       # behavior of dropping unrepresentable preceding statements rather
       # than failing the whole component.
       def wrap_return_guards(preceding, base_value)
-        preceding.reverse.each do |stmt|
-          next unless stmt.is_a?(AST::Node) && stmt.type == "IfStatement"
-          next if stmt[:alternate]
+        preceding.reverse.reduce(base_value) do |acc, stmt|
+          next acc unless guard_if_statement?(stmt)
 
           branch_value = lower_return_branch(stmt[:consequent])
-          next unless branch_value
+          next acc unless branch_value
 
-          base_value = Conditional.new(
+          Conditional.new(
             test: Interpolation.new(expression: source_of(stmt[:test])),
             consequent: branch_value,
-            alternate: base_value
+            alternate: acc
           )
         end
-        base_value
+      end
+
+      def guard_if_statement?(stmt)
+        AST::Node.matches?(stmt, "IfStatement") && stmt[:alternate].nil?
       end
 
       def lower_if_return_chain(if_stmt)
@@ -547,7 +431,7 @@ module JsxRosetta
 
       def collect_nested_local_bindings(stmts)
         stmts.each do |stmt|
-          next unless stmt.is_a?(AST::Node) && stmt.type == "VariableDeclaration"
+          next unless AST::Node.matches?(stmt, "VariableDeclaration")
 
           seen = {}
           stmt[:declarations].each { |declarator| classify_local_binding(stmt, declarator, seen) }
@@ -625,10 +509,10 @@ module JsxRosetta
       #   case A: if (X) return Y; return Z;  (guard prefix + return)
       # Trailing `break` statements are ignored.
       def lower_switch_case_consequent(stmts)
-        filtered = stmts.reject { |s| s.is_a?(AST::Node) && s.type == "BreakStatement" }
+        filtered = stmts.reject { |s| AST::Node.matches?(s, "BreakStatement") }
         return nil if filtered.empty?
 
-        if filtered.size == 1 && filtered.first.is_a?(AST::Node) && filtered.first.type == "BlockStatement"
+        if filtered.size == 1 && AST::Node.matches?(filtered.first, "BlockStatement")
           return lower_switch_case_consequent(filtered.first[:body])
         end
 
@@ -688,18 +572,17 @@ module JsxRosetta
       end
 
       def detect_bare_hook_call(stmt)
-        expr = stmt[:expression]
-        return unless expr.is_a?(AST::Node) && expr.type == "CallExpression"
-        return unless hook_call?(expr)
+        expr = stmt.child(:expression)
+        return unless expr&.of_type?("CallExpression") && hook_call?(expr)
 
         @react_hooks << ReactHookCall.new(hook: expr[:callee][:name], source: source_of(stmt).strip)
       end
 
       def hook_call?(call_expression)
-        return false unless call_expression.type == "CallExpression"
+        return false unless call_expression.of_type?("CallExpression")
 
-        callee = call_expression[:callee]
-        callee.is_a?(AST::Node) && callee.type == "Identifier" && REACT_HOOKS.include?(callee[:name])
+        callee = call_expression.child(:callee)
+        callee&.of_type?("Identifier") && REACT_HOOKS.include?(callee[:name])
       end
 
       # Recognize the asChild-style polymorphic tag pattern:
@@ -851,21 +734,17 @@ module JsxRosetta
         loop_node || Interpolation.new(expression: source_of(expression))
       end
 
-      # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
       def try_lower_map_loop(call_expression)
-        callee = call_expression[:callee]
-        return nil unless callee.is_a?(AST::Node) && callee.type == "MemberExpression"
-        return nil unless callee[:property].is_a?(AST::Node) && callee[:property][:name] == "map"
+        callee = call_expression.child(:callee)
+        return nil unless callee&.of_type?("MemberExpression")
 
-        args = call_expression[:arguments]
-        return nil if args.size != 1
-        return nil unless args.first.type == "ArrowFunctionExpression"
+        property = callee.child(:property)
+        return nil unless property && property[:name] == "map"
 
-        arrow = args.first
+        arrow = map_loop_arrow(call_expression[:arguments])
+        return nil unless arrow
+
         params = arrow[:params]
-        return nil if params.empty? || params.size > 2
-        return nil unless params.all? { |p| p.is_a?(AST::Node) && p.type == "Identifier" }
-
         body = lower_arrow_body(arrow[:body])
         return nil unless body
 
@@ -876,7 +755,19 @@ module JsxRosetta
           body: body
         )
       end
-      # rubocop:enable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
+
+      def map_loop_arrow(args)
+        return nil if args.size != 1
+
+        arrow = args.first
+        return nil unless AST::Node.matches?(arrow, "ArrowFunctionExpression")
+
+        params = arrow[:params]
+        return nil if params.empty? || params.size > 2
+        return nil unless params.all? { |p| AST::Node.matches?(p, "Identifier") }
+
+        arrow
+      end
 
       def lower_arrow_body(body)
         case body.type
@@ -968,7 +859,7 @@ module JsxRosetta
         return nil unless value.is_a?(AST::JSXExpressionContainer)
 
         expression = value.expression
-        return nil unless expression.is_a?(AST::Node) && expression.type == "ObjectExpression"
+        return nil unless AST::Node.matches?(expression, "ObjectExpression")
 
         declarations = expression[:properties].map { |prop| lower_style_property(prop) }
         return nil if declarations.any?(&:nil?)
@@ -1014,10 +905,10 @@ module JsxRosetta
       end
 
       def try_lower_class_helper(expression)
-        return nil unless expression.is_a?(AST::Node) && expression.type == "CallExpression"
+        return nil unless AST::Node.matches?(expression, "CallExpression")
 
-        callee = expression[:callee]
-        return nil unless callee.is_a?(AST::Node) && callee.type == "Identifier"
+        callee = expression.child(:callee)
+        return nil unless callee&.of_type?("Identifier")
         return nil unless %w[cn clsx classnames].include?(callee[:name])
 
         segments = expression[:arguments].flat_map { |arg| lower_class_helper_arg(arg) }

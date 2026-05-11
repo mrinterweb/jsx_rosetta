@@ -66,13 +66,40 @@ module JsxRosetta
       end
 
       # Field access. Accepts snake_case symbols/strings (translated to
-      # camelCase) and camelCase strings (used verbatim).
+      # camelCase) and camelCase strings (used verbatim). Returns whatever
+      # the raw hash contains at that key (Node, Array of Nodes, String,
+      # Hash, nil) — caller is responsible for type-checking. For typed
+      # access, prefer `#child` (returns Node | nil).
       def [](key)
         raw_key = key.to_s
         return Node.wrap(@raw[raw_key]) if @raw.key?(raw_key)
 
         camel_key = Inflector.camelize(raw_key)
         Node.wrap(@raw[camel_key])
+      end
+
+      # Typed child access — returns the wrapped Node at `key`, or nil if
+      # absent or non-Node-shaped. Use this in lowering passes to avoid
+      # repetitive `is_a?(AST::Node)` defenses.
+      def child(key)
+        value = self[key]
+        value.is_a?(Node) ? value : nil
+      end
+
+      # Type predicate on a known Node. Use only when the receiver is
+      # guaranteed to be a Node — otherwise prefer `Node.matches?` (class
+      # method) which tolerates nil / non-Node values from hash lookups.
+      # Accepts multiple types: `node.of_type?("StringLiteral", "NumericLiteral")`.
+      def of_type?(*types)
+        types.include?(type)
+      end
+
+      # Defensive type predicate. True iff `value` is an AST::Node whose
+      # type is one of `types`. False for nil, arrays, strings, hashes, or
+      # any non-Node — making it safe for raw hash field accesses where
+      # the contents may be anything.
+      def self.matches?(value, *types)
+        value.is_a?(Node) && types.include?(value.type)
       end
 
       def dig(*keys)
