@@ -84,10 +84,21 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("p do\n      plain \"Hello\"\n    end")
     end
 
-    it "emits hyphenated attributes inside **{ ... } so kwarg syntax stays valid" do
+    it "emits hyphenated attributes as snake_case kwargs (Phlex auto-converts to hyphens at render time)" do
       content = file_contents('function X() { return <div data-testid="x" aria-label="y"/>; }', "x.rb")
 
-      expect(content).to include('**{ "data-testid" => "x", "aria-label" => "y" }')
+      expect(content).to include('data_testid: "x"')
+      expect(content).to include('aria_label: "y"')
+      expect(content).not_to include("**{")
+    end
+
+    it "preserves camelCase attribute names verbatim (SVG attrs like viewBox stay unchanged)" do
+      content = file_contents('function X() { return <svg viewBox="0 0 10 10" />; }', "x.rb")
+
+      expect(content).to include('viewBox: "0 0 10 10"')
+      # Phlex only hyphenates underscores; camelCase stays camelCase, which
+      # is what SVG attributes need.
+      expect(content).not_to include("view_box")
     end
 
     it "treats className with a string literal as a class: kwarg" do
@@ -204,11 +215,11 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(files.keys).to contain_exactly("x.rb", "x_controller.js")
     end
 
-    it "stamps data-controller / data-action on the root element" do
+    it "stamps data-controller / data-action on the root element as snake_case kwargs" do
       content = file_contents(source, "x.rb")
 
-      expect(content).to include('"data-controller" => "x"')
-      expect(content).to include('"data-action" => "click->x#clickHandler"')
+      expect(content).to include('data_controller: "x"')
+      expect(content).to include('data_action: "click->x#clickHandler"')
     end
 
     it "skeleton controller exports an extends Controller class with the inferred method" do

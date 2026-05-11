@@ -7,9 +7,12 @@
 - **Phlex 2.x backend** — `--as=phlex` emits a single-file Phlex
   `view_template` Ruby class (no separate ERB sidecar). The JSX
   template lives as method calls inside `view_template`; attributes
-  become kwargs (`h1(class: "foo", **{ "data-testid" => @x })`);
+  become snake_case kwargs (`h1(class: "foo", data_testid: @x)` —
+  Phlex auto-hyphenates underscores in symbol keys at render time);
   control flow uses native Ruby (`if`, `.each`); children pass
-  through `yield`. Three mutually exclusive naming strategies:
+  through `yield`. camelCase JSX attrs (`viewBox`, `preserveAspectRatio`)
+  preserve verbatim so SVG works correctly. Three mutually exclusive
+  naming strategies:
     * **default** — `class FlashyHeader < Phlex::HTML`, `flashy_header.rb`
     * **suffix** — `--phlex-suffix=Component` → `FlashyHeaderComponent`,
       `flashy_header_component.rb`. Defaults to `"Component"` if the

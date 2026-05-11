@@ -233,7 +233,19 @@ Three mutually exclusive naming strategies (configurable):
 
 Stimulus handlers still emit a sibling `_controller.js` skeleton alongside
 the `.rb` — the `data-controller`/`data-action` attrs go inline on the
-element, the handler body goes into the JS skeleton as a TODO comment.
+element (emitted as `data_controller:`/`data_action:` kwargs; Phlex
+auto-hyphenates underscores at render time), the handler body goes into
+the JS skeleton as a TODO comment.
+
+Attribute emission specifics:
+- Hyphenated JSX attrs (`data-testid`, `aria-label`) emit as snake_case
+  kwargs (`data_testid:`, `aria_label:`). Phlex 2.x converts the
+  underscores back to hyphens on render.
+- camelCase JSX attrs (`viewBox`, `preserveAspectRatio`) preserve
+  verbatim — Phlex only converts underscores, so SVG attributes stay
+  intact.
+- Attributes with characters that aren't valid Ruby identifiers (e.g.
+  `xml:lang`) fall back to a quoted string key inside `**{ "xml:lang" => x }`.
 
 ## Helper mappings
 

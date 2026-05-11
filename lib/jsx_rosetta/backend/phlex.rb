@@ -313,7 +313,7 @@ module JsxRosetta
         sym_parts = []
         str_parts = []
         plain_attrs.each { |a| append_attribute_part(a, translator, sym_parts, str_parts) }
-        str_parts << data_action_entry(events, translator) if events.any?
+        sym_parts << data_action_entry(events, translator) if events.any?
 
         joined = build_attribute_list(sym_parts, str_parts, spreads, translator)
         joined.empty? ? "" : "(#{joined})"
@@ -351,11 +351,19 @@ module JsxRosetta
         { string_key: false, source: "class: #{ruby}" }
       end
 
+      # Phlex 2.x auto-converts underscores in symbol keys to hyphens in HTML
+      # attribute names (`data_testid: "x"` → `<h1 data-testid="x">`). So we
+      # just hyphen-to-underscore the JSX attr name and emit it as a normal
+      # kwarg — no `**{ ... }` splat dance. camelCase names (`viewBox`,
+      # `preserveAspectRatio`) preserve as-is since Phlex only converts
+      # underscores. Names that aren't valid Ruby identifiers after the
+      # hyphen swap (rare: `xml:lang` and friends) fall back to a quoted
+      # string key inside the splat.
       def plain_attribute_part(attribute, translator)
         value_ruby = attribute_value_to_ruby(attribute.value, translator)
-        if attribute.name.match?(VALID_IDENTIFIER)
-          name = AST::Inflector.underscore(attribute.name)
-          { string_key: false, source: "#{name}: #{value_ruby}" }
+        ruby_name = attribute.name.tr("-", "_")
+        if ruby_name.match?(VALID_IDENTIFIER)
+          { string_key: false, source: "#{ruby_name}: #{value_ruby}" }
         else
           { string_key: true, source: "#{attribute.name.inspect} => #{value_ruby}" }
         end
@@ -390,7 +398,7 @@ module JsxRosetta
         sym_parts = []
         str_parts = []
         plain_attrs.each { |a| append_attribute_part(a, translator, sym_parts, str_parts) }
-        str_parts << data_action_entry(events, translator) if events.any?
+        sym_parts << data_action_entry(events, translator) if events.any?
 
         build_attribute_list(sym_parts, str_parts, spreads, translator)
       end
@@ -433,9 +441,8 @@ module JsxRosetta
         translated ? translated.ruby : expression
       end
 
-      # Build the `"data-action" => "..."` entry for the splat hash. Always
-      # a string-keyed hash entry (hyphenated key name) — returned as the
-      # raw source string ready to splice into `**{ ... }`.
+      # Build the `data_action: "..."` kwarg. Phlex auto-hyphenates the
+      # `data_action` symbol key to `data-action` in the rendered HTML.
       def data_action_entry(events, translator)
         descriptors = events.map { |event| event_descriptor(event, translator) }
         joined = if descriptors.size == 1
@@ -443,7 +450,7 @@ module JsxRosetta
                  else
                    %("#{descriptors.map { |d| descriptor_in_string(d) }.join(" ")}")
                  end
-        %("data-action" => #{joined})
+        "data_action: #{joined}"
       end
 
       def event_descriptor(event, translator)
