@@ -77,13 +77,14 @@ module JsxRosetta
         @namespace = namespace
       end
 
-      def emit(component)
+      def emit(component, source_filename: nil)
         translator = build_translator(component)
         @stimulus_identifier = component.stimulus_methods.any? ? stimulus_identifier(component) : nil
         @lambda_methods = []
         @lambda_method_counts = {}
         @event_handler_methods = []
         @emit_module_prefix = first_emit_for_module_bindings?(component)
+        @source_filename = source_filename
 
         files = [File.new(path: ruby_path(component), contents: clean_output(render_ruby_class(component, translator)))]
         if component.stimulus_methods.any?
@@ -175,7 +176,40 @@ module JsxRosetta
       # through unchanged.
       def class_name(component)
         base = "#{component.name[0].upcase}#{component.name[1..]}"
-        @suffix ? "#{base}#{@suffix}" : base
+        suffix = effective_suffix_for(base, source_filename: @source_filename)
+        suffix ? "#{base}#{suffix}" : base
+      end
+
+      # Pick the suffix to append to a class name, applying two rules in
+      # order:
+      #
+      # 1. **Page detection.** Source name ends in `Page` OR the source
+      #    file path contains `/pages/` (Next.js / Nuxt convention) →
+      #    use the literal `Page` suffix, regardless of the configured
+      #    `@suffix`. Lets the gem keep `<HomePage>` / `pages/home.tsx`
+      #    landing as `HomePage` / `home_page.rb` even when the user
+      #    passes `--phlex-suffix=Component` for the rest of the codebase.
+      # 2. **No double-suffix.** When the name already ends with the
+      #    chosen suffix (e.g. source `HomePage` with the `Page` suffix,
+      #    or source `FooComponent` with the `Component` suffix), skip
+      #    the append. Returns nil so callers don't concatenate.
+      #
+      # `source_filename` is the absolute or repo-relative path of the
+      # JSX source; nil when callers translate raw source strings
+      # without filename context (then only the name-based signal fires).
+      def effective_suffix_for(name, source_filename: nil)
+        suffix = page?(name, source_filename) ? "Page" : @suffix
+        return nil unless suffix
+        return nil if name.end_with?(suffix)
+
+        suffix
+      end
+
+      def page?(name, source_filename)
+        return true if name.end_with?("Page")
+        return false unless source_filename
+
+        source_filename.include?("/pages/")
       end
 
       def ruby_path(component)
@@ -544,9 +578,14 @@ module JsxRosetta
       # JSX `<Foo>` → `Foo` (default), `FooComponent` (suffix), or just
       # `Foo` again under namespace (Ruby's constant lookup finds the
       # peer class). JSX `<Foo.Bar>` → `Foo::Bar` (plus suffix when set).
+      # `<HomePage>` keeps the `Page` suffix without doubling (no
+      # `HomePageComponent`) — see effective_suffix_for. The path-based
+      # page detection doesn't apply here: an invocation only carries
+      # the JSX tag name, not the target file's path.
       def component_class_reference(jsx_tag)
         segments = jsx_tag.split(".")
-        segments[-1] = "#{segments.last}#{@suffix}" if @suffix
+        suffix = effective_suffix_for(segments.last)
+        segments[-1] = "#{segments.last}#{suffix}" if suffix
         segments.join("::")
       end
 

@@ -19,7 +19,7 @@ module JsxRosetta
     ast = parse(source, typescript: typescript, source_filename: source_filename)
     components = IR.lower_all(ast, source: source)
     backend_instance = backend_for(backend, **legacy_options, **backend_options)
-    components.flat_map { |component| backend_instance.emit(component) }
+    components.flat_map { |component| backend_instance.emit(component, source_filename: source_filename) }
   end
 
   def self.backend_for(name, **options)

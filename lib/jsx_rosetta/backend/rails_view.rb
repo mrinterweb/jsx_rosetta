@@ -15,7 +15,7 @@ module JsxRosetta
     # source JSX includes inline event handlers, a Stimulus controller is
     # still emitted as a sibling file alongside the .html.erb.
     class RailsView < ViewComponent
-      def emit(component)
+      def emit(component, source_filename: nil) # rubocop:disable Lint/UnusedMethodArgument
         prop_names = component.props.map(&:name)
         prop_names << component.rest_prop_name if component.rest_prop_name
         translator = ExpressionTranslator.new(

@@ -82,7 +82,7 @@ module JsxRosetta
         @layout = layout
       end
 
-      def emit(component)
+      def emit(component, source_filename: nil) # rubocop:disable Lint/UnusedMethodArgument
         translator = build_translator(component)
         base_name = "#{AST::Inflector.underscore(component.name)}_component"
         @stimulus_identifier = component.stimulus_methods.any? ? stimulus_identifier(component) : nil

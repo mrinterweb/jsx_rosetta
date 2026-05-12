@@ -711,6 +711,81 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     end
   end
 
+  describe "page-aware class naming" do
+    it "skips the configured suffix when the source name ends in `Page`" do
+      # `HomePage` + suffix `Component` used to emit `HomePageComponent`
+      # — verbose and redundant since `Page` is already a role marker.
+      source = "export default function HomePage() { return <p />; }"
+      backend = described_class.new(suffix: "Component")
+      component = JsxRosetta.lower(source)
+      file = backend.emit(component).first
+
+      expect(file.path).to eq("home_page.rb")
+      expect(file.contents).to include("class HomePage < Phlex::HTML")
+      expect(file.contents).not_to include("HomePageComponent")
+    end
+
+    it "treats `/pages/` paths as page sources and appends `Page` (not the configured suffix)" do
+      source = "export default function Home() { return <p />; }"
+      backend = described_class.new(suffix: "Component")
+      component = JsxRosetta.lower(source)
+      file = backend.emit(component, source_filename: "app/pages/home.tsx").first
+
+      expect(file.path).to eq("home_page.rb")
+      expect(file.contents).to include("class HomePage < Phlex::HTML")
+    end
+
+    it "doesn't append `Page` twice for an already-Page-named source under /pages/" do
+      source = "export default function HomePage() { return <p />; }"
+      backend = described_class.new(suffix: "Component")
+      component = JsxRosetta.lower(source)
+      file = backend.emit(component, source_filename: "app/pages/HomePage.tsx").first
+
+      expect(file.path).to eq("home_page.rb")
+      expect(file.contents).to include("class HomePage < Phlex::HTML")
+      expect(file.contents).not_to include("HomePagePage")
+    end
+
+    it "keeps the configured suffix for non-page components" do
+      source = "export default function Button() { return <button />; }"
+      backend = described_class.new(suffix: "Component")
+      component = JsxRosetta.lower(source)
+      file = backend.emit(component).first
+
+      expect(file.path).to eq("button_component.rb")
+      expect(file.contents).to include("class ButtonComponent < Phlex::HTML")
+    end
+
+    it "uses the smart-suffix rule for inline component invocations (no double-Page)" do
+      # `<HomePage/>` referenced from another component should invoke
+      # `HomePage.new`, not `HomePageComponent.new`.
+      source = <<~JSX
+        export default function App() {
+          return <div><HomePage /><Button /></div>;
+        }
+      JSX
+      backend = described_class.new(suffix: "Component")
+      component = JsxRosetta.lower(source)
+      content = backend.emit(component).first.contents
+
+      expect(content).to include("render HomePage.new")
+      expect(content).to include("render ButtonComponent.new")
+      expect(content).not_to include("HomePageComponent")
+    end
+
+    it "doesn't double a `Component`-named source either" do
+      # Same no-double rule, but with the configured `Component` suffix.
+      source = "export default function FooComponent() { return <p />; }"
+      backend = described_class.new(suffix: "Component")
+      component = JsxRosetta.lower(source)
+      file = backend.emit(component).first
+
+      expect(file.path).to eq("foo_component.rb")
+      expect(file.contents).to include("class FooComponent < Phlex::HTML")
+      expect(file.contents).not_to include("FooComponentComponent")
+    end
+  end
+
   describe "JSX as attribute value" do
     it "lowers a bare-component JSX value to `ClassRef.new` (no children, no kwargs)" do
       source = "function X() { return <Suspense fallback={<Loading />} />; }"
