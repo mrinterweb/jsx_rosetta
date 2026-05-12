@@ -82,6 +82,8 @@ module JsxRosetta
         @stimulus_identifier = component.stimulus_methods.any? ? stimulus_identifier(component) : nil
         @lambda_methods = []
         @lambda_method_counts = {}
+        @event_handler_methods = []
+        @emit_module_prefix = first_emit_for_module_bindings?(component)
 
         files = [File.new(path: ruby_path(component), contents: clean_output(render_ruby_class(component, translator)))]
         if component.stimulus_methods.any?
@@ -91,6 +93,22 @@ module JsxRosetta
           )
         end
         files
+      end
+
+      # When a source file lowers to multiple sibling components, lower_all
+      # attaches the *same* module_bindings array to every sibling. Emitting
+      # the constants TODO block on each one duplicates 40-line GraphQL
+      # blocks across every emitted .rb file. Track the array identities
+      # we've seen and only emit the prefix the first time.
+      def first_emit_for_module_bindings?(component)
+        return true if component.module_bindings.empty?
+
+        @seen_module_bindings ||= Set.new
+        key = component.module_bindings.object_id
+        return false if @seen_module_bindings.include?(key)
+
+        @seen_module_bindings << key
+        true
       end
 
       def build_translator(component)
@@ -185,6 +203,10 @@ module JsxRosetta
       # a Ruby constant or moves it to a Rails initializer.
       def render_module_bindings_prefix(component)
         return "" if component.module_bindings.empty?
+        # Sibling components from the same source file share the same
+        # module_bindings list; emit the prefix only on the first sibling
+        # so a 40-line GraphQL TODO doesn't appear in every sibling file.
+        return "" unless @emit_module_prefix
 
         lines = ["# TODO: module-level constants — translate to Ruby constants " \
                  "or move to a Rails initializer:"]
@@ -257,10 +279,30 @@ module JsxRosetta
         lambda_methods = (@lambda_methods || []).map do |entry|
           render_lambda_method_definition(entry[:method_name], entry[:lambda], translator)
         end
-        all = render_methods + lambda_methods
+        event_handlers = (@event_handler_methods || []).map do |entry|
+          render_event_handler_method_definition(entry[:method_name], entry[:handler], entry[:attr_name])
+        end
+        all = render_methods + lambda_methods + event_handlers
         return nil if all.empty?
 
         "  private\n\n#{all.join("\n\n")}"
+      end
+
+      # Emit one EventHandler as a stub method on the class. The JS body
+      # is preserved verbatim as a TODO comment; the method itself is a
+      # no-op so the file loads and the receiving component sees a real
+      # `Method` object via `method(:name)`. Parameter names snake_case
+      # from JS conventions to Ruby identifiers.
+      def render_event_handler_method_definition(method_name, handler, attr_name)
+        snake_params = handler.params.map { |p| AST::Inflector.underscore(p) }
+        signature = snake_params.empty? ? method_name : "#{method_name}(#{snake_params.join(", ")})"
+        body_lines = comment_lines(handler.body_source).map { |l| "    #{l}" }
+        [
+          "  def #{signature}",
+          "    # TODO: translate the original JSX `#{attr_name}` handler:",
+          *body_lines,
+          "  end"
+        ].join("\n")
       end
 
       # Emit one RenderMethod as a private method on the class. Params are
@@ -751,15 +793,45 @@ module JsxRosetta
 
       # Emit one attribute as either a {string_key: false, source: "id: @x"}
       # (Ruby-kwarg-safe name) or {string_key: true, source: '"xml:lang" => @x'}
-      # (rare; non-identifier name — goes into a **{ ... } splat).
+      # (rare; non-identifier name — goes into a **{ ... } splat). Returns
+      # nil to signal "drop this attribute entirely" — used when every style
+      # declaration dropped (would emit `style: ''`) or every plain-attribute
+      # value bailed (would emit `attr: nil`); the TODO comment above the
+      # element already describes what was lost.
       def phlex_attribute_part(attribute, translator, context:, todos:, indent: 0)
         case attribute
         when IR::StyleBinding then class_attribute_part(attribute.expression, translator)
         when IR::ClassList then { string_key: false, source: "class: #{class_list_to_ruby_string(attribute, translator)}" }
-        when IR::Style then { string_key: false, source: "style: #{style_to_ruby_string(attribute, translator, todos: todos)}" }
+        when IR::Style then style_attribute_part(attribute, translator, todos: todos)
         when IR::Attribute
           plain_attribute_part(attribute, translator, context: context, todos: todos, indent: indent)
         end
+      end
+
+      # Skip the `style:` kwarg entirely when every declaration failed to
+      # translate — `style: ''` is invalid HTML output and pure noise; the
+      # per-declaration TODO comments above the element preserve what was
+      # there.
+      def style_attribute_part(style, translator, todos:)
+        ruby = style_to_ruby_string(style, translator, todos: todos)
+        return nil if empty_style_ruby?(ruby)
+
+        { string_key: false, source: "style: #{ruby}" }
+      end
+
+      def empty_style_ruby?(ruby)
+        ["''", '""'].include?(ruby)
+      end
+
+      # A "dropped" attribute is one where translation failed AND the
+      # fallback was the literal `nil` string. We detect this by watching
+      # whether a TODO was appended during the value computation: a real
+      # `attr={null}` in the source produces `nil` *without* a TODO and
+      # should still emit (preserves intent); a failed translation
+      # produces `nil` *with* a TODO and we drop the kwarg to keep output
+      # clean — the TODO above the element already describes the loss.
+      def dropped_value?(value_ruby, todos_before, todos_after)
+        value_ruby == "nil" && todos_after.length > todos_before
       end
 
       def class_attribute_part(expression, translator)
@@ -778,7 +850,10 @@ module JsxRosetta
       # Names that aren't valid Ruby identifiers after conversion (rare:
       # `xml:lang` and friends) fall back to a quoted string key.
       def plain_attribute_part(attribute, translator, context:, todos:, indent: 0)
+        todos_before = todos.length
         value_ruby = attribute_value_to_ruby(attribute.name, attribute.value, translator, todos: todos, indent: indent)
+        return nil if dropped_value?(value_ruby, todos_before, todos)
+
         ruby_name = case context
                     when :component then AST::Inflector.underscore(attribute.name)
                     else attribute.name.tr("-", "_")
@@ -798,6 +873,7 @@ module JsxRosetta
         when IR::ObjectLiteral then render_object_literal_value(value, translator, todos: todos, indent: indent)
         when IR::ArrayLiteral then render_array_literal_value(value, translator, todos: todos, indent: indent)
         when IR::Lambda then render_lambda_method_reference(value, translator, attr_name: name)
+        when IR::EventHandler then render_event_handler_method_reference(value, attr_name: name)
         when IR::ComponentInvocation
           component_invocation_value(value, translator, todos: todos, attr_name: name)
         when IR::Element, IR::Fragment
@@ -878,6 +954,7 @@ module JsxRosetta
         when IR::ArrayLiteral
           render_array_literal_value(value, translator, todos: todos, indent: indent, force_inline: force_inline)
         when IR::Lambda then render_lambda_method_reference(value, translator, attr_name: attr_name)
+        when IR::EventHandler then render_event_handler_method_reference(value, attr_name: attr_name)
         when IR::Interpolation then interpolated_attribute_value(attr_name || "<element>", value, translator,
                                                                  todos: todos)
         when IR::ComponentInvocation
@@ -918,6 +995,31 @@ module JsxRosetta
         @lambda_method_counts[base] ||= 0
         @lambda_method_counts[base] += 1
         @lambda_method_counts[base] == 1 ? base : "#{base}#{@lambda_method_counts[base]}"
+      end
+
+      # Inline arrow event handler on a PascalCase tag — `onClick={() =>
+      # doX()}` on `<Button>`. Extract to a stub method on the class and
+      # reference via `method(:handle_click)` at the kwarg position so the
+      # receiving component has a callable. The body translation is left
+      # to the human reviewer (the JS source is preserved as a TODO
+      # comment inside the method), but the structural wiring is intact.
+      def render_event_handler_method_reference(handler, attr_name:)
+        @event_handler_methods ||= []
+        base = event_handler_method_base(attr_name)
+        method_name = unique_lambda_method_name(base)
+        @event_handler_methods << { handler: handler, method_name: method_name, attr_name: attr_name }
+        "method(:#{method_name})"
+      end
+
+      # Map a JSX attribute name to an idiomatic Ruby handler-method name.
+      # `onClick` → `handle_click` (mirrors React's `handleClick` convention,
+      # snake_cased). Non-event attrs (rare — a callback prop with no `on`
+      # prefix) fall back to `<attr>_handler`.
+      def event_handler_method_base(attr_name)
+        return "anonymous_handler" if attr_name.nil? || attr_name.empty?
+
+        snake = AST::Inflector.underscore(attr_name)
+        snake.start_with?("on_") ? "handle_#{snake.delete_prefix("on_")}" : "#{snake}_handler"
       end
 
       # Attribute-position interpolation. Three failure modes:

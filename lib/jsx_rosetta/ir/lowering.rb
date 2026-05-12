@@ -1741,10 +1741,16 @@ module JsxRosetta
           return Interpolation.new(expression: source_of(arrow))
         end
 
+        param_names = params.map { |p| p[:name] }
         body = lower_lambda_body(arrow[:body])
-        return Interpolation.new(expression: source_of(arrow)) unless body
+        # JSX-bearing body → render lambda (translated to a Phlex render
+        # method). Non-JSX body → opaque event handler (the body becomes
+        # a verbatim TODO inside a stub method on the class). Without
+        # this fork, every `onClick={() => doX()}` on a PascalCase tag
+        # used to bail to Interpolation and drop with a TODO.
+        return Lambda.new(params: param_names, body: body) if body
 
-        Lambda.new(params: params.map { |p| p[:name] }, body: body)
+        EventHandler.new(params: param_names, body_source: source_of(arrow[:body]))
       end
 
       def lower_lambda_body(body)

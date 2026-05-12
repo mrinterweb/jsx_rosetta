@@ -394,6 +394,25 @@ module JsxRosetta
       include Node
     end
 
+    # An arrow/function expression whose body isn't JSX — typically a
+    # JSX event handler on a PascalCase component (`onClick={() => doX()}`)
+    # or a non-JSX-returning callback prop. We can't translate arbitrary
+    # JS bodies to Ruby procedurally, so backends emit a stub method on
+    # the class with the verbatim JS body preserved as a TODO comment;
+    # the kwarg at the use site becomes `method(:method_name)` so the
+    # receiving component has a callable reference and the structural
+    # attachment is preserved end-to-end.
+    #
+    # params      : [String]
+    # body_source : String — verbatim JS of the arrow/function body
+    #               (the part after `=>` for arrows, or the full block
+    #               body for FunctionExpressions). Preserved as a
+    #               comment in the emitted method so the reviewer can
+    #               translate the behavior to Ruby.
+    EventHandler = Data.define(:params, :body_source) do
+      include Node
+    end
+
     # A render-prop child: `<Form.List>{(fields) => <div>{fields}</div>}</Form.List>`.
     # Backends emit this as a Ruby block on the render call, with the params
     # bound as block arguments. Distinct from Loop (which iterates an

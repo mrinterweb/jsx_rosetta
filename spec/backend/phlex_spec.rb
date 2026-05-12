@@ -405,9 +405,11 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       JSX
       content = file_contents(source, "x.rb")
 
-      expect(content).to include("value: nil")
+      # Dropped attributes that bailed to nil are now omitted entirely
+      # (the TODO comment above the element preserves what was lost).
+      expect(content).not_to match(/value:\s*nil/)
       expect(content).to include("# TODO: attribute \"value\" dropped")
-      # Verify the kwarg position has `nil`, not a partial ternary fragment.
+      # Verify no partial ternary fragment leaked into a kwarg position.
       expect(content).not_to match(/value:\s*"Organization"/)
       expect(content).not_to match(/value:\s*@values\.party_type/)
     end
@@ -553,9 +555,10 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       content = file_contents(source, "x.rb")
 
       # The attribute splices its value through the translator; with bailout,
-      # the value is nil and the TODO surfaces the verbatim JS.
+      # the value can't translate, the kwarg drops entirely, and a TODO
+      # surfaces the verbatim JS.
       expect(content).to include('# TODO: attribute "data-x" dropped — couldn\'t translate: styles.foo')
-      expect(content).to include("data_x: nil")
+      expect(content).not_to match(/data_x:/)
       # And no executable `styles.foo` reference outside the comment.
       expect(content.lines.reject { |l| l.lstrip.start_with?("#") }.join).not_to include("styles.foo")
     end
@@ -638,6 +641,76 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     end
   end
 
+  describe "inline arrow handlers on component tags" do
+    it "extracts an onClick arrow to a stub `handle_click` method on the class" do
+      # Previously dropped to `on_click: nil` + TODO; now the structural
+      # attachment is preserved end-to-end via `method(:handle_click)`.
+      source = "function X() { return <Button onClick={() => doX()}>save</Button>; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("on_click: method(:handle_click)")
+      expect(content).to match(/private\n\n\s+def handle_click\b/)
+      expect(content).to include("# TODO: translate the original JSX `onClick` handler:")
+      expect(content).to include("doX()")
+    end
+
+    it "carries arrow params through to the method signature (snake_cased)" do
+      source = "function X() { return <Input onChange={(newValue) => log(newValue)} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("on_change: method(:handle_change)")
+      expect(content).to include("def handle_change(new_value)")
+    end
+
+    it "uses `<attr>_handler` for non-event-style callback prop names" do
+      source = "function X() { return <Editor save={(v) => persist(v)} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("save: method(:save_handler)")
+      expect(content).to include("def save_handler(v)")
+    end
+
+    it "preserves the existing bare-identifier passthrough (no new method generated)" do
+      # `onClick={onSave}` where onSave is a prop should still emit
+      # `on_click: @on_save` — only inline arrows trigger extraction.
+      source = "function X({ onSave }) { return <Button onClick={onSave}>x</Button>; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("on_click: @on_save")
+      expect(content).not_to include("def handle_click")
+    end
+
+    it "preserves event-handler arrows on HTML elements as Stimulus actions (unchanged path)" do
+      # Stimulus extraction for HTML-element on* handlers is unrelated and
+      # must still fire. This guards against the new EventHandler path
+      # accidentally swallowing HTML-event arrows.
+      source = "function X() { return <button onClick={() => doX()}>x</button>; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to match(/data_controller:|data_action:/)
+      expect(content).not_to include("on_click: method(:handle_click)")
+    end
+
+    it "uniquifies method names across multiple handlers with the same event" do
+      source = <<~JSX
+        function X() {
+          return (
+            <>
+              <Button onClick={() => a()}>a</Button>
+              <Button onClick={() => b()}>b</Button>
+            </>
+          );
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("on_click: method(:handle_click)")
+      expect(content).to include("on_click: method(:handle_click2)")
+      expect(content).to include("def handle_click")
+      expect(content).to include("def handle_click2")
+    end
+  end
+
   describe "JSX as attribute value" do
     it "lowers a bare-component JSX value to `ClassRef.new` (no children, no kwargs)" do
       source = "function X() { return <Suspense fallback={<Loading />} />; }"
@@ -688,8 +761,65 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       source = "function X() { return <Tooltip title={<span>hover</span>} />; }"
       content = file_contents(source, "x.rb")
 
-      expect(content).to include("title: nil")
+      # Dropped attributes now omit the kwarg entirely; the TODO carries
+      # the source.
+      expect(content).not_to match(/title:/)
       expect(content).to include("# TODO: attribute \"title\" dropped — couldn't inline JSX value: <span...>")
+    end
+  end
+
+  describe "empty / dropped kwargs are omitted entirely" do
+    it "omits `style:` when every style declaration dropped (no `style: ''` noise)" do
+      source = <<~JSX
+        import { token } from "antd";
+        function X() {
+          return <div style={{ padding: token.paddingLG, color: token.colorInfo }} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      # Both style decls drop to TODO above; the kwarg itself is omitted.
+      expect(content).to include("# TODO: style declaration \"padding\" dropped")
+      expect(content).not_to match(/style:\s*''/)
+      expect(content).not_to match(/style:\s*""/)
+    end
+
+    it "keeps `style:` when at least one declaration translates" do
+      source = <<~JSX
+        import { token } from "antd";
+        function X() {
+          return <div style={{ padding: token.paddingLG, color: "red" }} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("color: red;")
+      expect(content).to match(/style:/)
+    end
+
+    it "omits an attribute whose value bailed to nil with a TODO" do
+      # Previously emitted `data_x: nil` plus a TODO. Now the kwarg drops
+      # entirely — the TODO above the element is enough.
+      source = <<~JSX
+        import { token } from "antd";
+        function X() {
+          return <div data-x={token.foo} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: attribute \"data-x\" dropped")
+      expect(content).not_to match(/data_x:/)
+    end
+
+    it "preserves an attribute whose value is an explicit `null` in source" do
+      # `data-x={null}` is intentional in JSX — the receiving component
+      # might react differently to null vs missing. Translation succeeded
+      # (no TODO), so we keep the kwarg.
+      source = "function X() { return <div data-x={null} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("data_x: nil")
     end
   end
 
@@ -1051,6 +1181,26 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       content = file_contents("function X() { return <p />; }", "x.rb")
 
       expect(content).not_to include("module-level constants")
+    end
+
+    it "emits the module-bindings TODO only on the first sibling component (no duplication)" do
+      # A source file with multiple components used to repeat the same
+      # module-level TODO block verbatim in every emitted .rb. Now the
+      # first sibling carries it and the rest stay clean.
+      source = <<~JSX
+        const FOO = 400;
+        function A() { return <p>{FOO}</p>; }
+        function B() { return <p>{FOO}</p>; }
+        function C() { return <p>{FOO}</p>; }
+      JSX
+      backend = described_class.new
+      components = JsxRosetta::IR.lower_all(JsxRosetta.parse(source), source: source)
+      files = components.flat_map { |c| backend.emit(c) }
+      contents = files.to_h { |f| [f.path, f.contents] }
+
+      expect(contents["a.rb"]).to include("# TODO: module-level constants")
+      expect(contents["b.rb"]).not_to include("# TODO: module-level constants")
+      expect(contents["c.rb"]).not_to include("# TODO: module-level constants")
     end
   end
 
