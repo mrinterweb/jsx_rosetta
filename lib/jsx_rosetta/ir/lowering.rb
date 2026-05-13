@@ -1835,10 +1835,18 @@ module JsxRosetta
       def promote_arrow_to_stimulus(attr_name, event, arrow_node, name_hint:)
         base = name_hint || default_stimulus_method_name(attr_name)
         method_name = stimulus_method_name(base)
-        body_source = source_of(arrow_node[:body])
-        params = Array(arrow_node[:params]).map { |p| p[:name] }.compact
+        body_node = arrow_node[:body]
+        body_source = source_of(body_node)
+        # Preserve nil entries for non-Identifier params (ObjectPattern,
+        # ArrayPattern, RestElement) so emit-time bails to TODO rather
+        # than pasting a body that references undefined locals.
+        params = Array(arrow_node[:params]).map { |p| p.type == "Identifier" ? p[:name] : nil }
         @stimulus_methods << StimulusMethod.new(
-          name: method_name, body_source: body_source, original_name: base, params: params
+          name: method_name,
+          body_source: body_source,
+          original_name: base,
+          params: params,
+          body_is_block: body_node.type == "BlockStatement"
         )
         @local_arrows.delete(name_hint) if name_hint
         StimulusBinding.new(event: event, method_name: method_name)
@@ -1852,7 +1860,11 @@ module JsxRosetta
         method_name = stimulus_method_name(identifier_name)
         body_source = "// originally bound to: #{identifier_name}"
         @stimulus_methods << StimulusMethod.new(
-          name: method_name, body_source: body_source, original_name: identifier_name, params: []
+          name: method_name,
+          body_source: body_source,
+          original_name: identifier_name,
+          params: [],
+          body_is_block: false
         )
         StimulusBinding.new(event: event, method_name: method_name)
       end

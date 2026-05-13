@@ -313,6 +313,55 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("handleReset2(event) {")
       expect(content).to include('// NOTE: method renamed from "handleReset"')
     end
+
+    it "bails to TODO when the arrow has a destructured parameter" do
+      # `({ target }) => …` — the body references `target` but pasting
+      # without the destructuring would NameError. Bail to TODO so the
+      # reviewer translates the destructure intentionally.
+      destructured = "function X() { return <button onClick={({ target }) => target.dataset.x = 'y'}>x</button>; }"
+      content = file_contents(destructured, "x_controller.js")
+
+      expect(content).to include("// TODO: translate from the original JSX handler:")
+    end
+
+    it "bails to TODO when the arrow has a rest parameter" do
+      rest = "function X() { return <button onClick={(...args) => doX(args)}>x</button>; }"
+      content = file_contents(rest, "x_controller.js")
+
+      expect(content).to include("// TODO: translate from the original JSX handler:")
+    end
+
+    it "still pastes when the body calls a DOM method whose name starts with `set`" do
+      # `e.setAttribute(` / `el.setPointerCapture(` look like top-level
+      # state setters under a `\\bset[A-Z]` match because `\\b` matches at
+      # the `.`. The tightened regex (negative lookbehind on `[.\\w]`)
+      # only fires on bare `setX(`, not `obj.setX(`.
+      dom_source = <<~JSX
+        function X() {
+          return <button onClick={(e) => { e.target.setAttribute("data-x", "1"); }}>x</button>;
+        }
+      JSX
+      content = file_contents(dom_source, "x_controller.js")
+
+      expect(content).to include('e.target.setAttribute("data-x", "1")')
+      expect(content).not_to include("// TODO: translate from the original JSX handler:")
+    end
+
+    it "does NOT strip outer braces on an expression-form arrow body" do
+      # `() => ({ x: 1 })` — Babel hands back `{ x: 1 }` as the body
+      # source. Stripping braces would yield `x: 1`, a JS label
+      # statement (no-op). With the AST-aware check we only strip
+      # when the body was a BlockStatement.
+      expr_source = <<~JSX
+        function X() {
+          return <button onClick={() => ({ x: 1 })}>x</button>;
+        }
+      JSX
+      content = file_contents(expr_source, "x_controller.js")
+
+      expect(content).to include("{ x: 1 }")
+      expect(content).not_to match(/^\s*x: 1\s*$/)
+    end
   end
 
   describe "TODO markers" do

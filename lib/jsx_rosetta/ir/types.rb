@@ -371,12 +371,17 @@ module JsxRosetta
     #                 `name != original_name`, backends emit a collision
     #                 marker comment in the generated controller JS so the
     #                 reviewer can see the silent rename.
-    # params        : [String] — original arrow/function parameter names
-    #                 (e.g. `["e"]`, `["event"]`, or `[]` for `() => …`).
-    #                 Backends use the first param as the Stimulus method's
-    #                 parameter name when pasting the body verbatim, so the
-    #                 body's references to that name still resolve.
-    StimulusMethod = Data.define(:name, :body_source, :original_name, :params) do
+    # params        : [String | nil] — original arrow/function parameter
+    #                 names (e.g. `["e"]`, `["event"]`, or `[]` for
+    #                 `() => …`). A `nil` entry signals a non-identifier
+    #                 param (destructured `({target}) =>`, rest `(...args) =>`)
+    #                 that the pasted body can't safely reference — backends
+    #                 bail to the TODO form when any entry is nil.
+    # body_is_block : Boolean — true when the arrow body was a BlockStatement
+    #                 (`(e) => { … }`), false for an expression-form body
+    #                 (`(e) => doX(e)`). Backends use this to decide whether
+    #                 to strip outer braces when pasting verbatim.
+    StimulusMethod = Data.define(:name, :body_source, :original_name, :params, :body_is_block) do
       include Node
     end
 

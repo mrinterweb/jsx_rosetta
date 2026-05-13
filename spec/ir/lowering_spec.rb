@@ -1749,7 +1749,8 @@ RSpec.describe JsxRosetta::IR::Lowering do
             name: "onClick",
             body_source: "// originally bound to: onClick",
             original_name: "onClick",
-            params: []
+            params: [],
+            body_is_block: false
           )
         ],
         react_hooks: [],

@@ -1484,7 +1484,7 @@ module JsxRosetta
                    "to avoid collision with an earlier handler"
         end
 
-        if safe_to_paste_handler?(method.body_source)
+        if safe_to_paste_handler?(method)
           lines.concat(pasted_handler_lines(method))
         else
           lines.concat(todo_handler_lines(method))
@@ -1494,25 +1494,36 @@ module JsxRosetta
       end
 
       # Heuristic for "this JS body is safe to drop into a Stimulus method
-      # verbatim." Bails out when the body references React state setters
-      # (`setX(`), React hooks (`useX(`), or comment-form pseudo-bodies from
-      # identifier-bound handlers we never resolved (`// originally bound to:`).
-      def safe_to_paste_handler?(body)
+      # verbatim." Bails out when:
+      #   - any arrow param wasn't a plain Identifier (destructured / rest) —
+      #     pasting would reference an undefined local at runtime;
+      #   - the body is the identifier-bound pseudo-comment we synthesize
+      #     when an `onClick={onChange}` reference resolved to no arrow;
+      #   - the body calls a top-level React state setter (`setX(`) or hook
+      #     (`useX(`) — the negative lookbehind on `[.\w]` makes sure DOM
+      #     methods like `e.setAttribute(` / `el.setPointerCapture(` don't
+      #     trip the guard.
+      def safe_to_paste_handler?(method)
+        return false unless method.params.all?
+
+        body = method.body_source
         return false if body.lstrip.start_with?("//")
-        return false if body =~ /\bset[A-Z]\w*\(/
-        return false if body =~ /\buse[A-Z]\w*\(/
+        return false if body =~ /(?<![.\w])set[A-Z]\w*\(/
+        return false if body =~ /(?<![.\w])use[A-Z]\w*\(/
 
         true
       end
 
       # Paste the JS body into the method, using the original arrow's first
-      # parameter name (so the body's references still resolve). Strip an
-      # outer `{ … }` wrapper if present (arrow bodies can be either expr or
-      # block form); reindent inner lines to 4 spaces.
+      # parameter name (so the body's references still resolve). Strip the
+      # outer `{ … }` wrapper only when the body was an arrow BlockStatement
+      # (`(e) => { … }`), not an expression-form body like `(e) => ({ x: 1 })`
+      # which Babel hands back as `{ x: 1 }` already — stripping would yield
+      # `x: 1`, a JS label statement (no-op).
       def pasted_handler_lines(method)
         param = method.params.first || "event"
         body = method.body_source.strip
-        body = body[1..-2].strip if body.start_with?("{") && body.end_with?("}")
+        body = body[1..-2].strip if method.body_is_block
         inner_lines = body.split("\n").map { |l| "    #{l.lstrip}" }
         [
           "  #{method.name}(#{param}) {",
