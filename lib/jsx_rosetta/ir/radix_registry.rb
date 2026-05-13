@@ -21,46 +21,63 @@ module JsxRosetta
     # package and the older `@radix-ui/react-*` per-primitive packages.
     RADIX_SOURCE_PATTERN = %r{\A(?:radix-ui|@radix-ui/react-[\w-]+)\z}
 
+    # Local binding names that resolve to Radix's `Slot` primitive.
+    # Matches `Slot` (shadcn-v4 umbrella) and `SlotPrimitive` (older
+    # convention). Anything looser would silently drop user-defined
+    # components whose names happen to start with "Slot".
+    SLOT_LOCAL_NAME_PATTERN = /\ASlot(?:Primitive)?\z/
+
     module RadixRegistry
-      # Each entry maps [LocalImportName, MemberName] →
+      # Each entry maps [PrimitiveBaseName, MemberName] →
       #   { tag: <html-tag>, attrs: { <fixed kwarg name> => <value> } }
       # The `attrs` are merged into the element's lowered attributes (the
       # consumer's own kwargs win on conflict — see `merge_radix_attrs`).
+      #
+      # `PrimitiveBaseName` is the *canonical* Radix primitive name
+      # (e.g. `Separator`); the lookup strips an optional `Primitive` suffix
+      # from the consumer's local binding before keying in, so both shadcn-v3
+      # (`import { Separator as SeparatorPrimitive } from "radix-ui"`) and
+      # shadcn-v4 (`import { Separator } from "radix-ui"`) umbrella idioms
+      # resolve. Namespace imports (`import * as SeparatorPrimitive from
+      # "@radix-ui/react-separator"`) also strip the suffix.
       MAP = {
         # Separator / Label / Avatar / Switch primitives — the shapes we hit
         # most often in the bulk shadcn translation pass.
-        %w[SeparatorPrimitive Root] => { tag: "div", attrs: { role: "separator" } },
-        %w[LabelPrimitive Root] => { tag: "label", attrs: {} },
-        %w[AvatarPrimitive Root] => { tag: "span", attrs: {} },
-        %w[AvatarPrimitive Image] => { tag: "img", attrs: {} },
-        %w[AvatarPrimitive Fallback] => { tag: "span", attrs: {} },
-        %w[SwitchPrimitive Root] => { tag: "button", attrs: { type: "button", role: "switch" } },
-        %w[SwitchPrimitive Thumb] => { tag: "span", attrs: {} },
-        %w[ProgressPrimitive Root] => { tag: "div", attrs: { role: "progressbar" } },
-        %w[ProgressPrimitive Indicator] => { tag: "div", attrs: {} },
+        %w[Separator Root] => { tag: "div", attrs: { role: "separator" } },
+        %w[Label Root] => { tag: "label", attrs: {} },
+        %w[Avatar Root] => { tag: "span", attrs: {} },
+        %w[Avatar Image] => { tag: "img", attrs: {} },
+        %w[Avatar Fallback] => { tag: "span", attrs: {} },
+        %w[Switch Root] => { tag: "button", attrs: { type: "button", role: "switch" } },
+        %w[Switch Thumb] => { tag: "span", attrs: {} },
+        %w[Progress Root] => { tag: "div", attrs: { role: "progressbar" } },
+        %w[Progress Indicator] => { tag: "div", attrs: {} },
         # Aspect-ratio + scroll-area roots are presentational containers.
-        %w[AspectRatioPrimitive Root] => { tag: "div", attrs: {} },
-        %w[ScrollAreaPrimitive Root] => { tag: "div", attrs: {} },
-        %w[ScrollAreaPrimitive Viewport] => { tag: "div", attrs: {} },
+        %w[AspectRatio Root] => { tag: "div", attrs: {} },
+        %w[ScrollArea Root] => { tag: "div", attrs: {} },
+        %w[ScrollArea Viewport] => { tag: "div", attrs: {} },
         # Tabs primitives — `data-orientation` comes from the JSX attrs;
         # role=tablist on List + role=tab on Trigger + role=tabpanel on Content.
-        %w[TabsPrimitive Root] => { tag: "div", attrs: {} },
-        %w[TabsPrimitive List] => { tag: "div", attrs: { role: "tablist" } },
-        %w[TabsPrimitive Trigger] => { tag: "button", attrs: { type: "button", role: "tab" } },
-        %w[TabsPrimitive Content] => { tag: "div", attrs: { role: "tabpanel" } },
+        %w[Tabs Root] => { tag: "div", attrs: {} },
+        %w[Tabs List] => { tag: "div", attrs: { role: "tablist" } },
+        %w[Tabs Trigger] => { tag: "button", attrs: { type: "button", role: "tab" } },
+        %w[Tabs Content] => { tag: "div", attrs: { role: "tabpanel" } },
         # Toggle / ToggleGroup — pressable buttons.
-        %w[TogglePrimitive Root] => { tag: "button", attrs: { type: "button" } },
-        %w[ToggleGroupPrimitive Root] => { tag: "div", attrs: { role: "group" } },
-        %w[ToggleGroupPrimitive Item] => { tag: "button", attrs: { type: "button" } },
+        %w[Toggle Root] => { tag: "button", attrs: { type: "button" } },
+        %w[ToggleGroup Root] => { tag: "div", attrs: { role: "group" } },
+        %w[ToggleGroup Item] => { tag: "button", attrs: { type: "button" } },
         # Collapsible — presentational containers; the open/closed state is
         # data-state driven by the consumer (Stimulus or otherwise).
-        %w[CollapsiblePrimitive Root] => { tag: "div", attrs: {} },
-        %w[CollapsiblePrimitive Trigger] => { tag: "button", attrs: { type: "button" } },
-        %w[CollapsiblePrimitive Content] => { tag: "div", attrs: {} }
+        %w[Collapsible Root] => { tag: "div", attrs: {} },
+        %w[Collapsible Trigger] => { tag: "button", attrs: { type: "button" } },
+        %w[Collapsible Content] => { tag: "div", attrs: {} }
       }.freeze
 
+      # Strip an optional `Primitive` suffix from the local binding so the
+      # registry's canonical names match both umbrella imports (`Separator`)
+      # and the older convention (`SeparatorPrimitive`).
       def self.lookup(local_name, member)
-        MAP[[local_name, member]]
+        MAP[[local_name, member]] || MAP[[local_name.sub(/Primitive\z/, ""), member]]
       end
     end
   end

@@ -1381,16 +1381,19 @@ module JsxRosetta
       end
 
       # True iff `branch` references a Slot import from a Radix-shaped
-      # package. The local binding name varies (`Slot`, `SlotPrimitive`)
-      # but the canonical pattern is "import { Slot } from radix-ui".
+      # package. The local binding is one of {`Slot`, `SlotPrimitive`} —
+      # both correspond to the canonical "import from radix-ui / @radix-ui/
+      # react-slot" pattern. Anything else (e.g. a user-defined
+      # `SlotMachine` from a random package whose path happens to contain
+      # "radix") falls through and renders the conditional unchanged.
       def radix_slot_branch?(branch)
         return false unless branch[:kind] == :component
 
         root = branch[:tag].split(".").first
-        return false unless root
+        return false unless root && SLOT_LOCAL_NAME_PATTERN.match?(root)
 
         @module_imports.any? do |imp|
-          imp.name == root && imp.source.to_s.include?("radix") && imp.name.start_with?("Slot")
+          imp.name == root && RADIX_SOURCE_PATTERN.match?(imp.source)
         end
       end
 

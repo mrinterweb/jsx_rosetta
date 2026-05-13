@@ -1450,6 +1450,22 @@ RSpec.describe JsxRosetta::Backend::Phlex do
 
       expect(content).to include("Slot")
     end
+
+    it "does NOT drop a user-defined Slot-prefixed name even from a radix-shaped source" do
+      # `radix_slot_branch?` only matches `Slot` / `SlotPrimitive` exactly.
+      # A user-defined `SlotMachine` should not be silently dropped, even
+      # if (improbably) imported from `@radix-ui/react-slot-machine`.
+      source = <<~JSX
+        import { SlotMachine } from "@radix-ui/react-slot-machine";
+        function X({ asChild, ...props }) {
+          const Comp = asChild ? SlotMachine : "div";
+          return <Comp {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("SlotMachine")
+    end
   end
 
   describe "Radix primitive → HTML element registry" do
@@ -1542,6 +1558,21 @@ RSpec.describe JsxRosetta::Backend::Phlex do
 
       expect(content).to match(/^    span\s*$/)
       expect(content).not_to include("AvatarPrimitive::Root")
+    end
+
+    it "matches shadcn-v4 umbrella imports without the `Primitive` suffix" do
+      # `import { Separator } from "radix-ui"; <Separator.Root/>` is the
+      # shadcn-v4 idiom — the registry strips an optional `Primitive`
+      # suffix from the local binding, so the canonical `Separator` key
+      # resolves both this and the older `SeparatorPrimitive` alias.
+      source = <<~JSX
+        import { Separator } from "radix-ui";
+        function X() { return <Separator.Root orientation="horizontal" />; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("div(role: 'separator', orientation: 'horizontal')")
+      expect(content).not_to include("Separator::Root")
     end
   end
 
