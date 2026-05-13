@@ -2,6 +2,7 @@
 
 require_relative "../ast/inflector"
 require_relative "../ir/types"
+require_relative "../pages_routing"
 require_relative "base"
 require_relative "view_component/expression_translator"
 
@@ -71,7 +72,10 @@ module JsxRosetta
 
       RAILS_VIEW_BASE_CLASS = "Views::Base"
 
-      def initialize(suffix: nil, namespace: nil, rails_view: nil)
+      HREF_ATTR_NAMES = %w[href to].freeze
+      LINK_TAGS = %w[a Link NavLink RouterLink].freeze
+
+      def initialize(suffix: nil, namespace: nil, rails_view: nil, route_table: nil)
         super()
         raise ArgumentError, "Phlex backend: pass either suffix: or namespace:, not both" if suffix && namespace
         if rails_view && (suffix || namespace)
@@ -81,6 +85,7 @@ module JsxRosetta
         @suffix = suffix.is_a?(String) ? suffix : (DEFAULT_SUFFIX if suffix == true)
         @namespace = namespace
         @rails_view = rails_view
+        @href_rewriter = route_table && PagesRouting::HrefRewriter.new(route_table)
       end
 
       def emit(component, source_filename: nil)
@@ -544,7 +549,8 @@ module JsxRosetta
 
       def render_element(element, translator, indent:)
         todos = []
-        attrs_source = format_attributes(element.attributes, translator, context: :html, todos: todos, indent: indent)
+        attrs_source = format_attributes(element.attributes, translator,
+                                         context: :html, tag: element.tag, todos: todos, indent: indent)
         method_call = "#{element.tag}#{attrs_source}"
 
         body = if VOID_ELEMENTS.include?(element.tag) || element.children.empty?
@@ -559,7 +565,8 @@ module JsxRosetta
 
       def render_component_invocation(invocation, translator, indent:)
         todos = []
-        kwargs = component_invocation_kwargs(invocation.props, translator, todos: todos, indent: indent)
+        kwargs = component_invocation_kwargs(invocation.props, translator,
+                                             todos: todos, indent: indent, tag: invocation.name)
         class_ref = component_class_reference(invocation.name)
         new_call = kwargs.empty? ? "#{class_ref}.new" : "#{class_ref}.new(#{kwargs})"
 
@@ -824,13 +831,13 @@ module JsxRosetta
       # of `h1()`). The `context:` param selects naming convention:
       #   - :html       (HTML element attrs — preserve camelCase for SVG)
       #   - :component  (Ruby method args — snake_case via Inflector.underscore)
-      def format_attributes(attributes, translator, context: :html, todos: [], indent: 0)
+      def format_attributes(attributes, translator, context: :html, tag: nil, todos: [], indent: 0)
         events, others = attributes.partition { |a| a.is_a?(IR::EventBinding) || a.is_a?(IR::StimulusBinding) }
         spreads, plain_attrs = others.partition { |a| a.is_a?(IR::SpreadAttribute) }
 
         parts = { sym: [], str: [] }
         plain_attrs.each do |a|
-          append_attribute_part(a, translator, parts, context: context, todos: todos, indent: indent)
+          append_attribute_part(a, translator, parts, context: context, tag: tag, todos: todos, indent: indent)
         end
         parts[:sym] << data_action_entry(events, translator) if events.any?
 
@@ -838,8 +845,8 @@ module JsxRosetta
         joined.empty? ? "" : "(#{joined})"
       end
 
-      def append_attribute_part(attribute, translator, parts, context:, todos:, indent: 0)
-        part = phlex_attribute_part(attribute, translator, context: context, todos: todos, indent: indent)
+      def append_attribute_part(attribute, translator, parts, context:, todos:, indent: 0, tag: nil)
+        part = phlex_attribute_part(attribute, translator, context: context, tag: tag, todos: todos, indent: indent)
         return unless part
 
         (part[:string_key] ? parts[:str] : parts[:sym]) << part[:source]
@@ -859,13 +866,13 @@ module JsxRosetta
       # declaration dropped (would emit `style: ''`) or every plain-attribute
       # value bailed (would emit `attr: nil`); the TODO comment above the
       # element already describes what was lost.
-      def phlex_attribute_part(attribute, translator, context:, todos:, indent: 0)
+      def phlex_attribute_part(attribute, translator, context:, todos:, indent: 0, tag: nil)
         case attribute
         when IR::StyleBinding then class_attribute_part(attribute.expression, translator)
         when IR::ClassList then { string_key: false, source: "class: #{class_list_to_ruby_string(attribute, translator)}" }
         when IR::Style then style_attribute_part(attribute, translator, todos: todos)
         when IR::Attribute
-          plain_attribute_part(attribute, translator, context: context, todos: todos, indent: indent)
+          plain_attribute_part(attribute, translator, context: context, tag: tag, todos: todos, indent: indent)
         end
       end
 
@@ -910,9 +917,10 @@ module JsxRosetta
       # follow snake_case convention (`defaultValue` → `default_value`).
       # Names that aren't valid Ruby identifiers after conversion (rare:
       # `xml:lang` and friends) fall back to a quoted string key.
-      def plain_attribute_part(attribute, translator, context:, todos:, indent: 0)
+      def plain_attribute_part(attribute, translator, context:, todos:, indent: 0, tag: nil)
         todos_before = todos.length
-        value_ruby = attribute_value_to_ruby(attribute.name, attribute.value, translator, todos: todos, indent: indent)
+        value_ruby = attribute_value_to_ruby(attribute.name, attribute.value, translator,
+                                             todos: todos, indent: indent, tag: tag)
         return nil if dropped_value?(value_ruby, todos_before, todos)
 
         ruby_name = case context
@@ -926,7 +934,11 @@ module JsxRosetta
         end
       end
 
-      def attribute_value_to_ruby(name, value, translator, todos:, indent: 0)
+      def attribute_value_to_ruby(name, value, translator, todos:, indent: 0, tag: nil)
+        if (rewrite = try_rewrite_href(name, value, translator, tag: tag))
+          return rewrite
+        end
+
         case value
         when true then "true"
         when String then AST::Inflector.ruby_string_literal(value)
@@ -944,6 +956,55 @@ module JsxRosetta
           # emit a broken kwarg or a speculative method reference.
           drop_jsx_value_with_todo(name, value, todos: todos)
         end
+      end
+
+      # Slice 3: rewrite `href`/`to` on link-shaped tags to a Rails URL
+      # helper call when the literal/template-literal path matches a
+      # route in the scanned table. Returns nil to fall through to the
+      # default emission path.
+      def try_rewrite_href(name, value, translator, tag:)
+        return nil unless @href_rewriter
+        return nil unless tag && LINK_TAGS.include?(tag) && HREF_ATTR_NAMES.include?(name)
+
+        case value
+        when String
+          @href_rewriter.rewrite_literal(value)
+        when IR::Interpolation
+          rewrite_interpolation_href(value.expression, translator)
+        end
+      end
+
+      def rewrite_interpolation_href(js_source, translator)
+        if (literal = string_literal_path(js_source))
+          return @href_rewriter.rewrite_literal(literal)
+        end
+
+        segments = PagesRouting::HrefRewriter.parse_template_source(js_source)
+        return nil unless segments
+
+        translated = segments.map do |kind, val|
+          next [:literal, val] if kind == :literal
+
+          result = translator.translate(val)
+          return nil unless result && result.ruby != "nil"
+
+          [:hole, result.ruby]
+        end
+        @href_rewriter.rewrite_template(translated)
+      end
+
+      def string_literal_path(js_source)
+        return nil unless js_source.is_a?(String)
+        return nil unless js_source.length >= 2
+
+        first = js_source[0]
+        return nil unless ['"', "'"].include?(first)
+        return nil unless js_source[-1] == first
+
+        body = js_source[1..-2]
+        return nil if body.include?(first) || body.include?("\\")
+
+        body
       end
 
       # Render an ObjectLiteral as a Ruby hash literal. Identifier-keyed
@@ -1181,13 +1242,13 @@ module JsxRosetta
         "nil"
       end
 
-      def component_invocation_kwargs(props, translator, todos: [], indent: 0)
+      def component_invocation_kwargs(props, translator, todos: [], indent: 0, tag: nil)
         events, others = props.partition { |a| a.is_a?(IR::EventBinding) || a.is_a?(IR::StimulusBinding) }
         spreads, plain_attrs = others.partition { |a| a.is_a?(IR::SpreadAttribute) }
 
         parts = { sym: [], str: [] }
         plain_attrs.each do |a|
-          append_attribute_part(a, translator, parts, context: :component, todos: todos, indent: indent)
+          append_attribute_part(a, translator, parts, context: :component, tag: tag, todos: todos, indent: indent)
         end
         parts[:sym] << data_action_entry(events, translator) if events.any?
 

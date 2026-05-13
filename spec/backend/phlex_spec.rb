@@ -113,6 +113,73 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     end
   end
 
+  describe "route_table: href rewrites" do
+    def make_route(rails_path:, controller:, action:)
+      JsxRosetta::PagesRouting::Route.new(
+        rails_path: rails_path, controller: controller, action: action, source_path: "src.tsx"
+      )
+    end
+
+    let(:route_table) do
+      [
+        make_route(rails_path: "/", controller: "pages", action: "index"),
+        make_route(rails_path: "/accounts", controller: "accounts", action: "index"),
+        make_route(rails_path: "/accounts/:id", controller: "accounts", action: "show"),
+        make_route(rails_path: "/accounts/:id/edit", controller: "accounts", action: "edit")
+      ]
+    end
+
+    it "rewrites a literal href on an <a> tag to a URL helper" do
+      content = file_contents(
+        'function X() { return <a href="/accounts">A</a>; }', "x.rb", route_table: route_table
+      )
+
+      expect(content).to include("a(href: accounts_path)")
+      expect(content).not_to include("'/accounts'")
+    end
+
+    it "rewrites a numeric member path to <singular>_path(123)" do
+      content = file_contents(
+        'function X() { return <a href="/accounts/123">A</a>; }', "x.rb", route_table: route_table
+      )
+
+      expect(content).to include("a(href: account_path(123))")
+    end
+
+    it "rewrites a Link component's href" do
+      content = file_contents(
+        "function X({ id }) { return <Link href={`/accounts/${id}`}>A</Link>; }", "x.rb",
+        route_table: route_table
+      )
+
+      expect(content).to include("href: account_path(@id)")
+    end
+
+    it "leaves external URLs unchanged" do
+      content = file_contents(
+        'function X() { return <a href="https://example.com">A</a>; }', "x.rb", route_table: route_table
+      )
+
+      expect(content).to include("href: 'https://example.com'")
+    end
+
+    it "leaves anchor-only hrefs unchanged" do
+      content = file_contents(
+        'function X() { return <a href="#top">A</a>; }', "x.rb", route_table: route_table
+      )
+
+      expect(content).to include("href: '#top'")
+    end
+
+    it "leaves hrefs on non-link tags unchanged (e.g., <area>)" do
+      content = file_contents(
+        'function X() { return <area href="/accounts" />; }', "x.rb", route_table: route_table
+      )
+
+      expect(content).to include("href: '/accounts'")
+    end
+  end
+
   describe "core IR rendering" do
     it "renders a single HTML element with no props as a bare tag call" do
       content = file_contents("function X() { return <hr />; }", "x.rb")

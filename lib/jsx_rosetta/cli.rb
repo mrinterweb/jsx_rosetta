@@ -138,6 +138,7 @@ module JsxRosetta
 
       base = { suffix: options[:phlex_suffix], namespace: options[:phlex_namespace] }.compact
       base[:rails_view] = options[:rails_view_route] if options[:rails_view_route]
+      base[:route_table] = options[:route_table] if options[:route_table]
       base
     end
 
@@ -159,6 +160,7 @@ module JsxRosetta
       raise ArgumentError, "#{rel} has no route in #{pages_dir} (skipped or non-page file?)" unless route
 
       options[:rails_view_route] = route
+      options[:route_table] = routes
     end
 
     def relative_path_under(file_path, dir)

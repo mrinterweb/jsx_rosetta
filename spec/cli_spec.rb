@@ -305,5 +305,32 @@ RSpec.describe JsxRosetta::CLI do
     ensure
       FileUtils.remove_entry(root) if root
     end
+
+    it "rewrites <a href> in the emitted view to a URL helper when the path matches a route" do
+      tsx = <<~TSX
+        export function AccountsIndex() {
+          return (
+            <div>
+              <a href="/accounts">List</a>
+              <a href="/accounts/42">Detail</a>
+              <a href="https://example.com">External</a>
+            </div>
+          );
+        }
+      TSX
+      root, pages_dir = make_page_file("accounts/index.tsx", "accounts/[id].tsx", contents: tsx)
+      out_dir = File.join(root, "out")
+
+      result = run("translate", File.join(pages_dir, "accounts/index.tsx"),
+                   "--as=phlex", "--rails-routes", pages_dir, "-o", out_dir)
+
+      expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_OK)
+      content = File.read(File.join(out_dir, "accounts", "index.rb"))
+      expect(content).to include("href: accounts_path")
+      expect(content).to include("href: account_path(42)")
+      expect(content).to include("href: 'https://example.com'")
+    ensure
+      FileUtils.remove_entry(root) if root
+    end
   end
 end

@@ -251,6 +251,19 @@ RSpec.describe JsxRosetta::PagesRouting do
       expect(output).to include("#   - 404.tsx → 404 page")
     end
 
+    it "emits `as: :<route-name>` on get/match lines (omitted for root)" do
+      output = described_class.emit(
+        routes: [route_index, route_about, route_accounts_index, route_accounts_show],
+        skipped: [], source_dir: "pages", generated_at: "2026-05-13"
+      )
+
+      expect(output).to include('root to: "pages#index"')
+      expect(output).not_to match(/root to: "pages#index", as:/)
+      expect(output).to include('get "/about", to: "pages#about", as: :pages_about')
+      expect(output).to include('get "/accounts", to: "accounts#index", as: :accounts')
+      expect(output).to include('get "/accounts/:id", to: "accounts#show", as: :account')
+    end
+
     it "emits a commented controller-scaffold hint per controller" do
       output = described_class.emit(
         routes: [route_index, route_about, route_accounts_index, route_accounts_show],
@@ -383,6 +396,156 @@ RSpec.describe JsxRosetta::PagesRouting do
       contents = described_class.emit_controllers(routes: routes).first.contents
 
       expect(contents.scan("def show").size).to eq(1)
+    end
+  end
+
+  describe JsxRosetta::PagesRouting::Naming do
+    def make_route(rails_path:, controller:, action:)
+      JsxRosetta::PagesRouting::Route.new(
+        rails_path: rails_path, controller: controller, action: action, source_path: "src.tsx"
+      )
+    end
+
+    it "names root the special `root` token" do
+      route = make_route(rails_path: "/", controller: "pages", action: "index")
+      expect(described_class.route_name(route)).to eq("root")
+      expect(described_class.url_helper_name(route)).to eq("root_path")
+    end
+
+    it "names index actions with the plural controller" do
+      route = make_route(rails_path: "/accounts", controller: "accounts", action: "index")
+      expect(described_class.route_name(route)).to eq("accounts")
+      expect(described_class.url_helper_name(route)).to eq("accounts_path")
+    end
+
+    it "names show actions with the singular controller" do
+      route = make_route(rails_path: "/accounts/:id", controller: "accounts", action: "show")
+      expect(described_class.route_name(route)).to eq("account")
+      expect(described_class.url_helper_name(route)).to eq("account_path")
+    end
+
+    it "names new actions as `new_<singular>`" do
+      route = make_route(rails_path: "/policies/new", controller: "policies", action: "new")
+      expect(described_class.route_name(route)).to eq("new_policy")
+    end
+
+    it "names edit actions as `edit_<singular>`" do
+      route = make_route(rails_path: "/policies/:id/edit", controller: "policies", action: "edit")
+      expect(described_class.route_name(route)).to eq("edit_policy")
+    end
+
+    it "names other actions as `<controller>_<action>`" do
+      route = make_route(rails_path: "/about", controller: "pages", action: "about")
+      expect(described_class.route_name(route)).to eq("pages_about")
+    end
+  end
+
+  describe JsxRosetta::PagesRouting::HrefRewriter do
+    def route(rails_path:, controller:, action:)
+      JsxRosetta::PagesRouting::Route.new(
+        rails_path: rails_path, controller: controller, action: action, source_path: "src.tsx"
+      )
+    end
+
+    let(:routes) do
+      [
+        route(rails_path: "/", controller: "pages", action: "index"),
+        route(rails_path: "/accounts", controller: "accounts", action: "index"),
+        route(rails_path: "/accounts/:id", controller: "accounts", action: "show"),
+        route(rails_path: "/accounts/:id/edit", controller: "accounts", action: "edit"),
+        route(rails_path: "/policies/:provider_slug/:policy_id/edit", controller: "policies", action: "edit")
+      ]
+    end
+
+    subject(:rewriter) { described_class.new(routes) }
+
+    describe "#rewrite_literal" do
+      it "rewrites the root path" do
+        expect(rewriter.rewrite_literal("/")).to eq("root_path")
+      end
+
+      it "rewrites a collection path" do
+        expect(rewriter.rewrite_literal("/accounts")).to eq("accounts_path")
+      end
+
+      it "rewrites a member path with a numeric literal" do
+        expect(rewriter.rewrite_literal("/accounts/123")).to eq("account_path(123)")
+      end
+
+      it "rewrites a member path with a non-numeric literal as a string" do
+        expect(rewriter.rewrite_literal("/accounts/abc")).to eq("account_path('abc')")
+      end
+
+      it "rewrites a nested edit path" do
+        expect(rewriter.rewrite_literal("/accounts/42/edit")).to eq("edit_account_path(42)")
+      end
+
+      it "returns nil for an unknown path" do
+        expect(rewriter.rewrite_literal("/nope/123")).to be_nil
+      end
+
+      it "returns nil for an external URL" do
+        expect(rewriter.rewrite_literal("//cdn.example/foo")).to be_nil
+      end
+
+      it "returns nil for paths with query strings" do
+        expect(rewriter.rewrite_literal("/accounts?tab=1")).to be_nil
+      end
+
+      it "returns nil for paths with anchors" do
+        expect(rewriter.rewrite_literal("/accounts#top")).to be_nil
+      end
+    end
+
+    describe "#rewrite_template" do
+      it "rewrites a single-hole template" do
+        segments = [[:literal, "/accounts/"], [:hole, "id"], [:literal, ""]]
+        expect(rewriter.rewrite_template(segments)).to eq("account_path(id)")
+      end
+
+      it "rewrites a multi-hole template" do
+        segments = [
+          [:literal, "/policies/"], [:hole, "slug"],
+          [:literal, "/"], [:hole, "policy_id"], [:literal, "/edit"]
+        ]
+        expect(rewriter.rewrite_template(segments)).to eq("edit_policy_path(slug, policy_id)")
+      end
+
+      it "returns nil when a hole is mixed with literal text in the same segment" do
+        segments = [[:literal, "/accounts/x"], [:hole, "id"], [:literal, ""]]
+        expect(rewriter.rewrite_template(segments)).to be_nil
+      end
+
+      it "returns nil for a path that does not match any route" do
+        segments = [[:literal, "/widgets/"], [:hole, "id"], [:literal, ""]]
+        expect(rewriter.rewrite_template(segments)).to be_nil
+      end
+    end
+
+    describe ".parse_template_source" do
+      it "parses a no-hole template" do
+        expect(described_class.parse_template_source("`/foo`")).to eq([[:literal, "/foo"]])
+      end
+
+      it "parses a single-hole template" do
+        expect(described_class.parse_template_source("`/foo/${bar}`"))
+          .to eq([[:literal, "/foo/"], [:hole, "bar"], [:literal, ""]])
+      end
+
+      it "parses a multi-hole template" do
+        expect(described_class.parse_template_source("`/a/${b}/c/${d}/e`"))
+          .to eq([[:literal, "/a/"], [:hole, "b"], [:literal, "/c/"], [:hole, "d"], [:literal, "/e"]])
+      end
+
+      it "returns nil for non-template input" do
+        expect(described_class.parse_template_source("'/foo'")).to be_nil
+        expect(described_class.parse_template_source("foo()")).to be_nil
+      end
+
+      it "returns nil when an interpolation contains nested braces" do
+        # `${foo({})}` — inner `{}` breaks the [^{}]+ guard.
+        expect(described_class.parse_template_source("`/a/${foo({})}`")).to be_nil
+      end
     end
   end
 end

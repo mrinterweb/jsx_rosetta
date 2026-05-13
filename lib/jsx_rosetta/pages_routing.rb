@@ -49,6 +49,167 @@ module JsxRosetta
       ControllerEmitter.emit(routes: routes)
     end
 
+    # Derives Rails route names and URL helper names from a Route. Used
+    # by both the routes.rb emitter (slice 1's `as:` lines) and the
+    # Phlex backend's href rewriter (slice 3) so the names stay paired.
+    module Naming
+      module_function
+
+      def route_name(route)
+        return "root" if route.rails_path == "/" && route.controller == "pages" && route.action == "index"
+
+        case route.action
+        when "index" then route.controller
+        when "show" then AST::Inflector.singularize(route.controller)
+        when "new" then "new_#{AST::Inflector.singularize(route.controller)}"
+        when "edit" then "edit_#{AST::Inflector.singularize(route.controller)}"
+        else "#{route.controller}_#{route.action}"
+        end
+      end
+
+      def url_helper_name(route)
+        "#{route_name(route)}_path"
+      end
+    end
+
+    # Matches `href`/`to` paths against the route table and emits a
+    # Rails URL helper invocation. The caller pre-translates any
+    # template-literal hole expressions into Ruby; this class itself
+    # does no JS-to-Ruby translation.
+    class HrefRewriter
+      Token = Data.define(:kind, :value)
+
+      def initialize(routes)
+        @routes = routes
+      end
+
+      # Try to rewrite a literal path. Returns Ruby source string or nil.
+      def rewrite_literal(path)
+        return nil unless rewritable_path?(path)
+
+        tokens = path.split("/").reject(&:empty?).map { |seg| Token.new(kind: :literal, value: seg) }
+        rewrite_tokens(tokens)
+      end
+
+      # Try to rewrite a parsed template literal. `segments` is an array
+      # of `[:literal, "..."]` / `[:hole, "ruby_expr"]` pairs — the output
+      # of `.parse_template_source` after the caller translates each hole.
+      # Returns Ruby source or nil.
+      def rewrite_template(segments)
+        tokens = template_tokens(segments)
+        return nil unless tokens
+
+        rewrite_tokens(tokens)
+      end
+
+      # Parse a verbatim JS template literal source like
+      # `` `/foo/${bar}` `` into
+      # `[[:literal, "/foo/"], [:hole, "bar"], [:literal, ""]]`. Returns
+      # nil for malformed input or nested-brace interpolations.
+      def self.parse_template_source(js_source)
+        return nil unless js_source.is_a?(String) && js_source.start_with?("`") && js_source.end_with?("`")
+        return nil if js_source.length < 2
+
+        body = js_source[1..-2]
+        return nil if body.include?("`")
+
+        parts = []
+        pos = 0
+        hole_count = 0
+        body.to_enum(:scan, /\$\{([^{}]+)\}/).each do |_|
+          match = ::Regexp.last_match
+          parts << [:literal, body[pos...match.begin(0)]]
+          parts << [:hole, match[1].strip]
+          pos = match.end(0)
+          hole_count += 1
+        end
+        parts << [:literal, body[pos..]]
+        # `${...}` left in the trailing literal means an interpolation
+        # had nested braces and we can't safely match it.
+        return nil if body.scan("${").size != hole_count
+
+        parts
+      end
+
+      private
+
+      def rewritable_path?(path)
+        return false unless path.is_a?(String)
+        return false unless path.start_with?("/")
+        return false if path.start_with?("//")
+        return false if path.include?("?") || path.include?("#")
+
+        true
+      end
+
+      # Convert template segments into per-path-segment tokens by
+      # joining them with a sentinel marker then splitting on `/`. A
+      # hole must occupy a full path segment — `/foo${bar}/baz` fails
+      # because `foo${bar}` is a mixed literal+hole segment.
+      def template_tokens(segments)
+        joined = +""
+        holes = []
+        segments.each do |kind, value|
+          case kind
+          when :literal
+            return nil if value.include?("?") || value.include?("#")
+
+            joined << value
+          when :hole
+            joined << "\x01#{holes.length}\x01"
+            holes << value
+          end
+        end
+        return nil unless joined.start_with?("/")
+
+        joined.split("/").reject(&:empty?).map do |segment|
+          if (m = /\A\x01(\d+)\x01\z/.match(segment))
+            Token.new(kind: :hole, value: holes[Integer(m[1])])
+          elsif segment.include?("\x01")
+            return nil
+          else
+            Token.new(kind: :literal, value: segment)
+          end
+        end
+      end
+
+      def rewrite_tokens(tokens)
+        matches = @routes.filter_map { |route| match_route(route, tokens) }
+        return nil if matches.size != 1
+
+        route, ruby_args = matches.first
+        helper = Naming.url_helper_name(route)
+        ruby_args.empty? ? helper : "#{helper}(#{ruby_args.join(", ")})"
+      end
+
+      def match_route(route, tokens)
+        route_segments = route.rails_path.split("/").reject(&:empty?)
+        return nil if route_segments.any? { |s| s.start_with?("*") || s.start_with?("(") }
+        return nil unless route_segments.size == tokens.size
+
+        ruby_args = match_segments(route_segments, tokens)
+        ruby_args && [route, ruby_args]
+      end
+
+      def match_segments(route_segments, tokens)
+        ruby_args = []
+        route_segments.zip(tokens).each do |route_seg, token|
+          if route_seg.start_with?(":")
+            ruby_args << (token.kind == :literal ? literal_arg_to_ruby(token.value) : token.value)
+          elsif token.kind == :literal && token.value == route_seg
+            next
+          else
+            return nil
+          end
+        end
+        ruby_args
+      end
+
+      def literal_arg_to_ruby(value)
+        value.match?(/\A-?\d+\z/) ? value : AST::Inflector.ruby_string_literal(value)
+      end
+    end
+
     # Scans a directory and classifies each file as a Route or Skipped.
     module Scanner
       class << self
@@ -227,9 +388,11 @@ module JsxRosetta
           if route.rails_path == "/" && route.controller == "pages" && route.action == "index"
             %(  root to: "pages#index")
           elsif route.rails_path.start_with?("*")
-            %(  match #{route.rails_path.inspect}, to: "#{route.controller}##{route.action}", via: :all)
+            %(  match #{route.rails_path.inspect}, to: "#{route.controller}##{route.action}", ) +
+              %(via: :all, as: :#{Naming.route_name(route)})
           else
-            %(  get #{route.rails_path.inspect}, to: "#{route.controller}##{route.action}")
+            %(  get #{route.rails_path.inspect}, to: "#{route.controller}##{route.action}", ) +
+              %(as: :#{Naming.route_name(route)})
           end
         end
 
