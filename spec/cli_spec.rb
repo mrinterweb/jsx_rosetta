@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "fileutils"
 require "stringio"
 require "tempfile"
 require "tmpdir"
@@ -113,6 +114,85 @@ RSpec.describe JsxRosetta::CLI do
       expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_OK)
       parsed = JSON.parse(result[:stdout])
       expect(parsed["type"]).to eq("File")
+    end
+  end
+
+  describe "pages-routes" do
+    def make_pages_dir(*relative_paths)
+      dir = Dir.mktmpdir("pages_routes_cli")
+      pages_dir = File.join(dir, "pages")
+      relative_paths.each do |rel|
+        full = File.join(pages_dir, rel)
+        FileUtils.mkdir_p(File.dirname(full))
+        FileUtils.touch(full)
+      end
+      [dir, pages_dir]
+    end
+
+    it "prints a routes.rb skeleton to stdout when -o is omitted" do
+      root, pages_dir = make_pages_dir("index.tsx", "accounts/index.tsx", "accounts/[id].tsx")
+
+      result = run("pages-routes", pages_dir)
+
+      expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_OK)
+      expect(result[:stdout]).to include("Rails.application.routes.draw do")
+      expect(result[:stdout]).to include('root to: "pages#index"')
+      expect(result[:stdout]).to include('get "/accounts", to: "accounts#index"')
+      expect(result[:stdout]).to include('get "/accounts/:id", to: "accounts#show"')
+    ensure
+      FileUtils.remove_entry(root) if root
+    end
+
+    it "writes the routes.rb when -o is passed" do
+      root, pages_dir = make_pages_dir("index.tsx")
+      out_path = File.join(root, "routes.rb")
+
+      result = run("pages-routes", pages_dir, "-o", out_path)
+
+      expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_OK)
+      expect(File).to exist(out_path)
+      expect(File.read(out_path)).to include('root to: "pages#index"')
+      expect(result[:stdout]).to include("wrote")
+    ensure
+      FileUtils.remove_entry(root) if root
+    end
+
+    it "refuses a directory not named 'pages' without --allow-any-dir" do
+      Dir.mktmpdir do |dir|
+        FileUtils.touch(File.join(dir, "index.tsx"))
+        result = run("pages-routes", dir)
+
+        expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_FAILURE)
+        expect(result[:stderr]).to include("does not look like a Next.js pages directory")
+      end
+    end
+
+    it "accepts a non-pages directory when --allow-any-dir is passed" do
+      Dir.mktmpdir do |dir|
+        FileUtils.touch(File.join(dir, "index.tsx"))
+        result = run("pages-routes", dir, "--allow-any-dir")
+
+        expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_OK)
+        expect(result[:stdout]).to include('root to: "pages#index"')
+      end
+    end
+
+    it "respects --ext to override the default extension filter" do
+      root, pages_dir = make_pages_dir("index.rb", "about.rb")
+      result = run("pages-routes", pages_dir, "--ext", ".rb")
+
+      expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_OK)
+      expect(result[:stdout]).to include('root to: "pages#index"')
+      expect(result[:stdout]).to include('get "/about"')
+    ensure
+      FileUtils.remove_entry(root) if root
+    end
+
+    it "emits a usage error when no directory is given" do
+      result = run("pages-routes")
+
+      expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_USAGE)
+      expect(result[:stderr]).to include("missing required argument")
     end
   end
 end

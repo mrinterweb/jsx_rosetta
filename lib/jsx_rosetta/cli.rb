@@ -15,6 +15,8 @@ module JsxRosetta
   #                              (default: current directory). TSX is detected
   #                              via the .tsx extension or --tsx.
   #   parse FILE                 Print the parsed Babel AST as pretty JSON.
+  #   pages-routes DIR [-o PATH] Walk a Next.js `pages/` directory and emit a
+  #                              Rails config/routes.rb skeleton.
   #   version                    Print the gem version.
   #   help                       Show usage.
   class CLI
@@ -34,6 +36,7 @@ module JsxRosetta
       when "install" then run_install
       when "translate" then run_translate
       when "routes" then run_routes
+      when "pages-routes" then run_pages_routes
       when "parse" then run_parse
       when "version", "-v", "--version" then run_version
       when nil, "help", "-h", "--help" then print_help(EXIT_OK)
@@ -129,6 +132,38 @@ module JsxRosetta
       EXIT_FAILURE
     end
 
+    def run_pages_routes
+      options, positional = parse_translate_options
+      input_dir = positional.first
+      return missing_argument("pages-routes DIR [-o OUT.rb]", "pages-routes") unless input_dir
+
+      ensure_pages_dir!(input_dir, allow_any: options[:allow_any_dir])
+      extensions = options[:ext] || PagesRouting::DEFAULT_EXTENSIONS
+      routes, skipped = PagesRouting.scan(input_dir, extensions: extensions)
+      contents = PagesRouting.emit(routes: routes, skipped: skipped, source_dir: input_dir)
+
+      if options[:out]
+        File.write(options[:out], contents)
+        @stdout.puts "wrote #{options[:out]}"
+      else
+        @stdout.print(contents)
+      end
+      EXIT_OK
+    rescue ArgumentError => e
+      @stderr.puts "jsx_rosetta pages-routes: #{e.message}"
+      EXIT_FAILURE
+    end
+
+    def ensure_pages_dir!(dir, allow_any:)
+      return if allow_any
+      return if File.basename(dir) == "pages"
+      return if File.directory?(File.join(dir, "pages"))
+
+      raise ArgumentError,
+            "#{dir.inspect} does not look like a Next.js pages directory " \
+            "(basename != 'pages' and no nested 'pages/'). Pass --allow-any-dir to override."
+    end
+
     def run_parse
       options, positional = parse_translate_options
       input_path = positional.first
@@ -157,20 +192,32 @@ module JsxRosetta
 
       until @argv.empty?
         arg = @argv.shift
-        case arg
-        when "-o", "--out" then options[:out] = @argv.shift
-        when "--tsx", "--typescript" then options[:tsx] = true
-        when "--as" then options[:as] = @argv.shift
-        when /\A--as=(.+)\z/ then options[:as] = ::Regexp.last_match(1)
-        when "--phlex-suffix" then options[:phlex_suffix] = @argv.shift
-        when /\A--phlex-suffix=(.*)\z/ then options[:phlex_suffix] = ::Regexp.last_match(1)
-        when "--phlex-namespace" then options[:phlex_namespace] = @argv.shift
-        when /\A--phlex-namespace=(.+)\z/ then options[:phlex_namespace] = ::Regexp.last_match(1)
-        else positional << arg
-        end
+        positional << arg unless option_consumed?(arg, options)
       end
 
       [options, positional]
+    end
+
+    def option_consumed?(arg, options)
+      case arg
+      when "-o", "--out" then options[:out] = @argv.shift
+      when "--tsx", "--typescript" then options[:tsx] = true
+      when "--as" then options[:as] = @argv.shift
+      when /\A--as=(.+)\z/ then options[:as] = ::Regexp.last_match(1)
+      when "--phlex-suffix" then options[:phlex_suffix] = @argv.shift
+      when /\A--phlex-suffix=(.*)\z/ then options[:phlex_suffix] = ::Regexp.last_match(1)
+      when "--phlex-namespace" then options[:phlex_namespace] = @argv.shift
+      when /\A--phlex-namespace=(.+)\z/ then options[:phlex_namespace] = ::Regexp.last_match(1)
+      when "--ext" then options[:ext] = parse_ext_list(@argv.shift)
+      when /\A--ext=(.+)\z/ then options[:ext] = parse_ext_list(::Regexp.last_match(1))
+      when "--allow-any-dir" then options[:allow_any_dir] = true
+      else return false
+      end
+      true
+    end
+
+    def parse_ext_list(value)
+      value.to_s.split(",").map(&:strip).reject(&:empty?).map { |ext| ext.start_with?(".") ? ext : ".#{ext}" }
     end
 
     def missing_argument(usage, command)
@@ -197,6 +244,11 @@ module JsxRosetta
           routes FILE [-o OUT.rb]    Parse <Route path=... element={<X/>} /> patterns from FILE
                                      and emit a reviewable Ruby script that calls `rails generate
                                      controller` and prints suggested config/routes.rb additions.
+          pages-routes DIR [-o PATH] Walk a Next.js `pages/` directory tree and emit a
+                                     Rails config/routes.rb skeleton derived from the file
+                                     layout. Use --ext .tsx,.jsx,.ts,.js to override the
+                                     default `.tsx,.jsx` filter, and --allow-any-dir to
+                                     skip the `basename == 'pages'` safety check.
           parse FILE                 Parse the input and print the Babel AST as JSON.
           version                    Print the gem version.
           help                       Show this help.

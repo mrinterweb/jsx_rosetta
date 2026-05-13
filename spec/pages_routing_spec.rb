@@ -1,0 +1,277 @@
+# frozen_string_literal: true
+
+require "fileutils"
+require "tmpdir"
+
+RSpec.describe JsxRosetta::PagesRouting do
+  def build_pages(*relative_paths)
+    dir = Dir.mktmpdir("pages_routing")
+    relative_paths.each do |rel|
+      full = File.join(dir, rel)
+      FileUtils.mkdir_p(File.dirname(full))
+      FileUtils.touch(full)
+    end
+    dir
+  end
+
+  def scan(*relative_paths, **options)
+    dir = build_pages(*relative_paths)
+    described_class.scan(dir, **options)
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  def routes_for(*relative_paths, **options)
+    scan(*relative_paths, **options).first
+  end
+
+  def skipped_for(*relative_paths, **options)
+    scan(*relative_paths, **options).last
+  end
+
+  describe ".scan classification" do
+    it "maps a top-level index.tsx to root → pages#index" do
+      routes = routes_for("index.tsx")
+
+      expect(routes.size).to eq(1)
+      expect(routes.first).to have_attributes(rails_path: "/", controller: "pages", action: "index")
+    end
+
+    it "maps a top-level named file to pages#<name>" do
+      route = routes_for("about.tsx").first
+
+      expect(route).to have_attributes(rails_path: "/about", controller: "pages", action: "about")
+    end
+
+    it "maps <res>/index.tsx to <res>#index" do
+      route = routes_for("accounts/index.tsx").first
+
+      expect(route).to have_attributes(rails_path: "/accounts", controller: "accounts", action: "index")
+    end
+
+    it "maps <res>/new.tsx to <res>#new" do
+      route = routes_for("accounts/new.tsx").first
+
+      expect(route).to have_attributes(rails_path: "/accounts/new", controller: "accounts", action: "new")
+    end
+
+    it "maps <res>/[id].tsx to <res>#show" do
+      route = routes_for("accounts/[id].tsx").first
+
+      expect(route).to have_attributes(rails_path: "/accounts/:id", controller: "accounts", action: "show")
+    end
+
+    it "maps <res>/[id]/index.tsx to <res>#show (duplicate of [id].tsx form)" do
+      route = routes_for("accounts/[id]/index.tsx").first
+
+      expect(route).to have_attributes(rails_path: "/accounts/:id", controller: "accounts", action: "show")
+    end
+
+    it "maps <res>/[id]/edit.tsx to <res>#edit" do
+      route = routes_for("accounts/[id]/edit.tsx").first
+
+      expect(route).to have_attributes(rails_path: "/accounts/:id/edit", controller: "accounts", action: "edit")
+    end
+
+    it "maps <res>/[id]/<x>.tsx to <res>#<x>" do
+      route = routes_for("accounts/[id]/settings.tsx").first
+
+      expect(route).to have_attributes(rails_path: "/accounts/:id/settings", controller: "accounts",
+                                       action: "settings")
+    end
+
+    it "maps optional catch-all [[...extra]].tsx to (/*extra) with show action" do
+      route = routes_for("accounts/[id]/[[...extra]].tsx").first
+
+      expect(route).to have_attributes(
+        rails_path: "/accounts/:id(/*extra)",
+        controller: "accounts",
+        action: "show"
+      )
+    end
+
+    it "maps non-optional rest catch-all [...rest].tsx to *rest" do
+      route = routes_for("docs/[...rest].tsx").first
+
+      expect(route).to have_attributes(rails_path: "/docs/*rest", controller: "docs", action: "show")
+    end
+
+    it "snake_cases camelCase bracket params" do
+      route = routes_for("policies/[providerSlug]/[policyId]/edit.tsx").first
+
+      expect(route.rails_path).to eq("/policies/:provider_slug/:policy_id/edit")
+      expect(route.controller).to eq("policies")
+      expect(route.action).to eq("edit")
+    end
+
+    it "treats nested named dirs as path segments, not separate controllers" do
+      route = routes_for("workflows/[id]/versions/index.tsx").first
+
+      expect(route).to have_attributes(
+        rails_path: "/workflows/:id/versions",
+        controller: "workflows",
+        action: "show"
+      )
+    end
+
+    it "snake_cases the action name when the leaf is camelCase" do
+      route = routes_for("workflows/[id]/runHistory.tsx").first
+
+      expect(route.action).to eq("run_history")
+    end
+  end
+
+  describe ".scan skipped files" do
+    it "skips _app.tsx with the layout reason" do
+      _routes, skipped = scan("_app.tsx", "index.tsx")
+
+      expect(skipped.map(&:source_path)).to include("_app.tsx")
+      expect(skipped.first.reason).to include("application wrapper")
+    end
+
+    it "skips _document.tsx, _error.tsx, 404.tsx, 500.tsx" do
+      _routes, skipped = scan("_document.tsx", "_error.tsx", "404.tsx", "500.tsx")
+
+      expect(skipped.map(&:source_path)).to match_array(%w[_document.tsx _error.tsx 404.tsx 500.tsx])
+    end
+
+    it "produces no routes when the directory contains only skipped files" do
+      routes, skipped = scan("_app.tsx", "_document.tsx")
+
+      expect(routes).to be_empty
+      expect(skipped.size).to eq(2)
+    end
+  end
+
+  describe ".scan tree behavior" do
+    it "ignores files whose extension is not in the configured list" do
+      routes, _skipped = scan("index.tsx", "README.md", "schema.graphql")
+
+      expect(routes.size).to eq(1)
+    end
+
+    it "accepts a custom extension list" do
+      routes, _skipped = scan("home/index.rb", "about.rb", extensions: %w[.rb])
+
+      expect(routes.map(&:rails_path)).to contain_exactly("/home", "/about")
+    end
+
+    it "raises ArgumentError when the directory does not exist" do
+      expect { described_class.scan("/nope/does/not/exist") }.to raise_error(ArgumentError, /not a directory/)
+    end
+
+    it "returns empty arrays for an empty directory" do
+      Dir.mktmpdir do |dir|
+        routes, skipped = described_class.scan(dir)
+        expect(routes).to be_empty
+        expect(skipped).to be_empty
+      end
+    end
+  end
+
+  describe ".emit" do
+    let(:route_index) do
+      JsxRosetta::PagesRouting::Route.new(
+        rails_path: "/", controller: "pages", action: "index", source_path: "index.tsx"
+      )
+    end
+
+    let(:route_about) do
+      JsxRosetta::PagesRouting::Route.new(
+        rails_path: "/about", controller: "pages", action: "about", source_path: "about.tsx"
+      )
+    end
+
+    let(:route_accounts_index) do
+      JsxRosetta::PagesRouting::Route.new(
+        rails_path: "/accounts", controller: "accounts", action: "index", source_path: "accounts/index.tsx"
+      )
+    end
+
+    let(:route_accounts_show) do
+      JsxRosetta::PagesRouting::Route.new(
+        rails_path: "/accounts/:id", controller: "accounts", action: "show", source_path: "accounts/[id].tsx"
+      )
+    end
+
+    it "produces parseable Ruby for an empty route set" do
+      output = described_class.emit(routes: [], skipped: [], source_dir: "pages", generated_at: "2026-05-13")
+
+      expect(output).to include("Rails.application.routes.draw do")
+      expect(output).to include("end")
+      expect { compile_ruby(output) }.not_to raise_error
+    end
+
+    it "emits `root to: \"pages#index\"` for the root index" do
+      output = described_class.emit(routes: [route_index], skipped: [], source_dir: "pages",
+                                    generated_at: "2026-05-13")
+
+      expect(output).to include(%(  root to: "pages#index"))
+      expect(output).not_to include(%(get "/"))
+    end
+
+    it "groups routes by controller and alphabetizes the groups" do
+      routes = [route_accounts_show, route_accounts_index, route_about, route_index]
+      output = described_class.emit(routes: routes, skipped: [], source_dir: "pages", generated_at: "2026-05-13")
+
+      accounts_idx = output.index("# == accounts ==")
+      pages_idx = output.index("# == pages ==")
+      expect(accounts_idx).to be < pages_idx
+      expect(output).to include(%(  get "/accounts", to: "accounts#index"))
+      expect(output).to include(%(  get "/accounts/:id", to: "accounts#show"))
+      expect(output).to include(%(  get "/about", to: "pages#about"))
+      expect(output).to include(%(  root to: "pages#index"))
+    end
+
+    it "warns about duplicate routes from multiple source files" do
+      dup = JsxRosetta::PagesRouting::Route.new(
+        rails_path: "/accounts/:id", controller: "accounts", action: "show",
+        source_path: "accounts/[id]/index.tsx"
+      )
+      output = described_class.emit(
+        routes: [route_accounts_show, dup], skipped: [], source_dir: "pages", generated_at: "2026-05-13"
+      )
+
+      expect(output.scan(%(  get "/accounts/:id"))).to eq([%(  get "/accounts/:id")])
+      expect(output).to include("also produced by: accounts/[id]/index.tsx")
+    end
+
+    it "lists skipped files in a comment block above the draw" do
+      skipped = [
+        JsxRosetta::PagesRouting::Skipped.new(source_path: "_app.tsx", reason: "Next.js application wrapper"),
+        JsxRosetta::PagesRouting::Skipped.new(source_path: "404.tsx", reason: "404 page")
+      ]
+      output = described_class.emit(routes: [route_index], skipped: skipped, source_dir: "pages",
+                                    generated_at: "2026-05-13")
+
+      skipped_idx = output.index("# Skipped")
+      draw_idx = output.index("Rails.application.routes.draw")
+      expect(skipped_idx).to be < draw_idx
+      expect(output).to include("#   - _app.tsx → Next.js application wrapper")
+      expect(output).to include("#   - 404.tsx → 404 page")
+    end
+
+    it "emits a commented controller-scaffold hint per controller" do
+      output = described_class.emit(
+        routes: [route_index, route_about, route_accounts_index, route_accounts_show],
+        skipped: [], source_dir: "pages", generated_at: "2026-05-13"
+      )
+
+      expect(output).to include('# system "rails", "generate", "controller", "accounts", "index", "show"')
+      expect(output).to include('# system "rails", "generate", "controller", "pages", "about", "index"')
+    end
+
+    it "produces a routes.rb that passes ruby -c" do
+      output = described_class.emit(
+        routes: [route_index, route_about, route_accounts_index, route_accounts_show],
+        skipped: [], source_dir: "pages", generated_at: "2026-05-13"
+      )
+
+      expect { compile_ruby(output) }.not_to raise_error
+    end
+  end
+
+  def compile_ruby(source)
+    RubyVM::InstructionSequence.compile(source)
+  end
+end
