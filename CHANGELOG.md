@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed — silent children loss on self-closing-with-spread tags
+
+- **Auto-yield on blockless spread-children tags.** The shadcn idiom
+  `<tag {...props} />` (self-closing JSX whose rest-spread carries React
+  `children`) translated to a Phlex `tag(..., **(@props || {}))` call
+  with no block — so callers' `Component.new { ... }` blocks were
+  silently dropped at render. Now: when an Element or
+  ComponentInvocation has no explicit IR children, a `SpreadAttribute`,
+  and a non-void tag, emit `tag(...) do; yield if block_given?; end`.
+  The `block_given?` guard preserves the no-block use case. Void HTML
+  elements (input, img, br, …) still emit blockless. Explicit-children
+  paths and `RenderProp` flows are untouched.
+
 ## [0.5.1] - 2026-05-11
 
 A correctness pass on the v0.5.0 Phlex output. A random-sample review

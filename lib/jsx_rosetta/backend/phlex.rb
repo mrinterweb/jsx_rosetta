@@ -524,15 +524,32 @@ module JsxRosetta
         todos = []
         attrs_source = format_attributes(element.attributes, translator, context: :html, todos: todos, indent: indent)
         method_call = "#{element.tag}#{attrs_source}"
-
-        body = if VOID_ELEMENTS.include?(element.tag) || element.children.empty?
-                 "#{spaces(indent)}#{method_call}"
-               else
-                 inner = element.children.map { |c| render_ir_node(c, translator, indent: indent + 2) }.join("\n")
-                 "#{spaces(indent)}#{method_call} do\n#{inner}\n#{spaces(indent)}end"
-               end
-
+        body = element_body(element, method_call, translator, indent)
         prepend_attribute_todos(todos, indent, body)
+      end
+
+      # Decide whether the HTML tag is blockless, yield-only (auto-yield for
+      # self-closing-with-spread), or full do/end (explicit children).
+      def element_body(element, method_call, translator, indent)
+        return "#{spaces(indent)}#{method_call}" if blockless_element?(element)
+
+        if element.children.empty?
+          # `<tag {...rest} />` — the rest-spread carries React `children`,
+          # but JSX self-closes so there are no explicit IR children. Yield
+          # to the Phlex caller's block so `Component.new { ... }` nesting
+          # actually renders; guard with `block_given?` so callers who pass
+          # no block don't blow up.
+          yield_only_block(method_call, indent)
+        else
+          inner = element.children.map { |c| render_ir_node(c, translator, indent: indent + 2) }.join("\n")
+          "#{spaces(indent)}#{method_call} do\n#{inner}\n#{spaces(indent)}end"
+        end
+      end
+
+      def blockless_element?(element)
+        return true if VOID_ELEMENTS.include?(element.tag)
+
+        element.children.empty? && !spreads_children?(element)
       end
 
       def render_component_invocation(invocation, translator, indent:)
@@ -540,18 +557,39 @@ module JsxRosetta
         kwargs = component_invocation_kwargs(invocation.props, translator, todos: todos, indent: indent)
         class_ref = component_class_reference(invocation.name)
         new_call = kwargs.empty? ? "#{class_ref}.new" : "#{class_ref}.new(#{kwargs})"
-
-        render_prop = invocation.children.find { |c| c.is_a?(IR::RenderProp) }
-        body = if render_prop
-                 render_with_render_prop(new_call, render_prop, translator, indent)
-               elsif invocation.children.empty?
-                 "#{spaces(indent)}render #{new_call}"
-               else
-                 inner = invocation.children.map { |c| render_ir_node(c, translator, indent: indent + 2) }.join("\n")
-                 "#{spaces(indent)}render #{new_call} do\n#{inner}\n#{spaces(indent)}end"
-               end
-
+        body = component_invocation_body(invocation, new_call, translator, indent)
         prepend_attribute_todos(todos, indent, body)
+      end
+
+      def component_invocation_body(invocation, new_call, translator, indent)
+        render_prop = invocation.children.find { |c| c.is_a?(IR::RenderProp) }
+        return render_with_render_prop(new_call, render_prop, translator, indent) if render_prop
+
+        if invocation.children.empty?
+          # `<Component {...rest} />` — same idiom as element_body. The spread
+          # carries `children`; yield to the caller's block.
+          return "#{spaces(indent)}render #{new_call}" unless spreads_children?(invocation)
+
+          yield_only_block("render #{new_call}", indent)
+        else
+          inner = invocation.children.map { |c| render_ir_node(c, translator, indent: indent + 2) }.join("\n")
+          "#{spaces(indent)}render #{new_call} do\n#{inner}\n#{spaces(indent)}end"
+        end
+      end
+
+      def yield_only_block(call, indent)
+        outer = spaces(indent)
+        inner = spaces(indent + 2)
+        "#{outer}#{call} do\n#{inner}yield if block_given?\n#{outer}end"
+      end
+
+      # Does this Element/ComponentInvocation carry a JSX rest-spread
+      # (`{...props}`) that may transport React `children` we can't see in
+      # the IR? Used to decide whether a self-closing JSX tag should still
+      # yield to the Phlex caller's block.
+      def spreads_children?(node)
+        attrs = node.respond_to?(:attributes) ? node.attributes : node.props
+        attrs.any?(IR::SpreadAttribute)
       end
 
       # Emit a render-prop child as a Ruby block on the parent `render` call.

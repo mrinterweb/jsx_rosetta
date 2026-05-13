@@ -1325,6 +1325,74 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     end
   end
 
+  describe "auto-yield on blockless spread-children tags" do
+    # The shadcn idiom `<tag {...props} />` (self-closing tag whose rest-spread
+    # carries React `children`) lowers to a Phlex tag call with no block, so
+    # children that the Phlex caller passes via `Component.new { ... }` were
+    # silently dropped. Now we emit a `do; yield if block_given?; end` block
+    # for non-void tags when the only thing carrying children is the spread.
+    it "wraps a self-closing HTML element that spreads props in a yielding block" do
+      source = "function X({ className, ...props }) { return <div className={className} {...props} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("div(")
+      expect(content).to include("**(@props || {})) do")
+      expect(content).to include("yield if block_given?")
+    end
+
+    it "does NOT add a yield block to a void HTML element (input)" do
+      source = "function X({ type, ...props }) { return <input type={type} {...props} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("**(@props || {})")
+      expect(content).not_to include("yield")
+    end
+
+    it "does NOT add a yield block to a void HTML element (img)" do
+      source = "function X({ src, ...props }) { return <img src={src} {...props} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("**(@props || {})")
+      expect(content).not_to include("yield")
+    end
+
+    it "leaves a div with explicit {children} unchanged (existing do/end behavior)" do
+      source = "function X({ children, ...props }) { return <div {...props}>{children}</div>; }"
+      content = file_contents(source, "x.rb")
+
+      # Explicit children path: do/end with `yield` inside, NOT the safe
+      # `yield if block_given?` (existing behavior is unchanged).
+      expect(content).to include("div(")
+      expect(content).to include(" do")
+      expect(content).to match(/^\s+yield$/)
+      expect(content).not_to include("yield if block_given?")
+    end
+
+    it "wraps a self-closing PascalCase ComponentInvocation that spreads props" do
+      source = "function X({ ...rest }) { return <Card {...rest} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("render Card.new(**(@rest || {})) do")
+      expect(content).to include("yield if block_given?")
+    end
+
+    it "does NOT add a yield block when there is no spread (blockless tag stays blockless)" do
+      source = "function X() { return <hr />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("    hr\n  end")
+      expect(content).not_to include("yield")
+    end
+
+    it "does NOT double-wrap when explicit children are already present" do
+      source = "function X({ children, ...rest }) { return <section {...rest}>{children}</section>; }"
+      content = file_contents(source, "x.rb")
+
+      # Should yield once (the explicit-children path), not twice.
+      expect(content.scan("yield").length).to eq(1)
+    end
+  end
+
   describe "inner arrow handlers on PascalCase component props" do
     # `const handleClick = () => ...` attached to a `<PascalCase>` component
     # used to leak as bare `handle_click` (NameError at render time) — Gap B
