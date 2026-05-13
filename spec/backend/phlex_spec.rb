@@ -2213,5 +2213,72 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("# TODO: module-level constants")
       expect(content).to include("const PI = 3.14")
     end
+
+    it "translates a literal-pinned axis (`{ variant: \"default\" }`) to a string key" do
+      # Real shadcn wrappers occasionally pin a default at the call site
+      # for an "always-this-variant" subclass. Previously this emitted
+      # `@"default"` — a Ruby parse error. Now the literal `"default"`
+      # is passed through as the bracket key on VARIANT_CLASSES.
+      source = <<~JSX
+        import { cva } from "class-variance-authority";
+        const xVariants = cva("base", {
+          variants: { variant: { default: "v1", outline: "v2" } }
+        });
+        function X({ className, ...props }) {
+          return <div className={cn(xVariants({ variant: "default" }), className)} {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include('X_VARIANT_CLASSES["variant"]["default"]')
+      expect(content).not_to include('@"default"')
+    end
+
+    it "emits cva constants in every sibling component file from the same source" do
+      # Module-level cva bindings are referenced by the rendered class
+      # body of EVERY component in the file. Suppressing the constants
+      # on sibling 2+ (the old behavior under the shared module_bindings
+      # array) left non-first siblings interpolating undefined constants
+      # at render time. They now appear in every emitted file.
+      source = <<~JSX
+        import { cva } from "class-variance-authority";
+        const sharedVariants = cva("base", {
+          variants: { variant: { default: "v" } }
+        });
+        export function A({ variant, ...props }) {
+          return <div className={cn(sharedVariants({ variant }))} {...props} />;
+        }
+        export function B({ variant, ...props }) {
+          return <span className={cn(sharedVariants({ variant }))} {...props} />;
+        }
+      JSX
+      backend = described_class.new
+      components = JsxRosetta::IR.lower_all(JsxRosetta.parse(source), source: source)
+      contents = components.flat_map { |c| backend.emit(c) }.to_h { |f| [f.path, f.contents] }
+
+      expect(contents["a.rb"]).to include("SHARED_BASE_CLASS")
+      expect(contents["b.rb"]).to include("SHARED_BASE_CLASS")
+      expect(contents["a.rb"]).to include("SHARED_VARIANT_CLASSES")
+      expect(contents["b.rb"]).to include("SHARED_VARIANT_CLASSES")
+    end
+
+    it "guards cva_constant_prefix against an empty prefix" do
+      # The degenerate name `Variants` would strip to `""` and emit
+      # `_BASE_CLASS` (a Ruby SyntaxError). Falls back to the bare
+      # upcased name when the stripped form is empty.
+      source = <<~JSX
+        import { cva } from "class-variance-authority";
+        const Variants = cva("base", { variants: { variant: { default: "v" } } });
+        function X({ variant, ...props }) {
+          return <div className={cn(Variants({ variant }))} {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("VARIANTS_BASE_CLASS")
+      # Empty prefix would manifest as a leading-underscore constant
+      # (`  _BASE_CLASS = `) — a Ruby SyntaxError.
+      expect(content).not_to match(/^\s*_BASE_CLASS\b/)
+    end
   end
 end

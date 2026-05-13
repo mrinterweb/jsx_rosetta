@@ -244,15 +244,17 @@ module JsxRosetta
       # local bindings still surface as a TODO comment block.
       def render_module_bindings_prefix(component)
         return "" if component.module_bindings.empty?
-        # Sibling components from the same source file share the same
-        # module_bindings list; emit the prefix only on the first sibling
-        # so a 40-line GraphQL TODO doesn't appear in every sibling file.
-        return "" unless @emit_module_prefix
 
         cva_bindings, other_bindings = component.module_bindings.partition { |b| b.is_a?(IR::CvaBinding) }
         sections = []
+        # cva constants are *referenced* by every sibling's class body via
+        # FOO_BASE_CLASS / FOO_VARIANT_CLASSES — they have to land in every
+        # sibling's file or non-first siblings NameError at render. The
+        # non-cva TODO block is informational only, so it suppresses on
+        # later siblings to avoid duplicating 40-line GraphQL blocks.
         sections << render_cva_constants(cva_bindings) unless cva_bindings.empty?
-        sections << render_module_local_bindings_todo(other_bindings) unless other_bindings.empty?
+        emit_todo_block = @emit_module_prefix && !other_bindings.empty?
+        sections << render_module_local_bindings_todo(other_bindings) if emit_todo_block
         sections.compact.join("\n")
       end
 
@@ -287,9 +289,15 @@ module JsxRosetta
         "#{lines.join("\n")}\n"
       end
 
+      # buttonVariants → BUTTON, alertVariants → ALERT. The degenerate
+      # name `"Variants"` would strip to `""` (a Ruby SyntaxError when
+      # used as a `_BASE_CLASS` prefix) — fall back to the raw name in
+      # that case. Two cva bindings whose names collapse to the same
+      # prefix (`fooVariant` and `fooVariants` → `FOO`) keep both forms
+      # disambiguated by upcasing the unstripped name as the fallback.
       def cva_constant_prefix(cva_name)
-        # buttonVariants → BUTTON, alertVariants → ALERT
-        base = cva_name.sub(/Variants?\z/, "")
+        stripped = cva_name.sub(/Variants?\z/, "")
+        base = stripped.empty? ? cva_name : stripped
         AST::Inflector.underscore(base).upcase
       end
 
@@ -1252,6 +1260,8 @@ module JsxRosetta
       #   { variant }                  → axis "variant" sourced from prop @variant
       #   { variant: variant }         → same as shorthand
       #   { variant: someOtherProp }   → axis "variant" sourced from @some_other_prop
+      #   { variant: "default" }       → literal pin, looks up by the literal key
+      #   { variant: true / null / 4 } → other literals, emit as Ruby equivalents
       # Returns [[axis_name, ruby_value_expr], ...] in the order they appear.
       def cva_call_axes(axes_src, cva)
         axes_src.split(",").filter_map do |raw|
@@ -1260,7 +1270,20 @@ module JsxRosetta
           value_src = (value || key).strip
           next unless cva.variants.key?(axis_name)
 
-          [axis_name, "@#{AST::Inflector.underscore(value_src)}"]
+          [axis_name, cva_axis_value_expr(value_src)]
+        end
+      end
+
+      # Decide how to render the value side of a cva axis pair. JS
+      # identifiers map to a snake_case `@ivar`; string / numeric /
+      # boolean / null literals map to the equivalent Ruby literal so
+      # the resulting `VARIANT_CLASSES["axis"][...]` lookup is well-formed.
+      def cva_axis_value_expr(value_src)
+        case value_src
+        when /\A"(.*)"\z/m, /\A'(.*)'\z/m then ::Regexp.last_match(1).inspect
+        when /\A-?\d/, "true", "false" then value_src
+        when "null", "undefined" then "nil"
+        else "@#{AST::Inflector.underscore(value_src)}"
         end
       end
 
