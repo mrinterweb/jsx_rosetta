@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Added — translate cva() variant builders into Ruby constants
+
+- **`const fooVariants = cva(base, { variants, defaultVariants })`** —
+  the dominant variant-builder pattern in shadcn/ui-shaped components —
+  used to land as a 40-line TODO comment block above the class, and
+  its use-site `cn(fooVariants({ variant }), className)` emitted the
+  verbatim JS as a literal string into the `class:` attribute. Both
+  paths are now translated end-to-end.
+  - Lowering recognizes the `cva(<base>, { variants, defaultVariants,
+    compoundVariants })` call shape and records it as a new
+    `IR::CvaBinding` node (parallel to `IR::LocalBinding`).
+  - Phlex backend renders each `CvaBinding` as three module-level
+    Ruby constants alongside the class — `FOO_BASE_CLASS`,
+    `FOO_VARIANT_CLASSES` (a frozen hash of axis → option → class
+    string), and `FOO_DEFAULT_VARIANTS`.
+  - The use-site call `cn(fooVariants({ variant, size }), className)`
+    in a `className={...}` attribute now emits a Ruby string
+    interpolation against those constants:
+    `"#{FOO_BASE_CLASS} #{FOO_VARIANT_CLASSES["variant"][@variant]}
+    #{FOO_VARIANT_CLASSES["size"][@size]} #{@class_name}"`.
+  - `render_initializer` now uses `defaultVariants` as the Ruby kwarg
+    default for any prop name matching a cva axis (so `variant:
+    "default"` flows from the cva binding even though the React
+    function signature took the prop undefaulted).
+- `compoundVariants` (the rule-of-rules cva feature) is not yet
+  translated — the verbatim JS source surfaces as a `# TODO:
+  compoundVariants from FOO aren't translated` comment alongside the
+  emitted constants so the reviewer can hand-port the rules.
+- Other module-level constants (non-cva) still take the existing
+  "# TODO: module-level constants" pre-class comment path.
+
 ### Added — drop Slot.Root branch from polymorphic asChild tags
 
 - **shadcn's `<Comp asChild>` no longer NameErrors at render.** Components

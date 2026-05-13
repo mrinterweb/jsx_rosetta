@@ -255,7 +255,118 @@ module JsxRosetta
         name = declarator[:id]&.[](:name)
         return unless name
 
+        # shadcn-style `const fooVariants = cva(base, { variants, ... })` gets
+        # recognized at lowering and stored as a CvaBinding — the backend
+        # turns it into real Ruby constants and the use-site call collapses
+        # to a string interpolation. Falls through to the generic LocalBinding
+        # path when the cva shape doesn't match exactly.
+        if (cva = parse_cva_binding(init, name))
+          bindings << cva
+          return
+        end
+
         bindings << LocalBinding.new(name: name, source: source_of(stmt).strip)
+      end
+
+      # Returns a CvaBinding when `init` is a `cva(base, options)` call we
+      # know how to parse, or nil to fall through to LocalBinding.
+      def parse_cva_binding(init, name)
+        return nil unless cva_call?(init)
+
+        args = init[:arguments] || []
+        base_class = extract_cva_string(args[0])
+        return nil unless base_class
+
+        options = args[1]
+        return nil unless options.is_a?(AST::Node) && options.type == "ObjectExpression"
+
+        CvaBinding.new(
+          name: name,
+          base_class: base_class,
+          variants: extract_cva_variants(options),
+          default_variants: extract_cva_default_variants(options),
+          compound_source: extract_cva_compound_source(options)
+        )
+      end
+
+      def cva_call?(node)
+        return false unless node.is_a?(AST::Node) && node.type == "CallExpression"
+
+        callee = node[:callee]
+        callee.is_a?(AST::Node) && callee.type == "Identifier" && callee[:name] == "cva"
+      end
+
+      def extract_cva_string(node)
+        return nil unless node.is_a?(AST::Node)
+
+        case node.type
+        when "StringLiteral"
+          node[:value]
+        when "TemplateLiteral"
+          # Only handle templates with no interpolations — they're effectively
+          # a string literal (shadcn's cva bases sometimes use a template for
+          # multi-line readability).
+          return nil unless (node[:expressions] || []).empty?
+
+          (node[:quasis] || []).map { |q| q[:value][:cooked] }.join
+        end
+      end
+
+      def extract_cva_variants(options_node)
+        prop = find_object_property(options_node, "variants")
+        return {} unless object_expression?(prop&.[](:value))
+
+        prop[:value][:properties].each_with_object({}) do |axis, hash|
+          axis_name = property_key(axis)
+          options = extract_cva_axis_options(axis[:value])
+          hash[axis_name] = options if axis_name && !options.empty?
+        end
+      end
+
+      def extract_cva_axis_options(axis_value_node)
+        return {} unless object_expression?(axis_value_node)
+
+        axis_value_node[:properties].each_with_object({}) do |opt, hash|
+          opt_name = property_key(opt)
+          opt_value = extract_cva_string(opt[:value])
+          hash[opt_name] = opt_value if opt_name && opt_value
+        end
+      end
+
+      def object_expression?(node)
+        node.is_a?(AST::Node) && node.type == "ObjectExpression"
+      end
+
+      def extract_cva_default_variants(options_node)
+        prop = find_object_property(options_node, "defaultVariants")
+        return {} unless prop && prop[:value].is_a?(AST::Node) && prop[:value].type == "ObjectExpression"
+
+        prop[:value][:properties].each_with_object({}) do |p, hash|
+          key = property_key(p)
+          val = extract_cva_string(p[:value])
+          hash[key] = val if key && val
+        end
+      end
+
+      def extract_cva_compound_source(options_node)
+        prop = find_object_property(options_node, "compoundVariants")
+        return nil unless prop
+
+        source_of(prop[:value]).strip
+      end
+
+      def find_object_property(obj_node, name)
+        (obj_node[:properties] || []).find { |p| property_key(p) == name }
+      end
+
+      def property_key(prop)
+        return nil unless prop.is_a?(AST::Node) && prop[:key].is_a?(AST::Node)
+
+        key = prop[:key]
+        case key.type
+        when "Identifier" then key[:name]
+        when "StringLiteral" then key[:value]
+        end
       end
 
       def attach_module_metadata(component, module_bindings, module_imports)

@@ -110,6 +110,29 @@ module JsxRosetta
       include Node
     end
 
+    # A module-level call to `cva()` from class-variance-authority. shadcn
+    # components ubiquitously use this builder to attach a base class string
+    # plus per-axis variant maps to a JSX component. The translator
+    # recognizes the pattern at lowering time so backends can emit real
+    # Ruby constants (`FOO_BASE_CLASS`, `FOO_VARIANT_CLASSES`) instead of
+    # leaving the call as a TODO comment, and so the use-site
+    # `cn(fooVariants({ variant }), className)` translates to a proper
+    # Ruby string interpolation.
+    #
+    # name             : String — the const binding name (e.g. "buttonVariants").
+    # base_class       : String — the first string argument to cva().
+    # variants         : Hash[String => Hash[String => String]]
+    #                    — { "variant" => { "default" => "...", "outline" => "..." } }
+    # default_variants : Hash[String => String] — per-axis default value name
+    #                    (matched against the variant axis keys).
+    # compound_source  : String | nil — verbatim JS source of any
+    #                    `compoundVariants` entry. Emitted as a TODO comment
+    #                    alongside the constants since compoundVariants
+    #                    semantics aren't supported in the first cut.
+    CvaBinding = Data.define(:name, :base_class, :variants, :default_variants, :compound_source) do
+      include Node
+    end
+
     # A hook invocation detected in the component body. Covers React's
     # built-in hooks plus framework hooks we recognize (Apollo's `useQuery`/
     # `useMutation`/etc., Next.js's `useRouter`/`usePathname`/etc.).

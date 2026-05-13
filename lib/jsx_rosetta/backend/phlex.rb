@@ -31,6 +31,12 @@ module JsxRosetta
       VALID_IDENTIFIER = /\A[a-z_][a-z0-9_]*\z/i
       VOID_ELEMENTS = %w[area base br col embed hr img input link meta param source track wbr].freeze
 
+      # Matches `cn(<name>({...}), <maybeClassName>)` — the call shape shadcn
+      # uses ubiquitously for variant-bearing components. Multi-line tolerant.
+      # The class body's `class:` translation consults this against the known
+      # CvaBindings on the current component (see rewrite_cva_call_site).
+      CVA_CALL_PATTERN = /\Acn\(\s*(\w+)\(\s*\{([^{}]*)\}\s*\)\s*(?:,\s*([^()]+?))?\s*\)\z/m
+
       # Inline budget for object/array literal rendering. When the
       # single-line rendering of a literal exceeds this width — measured
       # from the opening bracket — it switches to a multi-line layout
@@ -78,6 +84,7 @@ module JsxRosetta
       end
 
       def emit(component, source_filename: nil)
+        @current_component = component
         translator = build_translator(component)
         @stimulus_identifier = component.stimulus_methods.any? ? stimulus_identifier(component) : nil
         @lambda_methods = []
@@ -232,10 +239,9 @@ module JsxRosetta
       end
 
       # Top-level `const`/`let` declarations outside the component
-      # function — captured at lowering time and surfaced here as a TODO
-      # comment block above the class definition. We don't try to
-      # translate the JS; the human reviewer either copies the value as
-      # a Ruby constant or moves it to a Rails initializer.
+      # function — captured at lowering time. Cva-shaped bindings get
+      # emitted as real Ruby constants (FOO_BASE_CLASS, etc.); generic
+      # local bindings still surface as a TODO comment block.
       def render_module_bindings_prefix(component)
         return "" if component.module_bindings.empty?
         # Sibling components from the same source file share the same
@@ -243,10 +249,60 @@ module JsxRosetta
         # so a 40-line GraphQL TODO doesn't appear in every sibling file.
         return "" unless @emit_module_prefix
 
+        cva_bindings, other_bindings = component.module_bindings.partition { |b| b.is_a?(IR::CvaBinding) }
+        sections = []
+        sections << render_cva_constants(cva_bindings) unless cva_bindings.empty?
+        sections << render_module_local_bindings_todo(other_bindings) unless other_bindings.empty?
+        sections.compact.join("\n")
+      end
+
+      # Emit one cva binding as a triplet of Ruby constants —
+      # FOO_BASE_CLASS, FOO_VARIANT_CLASSES, FOO_DEFAULT_VARIANTS — that
+      # the call-site interpolation in the class body references.
+      def render_cva_constants(cva_bindings)
+        lines = []
+        cva_bindings.each do |cva|
+          prefix = cva_constant_prefix(cva.name)
+          lines << "#{prefix}_BASE_CLASS = #{cva.base_class.inspect}"
+          lines << "#{prefix}_VARIANT_CLASSES = #{format_variants_literal(cva.variants)}.freeze"
+          unless cva.default_variants.empty?
+            lines << "#{prefix}_DEFAULT_VARIANTS = #{cva.default_variants.inspect}.freeze"
+          end
+          if cva.compound_source
+            lines << "# TODO: compoundVariants from #{cva.name} aren't translated — port by hand:"
+            lines.concat(comment_lines(cva.compound_source))
+          end
+          lines << ""
+        end
+        "#{lines.join("\n").rstrip}\n"
+      end
+
+      # Non-cva module bindings — the original Gap E pre-class TODO block.
+      # Distinct from the body-level `render_local_bindings_todo` further
+      # below in this file.
+      def render_module_local_bindings_todo(bindings)
         lines = ["# TODO: module-level constants — translate to Ruby constants " \
                  "or move to a Rails initializer:"]
-        component.module_bindings.each { |b| lines.concat(comment_lines(b.source)) }
+        bindings.each { |b| lines.concat(comment_lines(b.source)) }
         "#{lines.join("\n")}\n"
+      end
+
+      def cva_constant_prefix(cva_name)
+        # buttonVariants → BUTTON, alertVariants → ALERT
+        base = cva_name.sub(/Variants?\z/, "")
+        AST::Inflector.underscore(base).upcase
+      end
+
+      def format_variants_literal(variants)
+        return "{}" if variants.empty?
+
+        lines = ["{"]
+        variants.each do |axis, options|
+          opts_pairs = options.map { |k, v| "#{k.inspect} => #{v.inspect}" }.join(", ")
+          lines << "  #{axis.inspect} => { #{opts_pairs} },"
+        end
+        lines << "}"
+        lines.join("\n")
       end
 
       def wrap_in_namespace(body)
@@ -399,6 +455,15 @@ module JsxRosetta
       end
 
       def ruby_default_for(prop, translator)
+        # Use the cva defaultVariants entry as the initializer default when
+        # the prop name matches a cva axis and the JSX didn't already
+        # specify its own default. So `variant: 'default'` flows from the
+        # cva binding's defaultVariants, even though the React function
+        # signature took it as an undefaulted prop.
+        if prop.default.nil? && (cva_default = cva_axis_default_for(prop.name))
+          return cva_default.inspect
+        end
+
         return "nil" if prop.default.nil?
 
         case prop.default
@@ -416,6 +481,21 @@ module JsxRosetta
         else
           "nil"
         end
+      end
+
+      # Look up `prop_name` (e.g. "variant") across every CvaBinding on the
+      # current component. Returns the cva default value (e.g. "default") or
+      # nil when no cva binding declares that axis with a default.
+      def cva_axis_default_for(prop_name)
+        return nil unless @current_component
+
+        @current_component.module_bindings.each do |b|
+          next unless b.is_a?(IR::CvaBinding)
+          next unless b.default_variants.key?(prop_name)
+
+          return b.default_variants[prop_name]
+        end
+        nil
       end
 
       def render_view_template(component, translator)
@@ -913,6 +993,14 @@ module JsxRosetta
       end
 
       def class_attribute_part(expression, translator)
+        # cva-aware fast path — see rewrite_cva_call_site. The class attr
+        # is the by-far-most-common cva use site, so we check here first
+        # before the generic translator (which would bail to a literal
+        # string holding the verbatim `cn(...)` source).
+        if (rewritten = rewrite_cva_call_site(expression, translator))
+          return { string_key: false, source: "class: #{rewritten}" }
+        end
+
         translated = translator.translate(expression)
         ruby = translated ? translated.ruby : expression.inspect
         { string_key: false, source: "class: #{ruby}" }
@@ -1115,12 +1203,72 @@ module JsxRosetta
       #      be parsed at all (e.g. `<LeftOutlined .../>`, array literals,
       #      template literals with method calls). Same TODO + nil path.
       def interpolated_attribute_value(name, value, translator, todos:)
+        # cva use-site rewrite: when the attribute value is a
+        # `cn(<knownCvaName>({...}), className)` call against a CvaBinding
+        # we recognized at lowering, emit a real Ruby string interpolation
+        # using the hoisted constants. Saves the generic translator from
+        # bailing to a literal-string class attribute.
+        if (rewritten = rewrite_cva_call_site(value.expression, translator))
+          return rewritten
+        end
+
         translated = translator.translate(value.expression)
         return translated.ruby if translated && !uppercase_unresolved?(translated.unresolved_identifiers)
 
         compact = value.expression.tr("\n", " ").squeeze(" ")
         todos << "attribute #{name.inspect} dropped — couldn't translate: #{compact}"
         "nil"
+      end
+
+      # Returns a Ruby string-literal source when `expression` matches the
+      # cva call shape against a known CvaBinding; nil otherwise (caller
+      # falls through to the generic translator).
+      def rewrite_cva_call_site(expression, translator)
+        return nil unless @current_component
+
+        match = CVA_CALL_PATTERN.match(expression.strip)
+        return nil unless match
+
+        cva_name = match[1]
+        axes_src = match[2]
+        class_arg = match[3]
+        cva = @current_component.module_bindings.find do |b|
+          b.is_a?(IR::CvaBinding) && b.name == cva_name
+        end
+        return nil unless cva
+
+        prefix = cva_constant_prefix(cva.name)
+        axis_parts = cva_call_axes(axes_src, cva).map do |axis_name, ruby_value|
+          "\#{#{prefix}_VARIANT_CLASSES[#{axis_name.inspect}][#{ruby_value}]}"
+        end
+        class_part = class_arg && translate_cva_class_arg(class_arg, translator)
+
+        parts = ["\#{#{prefix}_BASE_CLASS}", *axis_parts]
+        parts << "\#{#{class_part}}" if class_part
+        %("#{parts.join(" ")}")
+      end
+
+      # Parse the inner `{...}` of the cva call. Supports:
+      #   { variant }                  → axis "variant" sourced from prop @variant
+      #   { variant: variant }         → same as shorthand
+      #   { variant: someOtherProp }   → axis "variant" sourced from @some_other_prop
+      # Returns [[axis_name, ruby_value_expr], ...] in the order they appear.
+      def cva_call_axes(axes_src, cva)
+        axes_src.split(",").filter_map do |raw|
+          key, value = raw.split(":", 2).map(&:strip)
+          axis_name = key
+          value_src = (value || key).strip
+          next unless cva.variants.key?(axis_name)
+
+          [axis_name, "@#{AST::Inflector.underscore(value_src)}"]
+        end
+      end
+
+      def translate_cva_class_arg(class_arg, translator)
+        translated = translator.translate(class_arg.strip)
+        return translated.ruby if translated
+
+        "@#{AST::Inflector.underscore(class_arg.strip)}"
       end
 
       def uppercase_unresolved?(unresolved_identifiers)

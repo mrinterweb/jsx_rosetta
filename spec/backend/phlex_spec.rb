@@ -1976,4 +1976,125 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("#   operation: LIST_POSTS")
     end
   end
+
+  describe "cva() → Ruby constants" do
+    # `const fooVariants = cva(base, { variants, defaultVariants })` from
+    # class-variance-authority is the dominant variant-builder pattern in
+    # shadcn/ui. The translator now recognizes the call shape and emits
+    # real Ruby constants alongside the class. The use-site
+    # `cn(fooVariants({ variant }), className)` becomes a Ruby string
+    # interpolation against those constants — no more literal `cn(...)`
+    # string landing in the class attribute.
+    let(:cva_source) do
+      <<~JSX
+        import { cva } from "class-variance-authority";
+
+        const alertVariants = cva(
+          "relative grid w-full",
+          {
+            variants: {
+              variant: {
+                default: "bg-card text-card-foreground",
+                destructive: "bg-card text-destructive"
+              }
+            },
+            defaultVariants: { variant: "default" }
+          }
+        );
+
+        function Alert({ className, variant, ...props }) {
+          return <div className={cn(alertVariants({ variant }), className)} role="alert" {...props} />;
+        }
+      JSX
+    end
+
+    it "emits per-axis variant maps as a Ruby constant" do
+      content = file_contents(cva_source, "alert.rb")
+
+      expect(content).to include('ALERT_BASE_CLASS = "relative grid w-full"')
+      expect(content).to include("ALERT_VARIANT_CLASSES = {")
+      expect(content).to include('"variant" => { "default" => "bg-card text-card-foreground", ' \
+                                 '"destructive" => "bg-card text-destructive" }')
+      expect(content).to include('ALERT_DEFAULT_VARIANTS = {"variant" => "default"}.freeze')
+    end
+
+    it "translates the cn(fooVariants({variant}), className) call site to a Ruby interpolation" do
+      content = file_contents(cva_source, "alert.rb")
+
+      expected = "class: \"\#{ALERT_BASE_CLASS} \#{ALERT_VARIANT_CLASSES[\"variant\"][@variant]} \#{@class_name}\""
+      expect(content).to include(expected)
+      expect(content).not_to include("cn(alertVariants")
+    end
+
+    it "uses defaultVariants as the initializer kwarg default" do
+      content = file_contents(cva_source, "alert.rb")
+
+      expect(content).to include('variant: "default"')
+    end
+
+    it "handles multi-axis cva (variant + size)" do
+      source = <<~JSX
+        import { cva } from "class-variance-authority";
+
+        const buttonVariants = cva("base", {
+          variants: {
+            variant: { default: "v1", outline: "v2" },
+            size:    { sm: "s1", lg: "s2" }
+          },
+          defaultVariants: { variant: "default", size: "sm" }
+        });
+
+        function Button({ className, variant, size, ...props }) {
+          return <button className={cn(buttonVariants({ variant, size }), className)} {...props} />;
+        }
+      JSX
+      content = file_contents(source, "button.rb")
+
+      expected = "class: \"\#{BUTTON_BASE_CLASS} \#{BUTTON_VARIANT_CLASSES[\"variant\"][@variant]} " \
+                 "\#{BUTTON_VARIANT_CLASSES[\"size\"][@size]} \#{@class_name}\""
+      expect(content).to include(expected)
+      expect(content).to include('variant: "default"')
+      expect(content).to include('size: "sm"')
+    end
+
+    it "preserves compoundVariants as a TODO comment" do
+      source = <<~JSX
+        import { cva } from "class-variance-authority";
+
+        const xVariants = cva("base", {
+          variants: { variant: { default: "v1", alt: "v2" } },
+          defaultVariants: { variant: "default" },
+          compoundVariants: [
+            { variant: "alt", size: "lg", className: "compound-rule" }
+          ]
+        });
+
+        function X({ className, variant, ...props }) {
+          return <div className={cn(xVariants({ variant }), className)} {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: compoundVariants from xVariants aren't translated")
+      expect(content).to include("compound-rule")
+    end
+
+    it "leaves non-cva module-level consts on the old TODO-comment path" do
+      # cva should be additive: other module-level constants still surface
+      # as a "# TODO: module-level constants" comment block.
+      source = <<~JSX
+        import { cva } from "class-variance-authority";
+        const PI = 3.14;
+        const xVariants = cva("base", { variants: { variant: { default: "v" } } });
+        function X({ variant, ...props }) {
+          return <div className={cn(xVariants({ variant }))} {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("X_BASE_CLASS")
+      expect(content).to include("# TODO: module-level constants")
+      expect(content).to include("const PI = 3.14")
+    end
+  end
 end
