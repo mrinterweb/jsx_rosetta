@@ -194,5 +194,116 @@ RSpec.describe JsxRosetta::CLI do
       expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_USAGE)
       expect(result[:stderr]).to include("missing required argument")
     end
+
+    it "emits per-controller files into the --controllers DIR" do
+      root, pages_dir = make_pages_dir("index.tsx", "accounts/index.tsx", "accounts/[id].tsx")
+      controllers_dir = File.join(root, "controllers")
+
+      result = run("pages-routes", pages_dir, "--controllers", controllers_dir)
+
+      expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_OK)
+      expect(File).to exist(File.join(controllers_dir, "pages_controller.rb"))
+      expect(File).to exist(File.join(controllers_dir, "accounts_controller.rb"))
+      expect(File.read(File.join(controllers_dir, "accounts_controller.rb")))
+        .to include("class AccountsController < ApplicationController")
+      expect(result[:stdout]).to include("wrote")
+    ensure
+      FileUtils.remove_entry(root) if root
+    end
+
+    it "skips controller files that already exist without overwriting" do
+      root, pages_dir = make_pages_dir("accounts/index.tsx")
+      controllers_dir = File.join(root, "controllers")
+      FileUtils.mkdir_p(controllers_dir)
+      existing = File.join(controllers_dir, "accounts_controller.rb")
+      File.write(existing, "# my custom controller\n")
+
+      result = run("pages-routes", pages_dir, "--controllers", controllers_dir)
+
+      expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_OK)
+      expect(File.read(existing)).to eq("# my custom controller\n")
+      expect(result[:stdout]).to include("skipped #{existing} (exists)")
+    ensure
+      FileUtils.remove_entry(root) if root
+    end
+  end
+
+  describe "translate --rails-routes" do
+    def make_page_file(*rel_paths, contents: "export function HomePage() { return <h1>hi</h1>; }")
+      dir = Dir.mktmpdir("translate_rails_routes")
+      pages_dir = File.join(dir, "pages")
+      rel_paths.each do |rel|
+        full = File.join(pages_dir, rel)
+        FileUtils.mkdir_p(File.dirname(full))
+        File.write(full, contents)
+      end
+      [dir, pages_dir]
+    end
+
+    it "writes the Phlex view to <controller>/<action>.rb with Views::Controller::Action class" do
+      root, pages_dir = make_page_file("home.tsx")
+      out_dir = File.join(root, "out")
+
+      result = run("translate", File.join(pages_dir, "home.tsx"),
+                   "--as=phlex", "--rails-routes", pages_dir, "-o", out_dir)
+
+      expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_OK)
+      target = File.join(out_dir, "pages", "home.rb")
+      expect(File).to exist(target)
+      expect(File.read(target)).to include("class Views::Pages::Home < Views::Base")
+    ensure
+      FileUtils.remove_entry(root) if root
+    end
+
+    it "places nested routes under the resolved controller dir" do
+      root, pages_dir = make_page_file("accounts/[id].tsx",
+                                       contents: "export function AccountShow() { return <div/>; }")
+      out_dir = File.join(root, "out")
+
+      result = run("translate", File.join(pages_dir, "accounts/[id].tsx"),
+                   "--as=phlex", "--rails-routes", pages_dir, "-o", out_dir)
+
+      expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_OK)
+      target = File.join(out_dir, "accounts", "show.rb")
+      expect(File).to exist(target)
+      expect(File.read(target)).to include("class Views::Accounts::Show < Views::Base")
+    ensure
+      FileUtils.remove_entry(root) if root
+    end
+
+    it "errors when --rails-routes is used without --as=phlex" do
+      root, pages_dir = make_page_file("home.tsx")
+      result = run("translate", File.join(pages_dir, "home.tsx"), "--rails-routes", pages_dir)
+
+      expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_FAILURE)
+      expect(result[:stderr]).to include("requires --as=phlex")
+    ensure
+      FileUtils.remove_entry(root) if root
+    end
+
+    it "errors when the input file is not under the pages directory" do
+      root, pages_dir = make_page_file("home.tsx")
+      stray = File.join(root, "stray.tsx")
+      File.write(stray, "export function Stray() { return <div/>; }")
+
+      result = run("translate", stray, "--as=phlex", "--rails-routes", pages_dir)
+
+      expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_FAILURE)
+      expect(result[:stderr]).to include("is not under")
+    ensure
+      FileUtils.remove_entry(root) if root
+    end
+
+    it "errors when the input file is a skipped (non-page) file" do
+      root, pages_dir = make_page_file("_app.tsx",
+                                       contents: "export function App({Component}) { return <Component/>; }")
+      result = run("translate", File.join(pages_dir, "_app.tsx"),
+                   "--as=phlex", "--rails-routes", pages_dir)
+
+      expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_FAILURE)
+      expect(result[:stderr]).to include("has no route")
+    ensure
+      FileUtils.remove_entry(root) if root
+    end
   end
 end

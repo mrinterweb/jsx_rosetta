@@ -59,6 +59,60 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     end
   end
 
+  describe "rails_view: option" do
+    let(:source) { "function HomePage() { return <h1>hi</h1>; }" }
+
+    def rails_route(controller:, action:)
+      JsxRosetta::PagesRouting::Route.new(
+        rails_path: "/", controller: controller, action: action, source_path: "index.tsx"
+      )
+    end
+
+    it "places the file at <controller>/<action>.rb and names the class Views::<Controller>::<Action>" do
+      route = rails_route(controller: "pages", action: "home")
+      files = files_for(source, rails_view: route)
+
+      expect(files.keys).to eq(["pages/home.rb"])
+      content = files["pages/home.rb"]
+      expect(content).to include("class Views::Pages::Home < Views::Base")
+    end
+
+    it "upper-camelizes multi-word controller and action names in the class header" do
+      route = rails_route(controller: "policy_providers", action: "edit_settings")
+      content = files_for(source, rails_view: route).fetch("policy_providers/edit_settings.rb")
+
+      expect(content).to include("class Views::PolicyProviders::EditSettings < Views::Base")
+    end
+
+    it "skips the `Page` suffix auto-derivation when rails_view is in effect" do
+      route = rails_route(controller: "pages", action: "home")
+      content = files_for(source, rails_view: route).fetch("pages/home.rb")
+
+      expect(content).not_to include("HomePage")
+    end
+
+    it "does not wrap the class in a module" do
+      route = rails_route(controller: "pages", action: "home")
+      content = files_for(source, rails_view: route).fetch("pages/home.rb")
+
+      expect(content).not_to match(/^module /)
+    end
+
+    it "rejects rails_view: combined with suffix:" do
+      expect { described_class.new(rails_view: rails_route(controller: "pages", action: "home"), suffix: "Component") }
+        .to raise_error(ArgumentError, /cannot be combined/)
+    end
+
+    it "rejects rails_view: combined with namespace:" do
+      expect do
+        described_class.new(
+          rails_view: rails_route(controller: "pages", action: "home"),
+          namespace: "Views"
+        )
+      end.to raise_error(ArgumentError, /cannot be combined/)
+    end
+  end
+
   describe "core IR rendering" do
     it "renders a single HTML element with no props as a bare tag call" do
       content = file_contents("function X() { return <hr />; }", "x.rb")

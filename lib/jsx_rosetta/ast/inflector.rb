@@ -20,6 +20,10 @@ module JsxRosetta
         parts[0] + parts[1..].map(&:capitalize).join
       end
 
+      def upper_camelize(string)
+        string.split("_").map(&:capitalize).join
+      end
+
       # Emit a Ruby string literal in the rubocop-default single-quoted
       # form when safe. Falls back to `String#inspect` (double-quoted with
       # escapes) when the source contains characters that prevent the

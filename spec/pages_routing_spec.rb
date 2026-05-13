@@ -274,4 +274,115 @@ RSpec.describe JsxRosetta::PagesRouting do
   def compile_ruby(source)
     RubyVM::InstructionSequence.compile(source)
   end
+
+  describe "Route#url_params" do
+    def route_with(path)
+      JsxRosetta::PagesRouting::Route.new(
+        rails_path: path, controller: "c", action: "a", source_path: "p"
+      )
+    end
+
+    it "returns an empty list when the path has no params" do
+      expect(route_with("/accounts").url_params).to eq([])
+    end
+
+    it "extracts a single :id param" do
+      expect(route_with("/accounts/:id").url_params).to eq(["id"])
+    end
+
+    it "extracts multiple snake_cased params in order" do
+      expect(route_with("/policies/:provider_slug/:policy_id/edit").url_params)
+        .to eq(%w[provider_slug policy_id])
+    end
+
+    it "includes catch-all params" do
+      expect(route_with("/docs/*rest").url_params).to eq(["rest"])
+    end
+
+    it "includes optional catch-all params" do
+      expect(route_with("/accounts/:id(/*extra)").url_params).to eq(%w[id extra])
+    end
+  end
+
+  describe ".emit_controllers" do
+    def make_route(rails_path:, controller:, action:, source_path: "src.tsx")
+      JsxRosetta::PagesRouting::Route.new(
+        rails_path: rails_path, controller: controller, action: action, source_path: source_path
+      )
+    end
+
+    it "produces one ControllerFile per controller in the route table" do
+      routes = [
+        make_route(rails_path: "/", controller: "pages", action: "index"),
+        make_route(rails_path: "/accounts", controller: "accounts", action: "index"),
+        make_route(rails_path: "/accounts/:id", controller: "accounts", action: "show")
+      ]
+
+      files = described_class.emit_controllers(routes: routes)
+
+      expect(files.map(&:path)).to contain_exactly("accounts_controller.rb", "pages_controller.rb")
+    end
+
+    it "renders an ApplicationController-inheriting class with one def per action" do
+      routes = [
+        make_route(rails_path: "/accounts", controller: "accounts", action: "index"),
+        make_route(rails_path: "/accounts/:id", controller: "accounts", action: "show")
+      ]
+
+      contents = described_class.emit_controllers(routes: routes).first.contents
+
+      expect(contents).to include("class AccountsController < ApplicationController")
+      expect(contents).to include("  def index\n  end")
+      expect(contents).to include("  def show\n  end")
+      expect { compile_ruby(contents) }.not_to raise_error
+    end
+
+    it "lists URL params in a comment above each action" do
+      routes = [
+        make_route(rails_path: "/policies/:provider_slug/:policy_id/edit",
+                   controller: "policies", action: "edit")
+      ]
+
+      contents = described_class.emit_controllers(routes: routes).first.contents
+
+      expect(contents).to include("  # params: :provider_slug, :policy_id\n  def edit")
+    end
+
+    it "alphabetizes actions inside a controller" do
+      routes = [
+        make_route(rails_path: "/users/:id/edit", controller: "users", action: "edit"),
+        make_route(rails_path: "/users", controller: "users", action: "index"),
+        make_route(rails_path: "/users/new", controller: "users", action: "new"),
+        make_route(rails_path: "/users/:id", controller: "users", action: "show")
+      ]
+
+      contents = described_class.emit_controllers(routes: routes).first.contents
+
+      positions = %w[edit index new show].map { |a| contents.index("def #{a}") }
+      expect(positions).to eq(positions.sort)
+    end
+
+    it "upper-camelizes multi-word controller names" do
+      routes = [
+        make_route(rails_path: "/policy_providers", controller: "policy_providers", action: "index")
+      ]
+
+      contents = described_class.emit_controllers(routes: routes).first.contents
+
+      expect(contents).to include("class PolicyProvidersController < ApplicationController")
+    end
+
+    it "dedupes identical (controller, action) pairs across multiple source files" do
+      routes = [
+        make_route(rails_path: "/accounts/:id", controller: "accounts", action: "show",
+                   source_path: "accounts/[id].tsx"),
+        make_route(rails_path: "/accounts/:id", controller: "accounts", action: "show",
+                   source_path: "accounts/[id]/index.tsx")
+      ]
+
+      contents = described_class.emit_controllers(routes: routes).first.contents
+
+      expect(contents.scan("def show").size).to eq(1)
+    end
+  end
 end
