@@ -102,6 +102,11 @@ module JsxRosetta
         end
         files.concat(lucide_icon_files(component))
         files
+      ensure
+        # Drop the per-emit IR reference so a long-running emitter
+        # instance doesn't pin the entire component tree until the
+        # next emit() call.
+        @current_component = nil
       end
 
       # When a source file lowers to multiple sibling components, lower_all
@@ -654,16 +659,21 @@ module JsxRosetta
         render_prop = invocation.children.find { |c| c.is_a?(IR::RenderProp) }
         return render_with_render_prop(new_call, render_prop, translator, indent) if render_prop
 
-        if invocation.children.empty?
-          # `<Component {...rest} />` — same idiom as element_body. The spread
-          # carries `children`; yield to the caller's block.
-          return "#{spaces(indent)}render #{new_call}" unless spreads_children?(invocation)
+        call = "render #{new_call}"
+        return "#{spaces(indent)}#{call}" if blockless_invocation?(invocation)
 
-          yield_only_block("render #{new_call}", indent)
+        if invocation.children.empty?
+          # `<Component {...rest} />` — same idiom as element_body. The
+          # spread carries `children`; yield to the caller's block.
+          yield_only_block(call, indent)
         else
           inner = invocation.children.map { |c| render_ir_node(c, translator, indent: indent + 2) }.join("\n")
-          "#{spaces(indent)}render #{new_call} do\n#{inner}\n#{spaces(indent)}end"
+          "#{spaces(indent)}#{call} do\n#{inner}\n#{spaces(indent)}end"
         end
+      end
+
+      def blockless_invocation?(invocation)
+        invocation.children.empty? && !spreads_children?(invocation)
       end
 
       def yield_only_block(call, indent)

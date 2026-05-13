@@ -133,10 +133,12 @@ module JsxRosetta
     #                    — { "variant" => { "default" => "...", "outline" => "..." } }
     # default_variants : Hash[String => String] — per-axis default value name
     #                    (matched against the variant axis keys).
-    # compound_source  : String | nil — verbatim JS source of any
-    #                    `compoundVariants` entry. Emitted as a TODO comment
-    #                    alongside the constants since compoundVariants
-    #                    semantics aren't supported in the first cut.
+    # compound_source  : String | nil — INTENTIONALLY UNPARSED verbatim JS
+    #                    source of any `compoundVariants` entry. Field name
+    #                    reads structural; it isn't — backends only print
+    #                    it as a TODO comment alongside the constants since
+    #                    compoundVariants semantics aren't supported in the
+    #                    first cut.
     CvaBinding = Data.define(:name, :base_class, :variants, :default_variants, :compound_source) do
       include Node
     end

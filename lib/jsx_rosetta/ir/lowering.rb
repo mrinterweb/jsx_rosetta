@@ -1330,15 +1330,24 @@ module JsxRosetta
       # Combine the registry's fixed attrs (role, type, etc.) with the
       # consumer's own JSX attributes. Consumer attrs win on collision — the
       # JSX is the source of truth; the registry just supplies safe defaults.
+      # Collision keys normalize away case + hyphens/underscores so future
+      # registry entries like `data-state` don't slip past a consumer's
+      # `dataState`.
       def merge_radix_attrs(fixed_attrs, jsx_attrs)
-        user_names = jsx_attrs.filter_map { |a| a.respond_to?(:name) ? a.name : nil }.to_set
+        user_keys = jsx_attrs.filter_map do |a|
+          a.respond_to?(:name) ? normalize_attr_key(a.name) : nil
+        end.to_set
         injected = fixed_attrs.filter_map do |name, value|
           attr_name = name.to_s
-          next if user_names.include?(attr_name)
+          next if user_keys.include?(normalize_attr_key(attr_name))
 
           Attribute.new(name: attr_name, value: value.to_s)
         end
         injected + jsx_attrs
+      end
+
+      def normalize_attr_key(name)
+        name.to_s.downcase.tr("-_", "")
       end
 
       def lower_polymorphic_tag_use(poly, attributes, children)
