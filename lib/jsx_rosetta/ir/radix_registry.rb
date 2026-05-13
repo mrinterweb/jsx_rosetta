@@ -41,7 +41,22 @@ module JsxRosetta
         # Aspect-ratio + scroll-area roots are presentational containers.
         %w[AspectRatioPrimitive Root] => { tag: "div", attrs: {} },
         %w[ScrollAreaPrimitive Root] => { tag: "div", attrs: {} },
-        %w[ScrollAreaPrimitive Viewport] => { tag: "div", attrs: {} }
+        %w[ScrollAreaPrimitive Viewport] => { tag: "div", attrs: {} },
+        # Tabs primitives — `data-orientation` comes from the JSX attrs;
+        # role=tablist on List + role=tab on Trigger + role=tabpanel on Content.
+        %w[TabsPrimitive Root] => { tag: "div", attrs: {} },
+        %w[TabsPrimitive List] => { tag: "div", attrs: { role: "tablist" } },
+        %w[TabsPrimitive Trigger] => { tag: "button", attrs: { type: "button", role: "tab" } },
+        %w[TabsPrimitive Content] => { tag: "div", attrs: { role: "tabpanel" } },
+        # Toggle / ToggleGroup — pressable buttons.
+        %w[TogglePrimitive Root] => { tag: "button", attrs: { type: "button" } },
+        %w[ToggleGroupPrimitive Root] => { tag: "div", attrs: { role: "group" } },
+        %w[ToggleGroupPrimitive Item] => { tag: "button", attrs: { type: "button" } },
+        # Collapsible — presentational containers; the open/closed state is
+        # data-state driven by the consumer (Stimulus or otherwise).
+        %w[CollapsiblePrimitive Root] => { tag: "div", attrs: {} },
+        %w[CollapsiblePrimitive Trigger] => { tag: "button", attrs: { type: "button" } },
+        %w[CollapsiblePrimitive Content] => { tag: "div", attrs: {} }
       }.freeze
 
       def self.lookup(local_name, member)
