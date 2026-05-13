@@ -653,7 +653,7 @@ RSpec.describe JsxRosetta::IR::Lowering do
       JSX
 
       expect(ir.module_imports).to include(
-        JsxRosetta::IR::ModuleImport.new(name: "Foo", source: "bar", kind: :named)
+        JsxRosetta::IR::ModuleImport.new(name: "Foo", source: "bar", kind: :named, imported_name: "Foo")
       )
     end
 
@@ -666,6 +666,20 @@ RSpec.describe JsxRosetta::IR::Lowering do
       expect(ir.module_imports.map(&:name)).to include("renamedFoo")
     end
 
+    it "captures the original exported name on a renamed import" do
+      # `import { foo as renamedFoo }` — `name` is the local alias,
+      # `imported_name` is the source-module export ("foo"). Backends
+      # that vendor data by canonical name (e.g. Lucide SVGs) need the
+      # original name even when the consumer renames the binding.
+      ir = lower(<<~JSX)
+        import { foo as renamedFoo } from "bar";
+        function X() { return <p>{renamedFoo}</p>; }
+      JSX
+
+      renamed = ir.module_imports.find { |i| i.name == "renamedFoo" }
+      expect(renamed.imported_name).to eq("foo")
+    end
+
     it "captures default imports as :default" do
       ir = lower(<<~JSX)
         import DefaultThing from "module-b";
@@ -673,7 +687,7 @@ RSpec.describe JsxRosetta::IR::Lowering do
       JSX
 
       expect(ir.module_imports).to include(
-        JsxRosetta::IR::ModuleImport.new(name: "DefaultThing", source: "module-b", kind: :default)
+        JsxRosetta::IR::ModuleImport.new(name: "DefaultThing", source: "module-b", kind: :default, imported_name: nil)
       )
     end
 
@@ -684,7 +698,7 @@ RSpec.describe JsxRosetta::IR::Lowering do
       JSX
 
       expect(ir.module_imports).to include(
-        JsxRosetta::IR::ModuleImport.new(name: "styles", source: "./X.module.css", kind: :namespace)
+        JsxRosetta::IR::ModuleImport.new(name: "styles", source: "./X.module.css", kind: :namespace, imported_name: nil)
       )
     end
 
@@ -1728,13 +1742,15 @@ RSpec.describe JsxRosetta::IR::Lowering do
         local_binding_names: [],
         module_bindings: [],
         module_imports: [
-          JsxRosetta::IR::ModuleImport.new(name: "React", source: "react", kind: :default)
+          JsxRosetta::IR::ModuleImport.new(name: "React", source: "react", kind: :default, imported_name: nil)
         ],
         stimulus_methods: [
           JsxRosetta::IR::StimulusMethod.new(
             name: "onClick",
             body_source: "// originally bound to: onClick",
-            original_name: "onClick"
+            original_name: "onClick",
+            params: [],
+            body_is_block: false
           )
         ],
         react_hooks: [],

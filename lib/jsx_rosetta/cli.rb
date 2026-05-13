@@ -115,7 +115,8 @@ module JsxRosetta
         backend: backend,
         backend_options: backend_options,
         typescript: typescript,
-        source_filename: input_path
+        source_filename: input_path,
+        keep_slot: options[:keep_slot] || false
       )
 
       write_emitted_files(files, out_dir)
@@ -298,6 +299,7 @@ module JsxRosetta
       when "--tsx", "--typescript" then options[:tsx] = true
       when "--as" then options[:as] = @argv.shift
       when /\A--as=(.+)\z/ then options[:as] = ::Regexp.last_match(1)
+      when "--keep-slot" then options[:keep_slot] = true
       else return false
       end
       true

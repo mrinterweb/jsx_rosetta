@@ -363,11 +363,55 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("clickHandler(event) {")
     end
 
-    it "preserves the original handler body as a TODO comment" do
+    it "pastes the JSX handler body into the generated Stimulus method" do
       content = file_contents(source, "x_controller.js")
 
-      expect(content).to include("// TODO: translate from the original JSX handler:")
+      # The DOM-driven body `doThing()` is valid JS, so we drop it straight
+      # into the method instead of leaving the human reviewer with a TODO
+      # comment to translate.
+      expect(content).to include("clickHandler(event) {")
       expect(content).to include("doThing()")
+      expect(content).not_to include("// TODO: translate from the original JSX handler:")
+    end
+
+    it "falls back to a TODO comment when the body uses a React state setter" do
+      # `setOpen(!open)` references a hook return; we can't run the setter
+      # in the browser, so preserve the body as a comment and leave the
+      # method body empty for the reviewer to port.
+      state_source = "function X() { return <button onClick={() => setOpen(!open)}>x</button>; }"
+      content = file_contents(state_source, "x_controller.js")
+
+      expect(content).to include("// TODO: translate from the original JSX handler:")
+      expect(content).to include("setOpen(!open)")
+      expect(content).to match(%r{clickHandler\(event\) \{\s+// \.\.\.\s+\}})
+    end
+
+    it "uses the arrow's parameter name so the pasted body's references resolve" do
+      # `(e) => e.currentTarget...` pastes verbatim AND the method's
+      # parameter is named `e` to match — body references resolve at runtime.
+      param_source = <<~JSX
+        function X() {
+          return (
+            <button onClick={(e) => { e.currentTarget.dataset.x = "y"; }}>
+              click
+            </button>
+          );
+        }
+      JSX
+      content = file_contents(param_source, "x_controller.js")
+
+      expect(content).to include("clickHandler(e) {")
+      expect(content).to include('e.currentTarget.dataset.x = "y"')
+    end
+
+    it "leaves identifier-bound handlers (no inline arrow body) as a TODO" do
+      # `onClick={handleClick}` with `handleClick` not declared locally has
+      # no body to paste; the existing identifier-bound TODO behavior stays.
+      ident_source = "function X({ handleClick }) { return <button onClick={handleClick}>x</button>; }"
+      content = file_contents(ident_source, "x_controller.js")
+
+      expect(content).to include("// TODO: translate from the original JSX handler:")
+      expect(content).to include("// originally bound to: handleClick")
     end
 
     it "emits a collision marker when a handler name was uniquified" do
@@ -389,6 +433,55 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("handleReset(event) {")
       expect(content).to include("handleReset2(event) {")
       expect(content).to include('// NOTE: method renamed from "handleReset"')
+    end
+
+    it "bails to TODO when the arrow has a destructured parameter" do
+      # `({ target }) => …` — the body references `target` but pasting
+      # without the destructuring would NameError. Bail to TODO so the
+      # reviewer translates the destructure intentionally.
+      destructured = "function X() { return <button onClick={({ target }) => target.dataset.x = 'y'}>x</button>; }"
+      content = file_contents(destructured, "x_controller.js")
+
+      expect(content).to include("// TODO: translate from the original JSX handler:")
+    end
+
+    it "bails to TODO when the arrow has a rest parameter" do
+      rest = "function X() { return <button onClick={(...args) => doX(args)}>x</button>; }"
+      content = file_contents(rest, "x_controller.js")
+
+      expect(content).to include("// TODO: translate from the original JSX handler:")
+    end
+
+    it "still pastes when the body calls a DOM method whose name starts with `set`" do
+      # `e.setAttribute(` / `el.setPointerCapture(` look like top-level
+      # state setters under a `\\bset[A-Z]` match because `\\b` matches at
+      # the `.`. The tightened regex (negative lookbehind on `[.\\w]`)
+      # only fires on bare `setX(`, not `obj.setX(`.
+      dom_source = <<~JSX
+        function X() {
+          return <button onClick={(e) => { e.target.setAttribute("data-x", "1"); }}>x</button>;
+        }
+      JSX
+      content = file_contents(dom_source, "x_controller.js")
+
+      expect(content).to include('e.target.setAttribute("data-x", "1")')
+      expect(content).not_to include("// TODO: translate from the original JSX handler:")
+    end
+
+    it "does NOT strip outer braces on an expression-form arrow body" do
+      # `() => ({ x: 1 })` — Babel hands back `{ x: 1 }` as the body
+      # source. Stripping braces would yield `x: 1`, a JS label
+      # statement (no-op). With the AST-aware check we only strip
+      # when the body was a BlockStatement.
+      expr_source = <<~JSX
+        function X() {
+          return <button onClick={() => ({ x: 1 })}>x</button>;
+        }
+      JSX
+      content = file_contents(expr_source, "x_controller.js")
+
+      expect(content).to include("{ x: 1 }")
+      expect(content).not_to match(/^\s*x: 1\s*$/)
     end
   end
 
@@ -1446,6 +1539,391 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     end
   end
 
+  describe "Slot / asChild branch drop" do
+    # The shadcn `<Comp asChild>` pattern routes through Radix's Slot.Root:
+    #   const Comp = asChild ? Slot : "div"
+    #   return <Comp ...>
+    # That used to lower as a polymorphic conditional whose true-branch
+    # rendered `Slot::Root.new(...)` — a non-existent Ruby class. By default
+    # the Slot branch is dropped at lowering time, leaving only the non-Slot
+    # render path. Pass `--keep-slot` / `keep_slot: true` to preserve the
+    # conditional when the consumer shims Slot::Root.
+    def keep_slot_files(source, **opts)
+      backend = described_class.new(**opts)
+      component = JsxRosetta.lower(source, keep_slot: true)
+      backend.emit(component).to_h { |file| [file.path, file.contents] }
+    end
+
+    it "drops the Slot branch and renders only the non-Slot tag by default" do
+      source = <<~JSX
+        import { Slot } from "radix-ui";
+        function X({ asChild, ...props }) {
+          const Comp = asChild ? Slot : "div";
+          return <Comp {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("div(")
+      expect(content).not_to include("Slot")
+    end
+
+    it "drops Slot.Root (member-chain form) the same way" do
+      source = <<~JSX
+        import { Slot } from "radix-ui";
+        function X({ asChild, ...props }) {
+          const Comp = asChild ? Slot.Root : "span";
+          return <Comp {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("span(")
+      expect(content).not_to include("Slot")
+    end
+
+    it "leaves the conditional intact under keep_slot: true" do
+      source = <<~JSX
+        import { Slot } from "radix-ui";
+        function X({ asChild, ...props }) {
+          const Comp = asChild ? Slot : "div";
+          return <Comp {...props} />;
+        }
+      JSX
+      content = keep_slot_files(source).fetch("x.rb")
+
+      expect(content).to include("Slot")
+    end
+
+    it "does NOT drop when neither branch references a Radix Slot" do
+      source = <<~JSX
+        function X({ withSection, ...props }) {
+          const Comp = withSection ? "section" : "div";
+          return <Comp {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("section(")
+      expect(content).to include("div(")
+    end
+
+    it "does NOT drop when the Slot import isn't from a Radix package" do
+      source = <<~JSX
+        import { Slot } from "./my-slot";
+        function X({ asChild, ...props }) {
+          const Comp = asChild ? Slot : "div";
+          return <Comp {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("Slot")
+    end
+
+    it "does NOT drop a user-defined Slot-prefixed name even from a radix-shaped source" do
+      # `radix_slot_branch?` only matches `Slot` / `SlotPrimitive` exactly.
+      # A user-defined `SlotMachine` should not be silently dropped, even
+      # if (improbably) imported from `@radix-ui/react-slot-machine`.
+      source = <<~JSX
+        import { SlotMachine } from "@radix-ui/react-slot-machine";
+        function X({ asChild, ...props }) {
+          const Comp = asChild ? SlotMachine : "div";
+          return <Comp {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("SlotMachine")
+    end
+  end
+
+  describe "Radix primitive → HTML element registry" do
+    # Shadcn-style components wrap Radix UI primitives like
+    # `<SeparatorPrimitive.Root />` (after `import { Separator as
+    # SeparatorPrimitive } from "radix-ui"`). Without a registry, the
+    # translator emits `render SeparatorPrimitive::Root.new(...)` which
+    # references a non-existent Ruby class — NameError at render. With
+    # the registry, known primitives lower as plain HTML elements with
+    # always-applied attributes.
+    it "lowers <SeparatorPrimitive.Root /> to a <div role=\"separator\">" do
+      source = <<~JSX
+        import { Separator as SeparatorPrimitive } from "radix-ui";
+        function X() {
+          return <SeparatorPrimitive.Root orientation="horizontal" />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("div(role: 'separator', orientation: 'horizontal')")
+      expect(content).not_to include("SeparatorPrimitive::Root")
+    end
+
+    it "lowers <LabelPrimitive.Root /> to a <label>" do
+      # NOTE: htmlFor stays camelCase on lowercase HTML tags — that's the
+      # existing Phlex-attribute convention, not specific to this change.
+      source = <<~JSX
+        import { Label as LabelPrimitive } from "radix-ui";
+        function X() { return <LabelPrimitive.Root htmlFor="email">Email</LabelPrimitive.Root>; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("label(htmlFor: 'email')")
+      expect(content).not_to include("LabelPrimitive::Root")
+    end
+
+    it "lowers <SwitchPrimitive.Root> to a <button type=\"button\" role=\"switch\">" do
+      source = <<~JSX
+        import { Switch as SwitchPrimitive } from "radix-ui";
+        function X() { return <SwitchPrimitive.Root />; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("button(type: 'button', role: 'switch')")
+    end
+
+    it "respects the consumer's own attribute when it collides with a registry default" do
+      # The consumer's `role="dialog"` wins over the registry's `role="separator"`.
+      source = <<~JSX
+        import { Separator as SeparatorPrimitive } from "radix-ui";
+        function X() { return <SeparatorPrimitive.Root role="dialog" />; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("role: 'dialog'")
+      expect(content).not_to include("role: 'separator'")
+    end
+
+    it "falls through to ComponentInvocation when the LocalName isn't a Radix import" do
+      # Same JSX shape but the import isn't from radix-ui — keep current
+      # behavior (renders as Foo::Root component invocation).
+      source = <<~JSX
+        import { Foo } from "./local-lib";
+        function X() { return <Foo.Root />; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("Foo::Root")
+    end
+
+    it "falls through when the (LocalName, Member) pair isn't in the registry" do
+      # Imported from radix-ui but `BogusPrimitive.Root` isn't a registered shape.
+      source = <<~JSX
+        import { Bogus as BogusPrimitive } from "radix-ui";
+        function X() { return <BogusPrimitive.Root />; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("BogusPrimitive::Root")
+    end
+
+    it "also matches @radix-ui/react-* per-primitive package paths" do
+      # AvatarPrimitive.Root → <span>, even when imported from a per-primitive
+      # package (`@radix-ui/react-avatar`) and via a namespace import.
+      source = <<~JSX
+        import * as AvatarPrimitive from "@radix-ui/react-avatar";
+        function X() { return <AvatarPrimitive.Root />; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to match(/^    span\s*$/)
+      expect(content).not_to include("AvatarPrimitive::Root")
+    end
+
+    it "matches shadcn-v4 umbrella imports without the `Primitive` suffix" do
+      # `import { Separator } from "radix-ui"; <Separator.Root/>` is the
+      # shadcn-v4 idiom — the registry strips an optional `Primitive`
+      # suffix from the local binding, so the canonical `Separator` key
+      # resolves both this and the older `SeparatorPrimitive` alias.
+      source = <<~JSX
+        import { Separator } from "radix-ui";
+        function X() { return <Separator.Root orientation="horizontal" />; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("div(role: 'separator', orientation: 'horizontal')")
+      expect(content).not_to include("Separator::Root")
+    end
+  end
+
+  describe "Lucide icon sidecars (lucide-react imports)" do
+    # When a JSX source imports an icon from `lucide-react` and uses it as a
+    # component tag, the translator emits sidecar Phlex classes alongside
+    # the .rb so the consumer doesn't NameError on `render ChevronRight.new`.
+    it "emits per-icon sidecar files for icons referenced in JSX" do
+      source = <<~JSX
+        import { ChevronRight } from "lucide-react";
+        function X() { return <ChevronRight />; }
+      JSX
+      files = files_for(source)
+
+      expect(files.keys).to include("chevron_right.rb", "lucide_icon.rb")
+      expect(files["chevron_right.rb"]).to include("class ChevronRight < LucideIcon")
+      expect(files["chevron_right.rb"]).to include("m9 18 6-6-6-6")
+      expect(files["lucide_icon.rb"]).to include("class LucideIcon < Phlex::HTML")
+    end
+
+    it "honors --phlex-namespace by wrapping icon classes in the same module" do
+      source = <<~JSX
+        import { Search } from "lucide-react";
+        function X() { return <Search />; }
+      JSX
+      files = files_for(source, namespace: "Components")
+
+      expect(files["search.rb"]).to include("module Components")
+      expect(files["search.rb"]).to include("  class Search < LucideIcon")
+      expect(files["lucide_icon.rb"]).to include("module Components")
+    end
+
+    it "does NOT emit sidecars when a Lucide import is unused in JSX" do
+      source = <<~JSX
+        import { Star } from "lucide-react";
+        function X() { return <div />; }
+      JSX
+      files = files_for(source)
+
+      expect(files.keys).not_to include("star.rb", "lucide_icon.rb")
+    end
+
+    it "does NOT emit sidecars when the import source isn't a Lucide package" do
+      source = <<~JSX
+        import { ChevronRight } from "react-icons/fi";
+        function X() { return <ChevronRight />; }
+      JSX
+      files = files_for(source)
+
+      expect(files.keys).not_to include("chevron_right.rb", "lucide_icon.rb")
+    end
+
+    it "leaves a TODO body when the imported icon isn't in the vendored data" do
+      source = <<~JSX
+        import { BogusIcon } from "lucide-react";
+        function X() { return <BogusIcon />; }
+      JSX
+      files = files_for(source)
+
+      expect(files["bogus_icon.rb"]).to include("TODO: \"BogusIcon\" isn't in jsx_rosetta's vendored")
+      expect(files["bogus_icon.rb"]).to include('def inner_svg = ""')
+    end
+
+    it "accepts the legacy *Icon suffix and resolves to the canonical icon" do
+      source = <<~JSX
+        import { ChevronRightIcon } from "lucide-react";
+        function X() { return <ChevronRightIcon />; }
+      JSX
+      files = files_for(source)
+
+      expect(files["chevron_right_icon.rb"]).to include("class ChevronRightIcon < LucideIcon")
+      # Same path data as the canonical ChevronRight.
+      expect(files["chevron_right_icon.rb"]).to include("m9 18 6-6-6-6")
+    end
+
+    it "resolves vendored SVG path data through an aliased import" do
+      # `import { ChevronRight as CR } from "lucide-react"` should emit
+      # `cr.rb` defining `class CR < LucideIcon`, but the SVG path data
+      # has to come from the canonical export (`ChevronRight`), not the
+      # local alias `CR` (which isn't in lucide.json).
+      source = <<~JSX
+        import { ChevronRight as CR } from "lucide-react";
+        function X() { return <CR />; }
+      JSX
+      files = files_for(source)
+
+      expect(files["cr.rb"]).to include("class CR < LucideIcon")
+      expect(files["cr.rb"]).to include("m9 18 6-6-6-6")
+      expect(files["cr.rb"]).not_to include("TODO:")
+    end
+
+    it "dedups the LucideIcon base across sibling components in a batch" do
+      # Two components in one source both reference Lucide icons. The base
+      # `lucide_icon.rb` and any icon shared between them should appear in
+      # the emitter's output exactly once — re-emitting per-component
+      # bloats batch translations and risks overwriting hand-edits.
+      source = <<~JSX
+        import { ChevronRight, Search } from "lucide-react";
+        export function X() { return <ChevronRight />; }
+        export function Y() { return <ChevronRight />; }
+        export function Z() { return <Search />; }
+      JSX
+      backend = described_class.new
+      components = JsxRosetta::IR.lower_all(JsxRosetta.parse(source), source: source)
+      emitted = components.flat_map { |c| backend.emit(c) }
+      paths = emitted.map(&:path)
+
+      expect(paths.count("lucide_icon.rb")).to eq(1)
+      expect(paths.count("chevron_right.rb")).to eq(1)
+      expect(paths.count("search.rb")).to eq(1)
+    end
+  end
+
+  describe "auto-yield on blockless spread-children tags" do
+    # The shadcn idiom `<tag {...props} />` (self-closing tag whose rest-spread
+    # carries React `children`) lowers to a Phlex tag call with no block, so
+    # children that the Phlex caller passes via `Component.new { ... }` were
+    # silently dropped. Now we emit a `do; yield if block_given?; end` block
+    # for non-void tags when the only thing carrying children is the spread.
+    it "wraps a self-closing HTML element that spreads props in a yielding block" do
+      source = "function X({ className, ...props }) { return <div className={className} {...props} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("div(")
+      expect(content).to include("**(@props || {})) do")
+      expect(content).to include("yield if block_given?")
+    end
+
+    it "does NOT add a yield block to a void HTML element (input)" do
+      source = "function X({ type, ...props }) { return <input type={type} {...props} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("**(@props || {})")
+      expect(content).not_to include("yield")
+    end
+
+    it "does NOT add a yield block to a void HTML element (img)" do
+      source = "function X({ src, ...props }) { return <img src={src} {...props} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("**(@props || {})")
+      expect(content).not_to include("yield")
+    end
+
+    it "leaves a div with explicit {children} unchanged (existing do/end behavior)" do
+      source = "function X({ children, ...props }) { return <div {...props}>{children}</div>; }"
+      content = file_contents(source, "x.rb")
+
+      # Explicit children path: do/end with `yield` inside, NOT the safe
+      # `yield if block_given?` (existing behavior is unchanged).
+      expect(content).to include("div(")
+      expect(content).to include(" do")
+      expect(content).to match(/^\s+yield$/)
+      expect(content).not_to include("yield if block_given?")
+    end
+
+    it "wraps a self-closing PascalCase ComponentInvocation that spreads props" do
+      source = "function X({ ...rest }) { return <Card {...rest} />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("render Card.new(**(@rest || {})) do")
+      expect(content).to include("yield if block_given?")
+    end
+
+    it "does NOT add a yield block when there is no spread (blockless tag stays blockless)" do
+      source = "function X() { return <hr />; }"
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("    hr\n  end")
+      expect(content).not_to include("yield")
+    end
+
+    it "does NOT double-wrap when explicit children are already present" do
+      source = "function X({ children, ...rest }) { return <section {...rest}>{children}</section>; }"
+      content = file_contents(source, "x.rb")
+
+      # Should yield once (the explicit-children path), not twice.
+      expect(content.scan("yield").length).to eq(1)
+    end
+  end
+
   describe "inner arrow handlers on PascalCase component props" do
     # `const handleClick = () => ...` attached to a `<PascalCase>` component
     # used to leak as bare `handle_click` (NameError at render time) — Gap B
@@ -1734,6 +2212,228 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("# TODO: Apollo data-fetching hooks detected")
       expect(content).to include("# TODO: Next.js navigation hooks detected")
       expect(content).to include("#   operation: LIST_POSTS")
+    end
+  end
+
+  describe "cva() → Ruby constants" do
+    # `const fooVariants = cva(base, { variants, defaultVariants })` from
+    # class-variance-authority is the dominant variant-builder pattern in
+    # shadcn/ui. The translator now recognizes the call shape and emits
+    # real Ruby constants alongside the class. The use-site
+    # `cn(fooVariants({ variant }), className)` becomes a Ruby string
+    # interpolation against those constants — no more literal `cn(...)`
+    # string landing in the class attribute.
+    let(:cva_source) do
+      <<~JSX
+        import { cva } from "class-variance-authority";
+
+        const alertVariants = cva(
+          "relative grid w-full",
+          {
+            variants: {
+              variant: {
+                default: "bg-card text-card-foreground",
+                destructive: "bg-card text-destructive"
+              }
+            },
+            defaultVariants: { variant: "default" }
+          }
+        );
+
+        function Alert({ className, variant, ...props }) {
+          return <div className={cn(alertVariants({ variant }), className)} role="alert" {...props} />;
+        }
+      JSX
+    end
+
+    it "emits per-axis variant maps as a Ruby constant" do
+      content = file_contents(cva_source, "alert.rb")
+
+      expect(content).to include('ALERT_BASE_CLASS = "relative grid w-full"')
+      expect(content).to include("ALERT_VARIANT_CLASSES = {")
+      expect(content).to include('"variant" => { "default" => "bg-card text-card-foreground", ' \
+                                 '"destructive" => "bg-card text-destructive" }')
+      expect(content).to include('ALERT_DEFAULT_VARIANTS = {"variant" => "default"}.freeze')
+    end
+
+    it "translates the cn(fooVariants({variant}), className) call site to a Ruby interpolation" do
+      content = file_contents(cva_source, "alert.rb")
+
+      expected = "class: \"\#{ALERT_BASE_CLASS} \#{ALERT_VARIANT_CLASSES[\"variant\"][@variant]} \#{@class_name}\""
+      expect(content).to include(expected)
+      expect(content).not_to include("cn(alertVariants")
+    end
+
+    it "uses defaultVariants as the initializer kwarg default" do
+      content = file_contents(cva_source, "alert.rb")
+
+      expect(content).to include('variant: "default"')
+    end
+
+    it "handles multi-axis cva (variant + size)" do
+      source = <<~JSX
+        import { cva } from "class-variance-authority";
+
+        const buttonVariants = cva("base", {
+          variants: {
+            variant: { default: "v1", outline: "v2" },
+            size:    { sm: "s1", lg: "s2" }
+          },
+          defaultVariants: { variant: "default", size: "sm" }
+        });
+
+        function Button({ className, variant, size, ...props }) {
+          return <button className={cn(buttonVariants({ variant, size }), className)} {...props} />;
+        }
+      JSX
+      content = file_contents(source, "button.rb")
+
+      expected = "class: \"\#{BUTTON_BASE_CLASS} \#{BUTTON_VARIANT_CLASSES[\"variant\"][@variant]} " \
+                 "\#{BUTTON_VARIANT_CLASSES[\"size\"][@size]} \#{@class_name}\""
+      expect(content).to include(expected)
+      expect(content).to include('variant: "default"')
+      expect(content).to include('size: "sm"')
+    end
+
+    it "preserves compoundVariants as a TODO comment" do
+      source = <<~JSX
+        import { cva } from "class-variance-authority";
+
+        const xVariants = cva("base", {
+          variants: { variant: { default: "v1", alt: "v2" } },
+          defaultVariants: { variant: "default" },
+          compoundVariants: [
+            { variant: "alt", size: "lg", className: "compound-rule" }
+          ]
+        });
+
+        function X({ className, variant, ...props }) {
+          return <div className={cn(xVariants({ variant }), className)} {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: compoundVariants from xVariants aren't translated")
+      expect(content).to include("compound-rule")
+    end
+
+    it "leaves non-cva module-level consts on the old TODO-comment path" do
+      # cva should be additive: other module-level constants still surface
+      # as a "# TODO: module-level constants" comment block.
+      source = <<~JSX
+        import { cva } from "class-variance-authority";
+        const PI = 3.14;
+        const xVariants = cva("base", { variants: { variant: { default: "v" } } });
+        function X({ variant, ...props }) {
+          return <div className={cn(xVariants({ variant }))} {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("X_BASE_CLASS")
+      expect(content).to include("# TODO: module-level constants")
+      expect(content).to include("const PI = 3.14")
+    end
+
+    it "translates a literal-pinned axis (`{ variant: \"default\" }`) to a string key" do
+      # Real shadcn wrappers occasionally pin a default at the call site
+      # for an "always-this-variant" subclass. Previously this emitted
+      # `@"default"` — a Ruby parse error. Now the literal `"default"`
+      # is passed through as the bracket key on VARIANT_CLASSES.
+      source = <<~JSX
+        import { cva } from "class-variance-authority";
+        const xVariants = cva("base", {
+          variants: { variant: { default: "v1", outline: "v2" } }
+        });
+        function X({ className, ...props }) {
+          return <div className={cn(xVariants({ variant: "default" }), className)} {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include('X_VARIANT_CLASSES["variant"]["default"]')
+      expect(content).not_to include('@"default"')
+    end
+
+    it "emits cva constants in every sibling component file from the same source" do
+      # Module-level cva bindings are referenced by the rendered class
+      # body of EVERY component in the file. Suppressing the constants
+      # on sibling 2+ (the old behavior under the shared module_bindings
+      # array) left non-first siblings interpolating undefined constants
+      # at render time. They now appear in every emitted file.
+      source = <<~JSX
+        import { cva } from "class-variance-authority";
+        const sharedVariants = cva("base", {
+          variants: { variant: { default: "v" } }
+        });
+        export function A({ variant, ...props }) {
+          return <div className={cn(sharedVariants({ variant }))} {...props} />;
+        }
+        export function B({ variant, ...props }) {
+          return <span className={cn(sharedVariants({ variant }))} {...props} />;
+        }
+      JSX
+      backend = described_class.new
+      components = JsxRosetta::IR.lower_all(JsxRosetta.parse(source), source: source)
+      contents = components.flat_map { |c| backend.emit(c) }.to_h { |f| [f.path, f.contents] }
+
+      expect(contents["a.rb"]).to include("SHARED_BASE_CLASS")
+      expect(contents["b.rb"]).to include("SHARED_BASE_CLASS")
+      expect(contents["a.rb"]).to include("SHARED_VARIANT_CLASSES")
+      expect(contents["b.rb"]).to include("SHARED_VARIANT_CLASSES")
+    end
+
+    it "handles the bare `<cvaName>({ axes })` direct form (no cn wrapper)" do
+      # AST detection recognizes the no-cn variant — some shadcn wrappers
+      # don't import `cn` and just splat the cva call straight into
+      # `className`. Without this, the call landed in the class as a
+      # literal `"buttonVariants({ variant })"` string.
+      source = <<~JSX
+        import { cva } from "class-variance-authority";
+        const xVariants = cva("base", { variants: { variant: { default: "v" } } });
+        function X({ variant, ...props }) {
+          return <div className={xVariants({ variant })} {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include('X_VARIANT_CLASSES["variant"][@variant]')
+      expect(content).not_to include("xVariants({")
+    end
+
+    it "handles the reversed-arg form `cn(className, cvaName(...))`" do
+      # AST detection finds the cva-call argument by shape, not position —
+      # the regex used to require cva first.
+      source = <<~JSX
+        import { cva } from "class-variance-authority";
+        const xVariants = cva("base", { variants: { variant: { default: "v" } } });
+        function X({ className, variant, ...props }) {
+          return <div className={cn(className, xVariants({ variant }))} {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include('X_VARIANT_CLASSES["variant"][@variant]')
+      expect(content).to include("@class_name")
+    end
+
+    it "guards cva_constant_prefix against an empty prefix" do
+      # The degenerate name `Variants` would strip to `""` and emit
+      # `_BASE_CLASS` (a Ruby SyntaxError). Falls back to the bare
+      # upcased name when the stripped form is empty.
+      source = <<~JSX
+        import { cva } from "class-variance-authority";
+        const Variants = cva("base", { variants: { variant: { default: "v" } } });
+        function X({ variant, ...props }) {
+          return <div className={cn(Variants({ variant }))} {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("VARIANTS_BASE_CLASS")
+      # Empty prefix would manifest as a leading-underscore constant
+      # (`  _BASE_CLASS = `) — a Ruby SyntaxError.
+      expect(content).not_to match(/^\s*_BASE_CLASS\b/)
     end
   end
 end

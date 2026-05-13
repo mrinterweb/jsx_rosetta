@@ -55,12 +55,12 @@ module JsxRosetta
         end
       end
 
-      def self.lower(file, source:)
-        new(source).lower_file(file)
+      def self.lower(file, source:, keep_slot: false)
+        new(source, keep_slot: keep_slot).lower_file(file)
       end
 
-      def self.lower_all(file, source:)
-        new(source).lower_all_components(file)
+      def self.lower_all(file, source:, keep_slot: false)
+        new(source, keep_slot: keep_slot).lower_all_components(file)
       end
 
       REACT_HOOKS = %w[
@@ -146,8 +146,14 @@ module JsxRosetta
         unknown: nil
       }.freeze
 
-      def initialize(source)
+      def initialize(source, keep_slot: false)
         @source = source
+        # When false (default), the shadcn `<Comp asChild>` pattern that
+        # routes through Radix's Slot.Root gets its Slot branch dropped at
+        # lowering time, leaving only the non-Slot HTML/component branch.
+        # When true, preserve the full polymorphic conditional (legacy
+        # behavior; useful if the consumer shims Components::Slot::Root).
+        @keep_slot = keep_slot
         @prop_names = []
         @local_jsx = {}
         @local_bindings = []
@@ -160,6 +166,11 @@ module JsxRosetta
         @react_hooks = []
         @render_methods = []
         @render_method_seen = {}
+        # File-level imports; populated once at lower_file / lower_all_components
+        # entry and consulted by JSX lowering to decide whether a member-chain
+        # tag like `SeparatorPrimitive.Root` should resolve through the Radix
+        # registry into an HTML Element.
+        @module_imports = []
         # Class-component non-render members (constructor, lifecycle hooks,
         # custom handlers). Keyed by class name; populated by
         # extract_class_component, drained by lower_component to surface
@@ -172,19 +183,19 @@ module JsxRosetta
         raise no_component_error(file.program) if candidates.empty?
 
         name, function = candidates.first
-        module_bindings = capture_module_bindings(file.program, candidates)
-        module_imports = capture_module_imports(file.program)
-        attach_module_metadata(lower_component(name, function), module_bindings, module_imports)
+        @module_bindings = capture_module_bindings(file.program, candidates)
+        @module_imports = capture_module_imports(file.program)
+        attach_module_metadata(lower_component(name, function), @module_bindings, @module_imports)
       end
 
       def lower_all_components(file)
         candidates = find_component_functions(file.program)
         raise no_component_error(file.program) if candidates.empty?
 
-        module_bindings = capture_module_bindings(file.program, candidates)
-        module_imports = capture_module_imports(file.program)
+        @module_bindings = capture_module_bindings(file.program, candidates)
+        @module_imports = capture_module_imports(file.program)
         candidates.map do |name, function|
-          attach_module_metadata(lower_component(name, function), module_bindings, module_imports)
+          attach_module_metadata(lower_component(name, function), @module_bindings, @module_imports)
         end
       end
 
@@ -244,7 +255,118 @@ module JsxRosetta
         name = declarator[:id]&.[](:name)
         return unless name
 
+        # shadcn-style `const fooVariants = cva(base, { variants, ... })` gets
+        # recognized at lowering and stored as a CvaBinding — the backend
+        # turns it into real Ruby constants and the use-site call collapses
+        # to a string interpolation. Falls through to the generic LocalBinding
+        # path when the cva shape doesn't match exactly.
+        if (cva = parse_cva_binding(init, name))
+          bindings << cva
+          return
+        end
+
         bindings << LocalBinding.new(name: name, source: source_of(stmt).strip)
+      end
+
+      # Returns a CvaBinding when `init` is a `cva(base, options)` call we
+      # know how to parse, or nil to fall through to LocalBinding.
+      def parse_cva_binding(init, name)
+        return nil unless cva_call?(init)
+
+        args = init[:arguments] || []
+        base_class = extract_cva_string(args[0])
+        return nil unless base_class
+
+        options = args[1]
+        return nil unless options.is_a?(AST::Node) && options.type == "ObjectExpression"
+
+        CvaBinding.new(
+          name: name,
+          base_class: base_class,
+          variants: extract_cva_variants(options),
+          default_variants: extract_cva_default_variants(options),
+          compound_source: extract_cva_compound_source(options)
+        )
+      end
+
+      def cva_call?(node)
+        return false unless node.is_a?(AST::Node) && node.type == "CallExpression"
+
+        callee = node[:callee]
+        callee.is_a?(AST::Node) && callee.type == "Identifier" && callee[:name] == "cva"
+      end
+
+      def extract_cva_string(node)
+        return nil unless node.is_a?(AST::Node)
+
+        case node.type
+        when "StringLiteral"
+          node[:value]
+        when "TemplateLiteral"
+          # Only handle templates with no interpolations — they're effectively
+          # a string literal (shadcn's cva bases sometimes use a template for
+          # multi-line readability).
+          return nil unless (node[:expressions] || []).empty?
+
+          (node[:quasis] || []).map { |q| q[:value][:cooked] }.join
+        end
+      end
+
+      def extract_cva_variants(options_node)
+        prop = find_object_property(options_node, "variants")
+        return {} unless object_expression?(prop&.[](:value))
+
+        prop[:value][:properties].each_with_object({}) do |axis, hash|
+          axis_name = property_key(axis)
+          options = extract_cva_axis_options(axis[:value])
+          hash[axis_name] = options if axis_name && !options.empty?
+        end
+      end
+
+      def extract_cva_axis_options(axis_value_node)
+        return {} unless object_expression?(axis_value_node)
+
+        axis_value_node[:properties].each_with_object({}) do |opt, hash|
+          opt_name = property_key(opt)
+          opt_value = extract_cva_string(opt[:value])
+          hash[opt_name] = opt_value if opt_name && opt_value
+        end
+      end
+
+      def object_expression?(node)
+        node.is_a?(AST::Node) && node.type == "ObjectExpression"
+      end
+
+      def extract_cva_default_variants(options_node)
+        prop = find_object_property(options_node, "defaultVariants")
+        return {} unless prop && prop[:value].is_a?(AST::Node) && prop[:value].type == "ObjectExpression"
+
+        prop[:value][:properties].each_with_object({}) do |p, hash|
+          key = property_key(p)
+          val = extract_cva_string(p[:value])
+          hash[key] = val if key && val
+        end
+      end
+
+      def extract_cva_compound_source(options_node)
+        prop = find_object_property(options_node, "compoundVariants")
+        return nil unless prop
+
+        source_of(prop[:value]).strip
+      end
+
+      def find_object_property(obj_node, name)
+        (obj_node[:properties] || []).find { |p| property_key(p) == name }
+      end
+
+      def property_key(prop)
+        return nil unless prop.is_a?(AST::Node) && prop[:key].is_a?(AST::Node)
+
+        key = prop[:key]
+        case key.type
+        when "Identifier" then key[:name]
+        when "StringLiteral" then key[:value]
+        end
       end
 
       def attach_module_metadata(component, module_bindings, module_imports)
@@ -266,7 +388,12 @@ module JsxRosetta
             name = spec[:local]&.[](:name)
             next unless name
 
-            imports << ModuleImport.new(name: name, source: source, kind: import_specifier_kind(spec))
+            imports << ModuleImport.new(
+              name: name,
+              source: source,
+              kind: import_specifier_kind(spec),
+              imported_name: spec[:imported]&.[](:name)
+            )
           end
         end
         imports
@@ -1165,12 +1292,74 @@ module JsxRosetta
           ComponentInvocation.new(name: "#{parent}.#{tag}", props: attributes, children: children)
         elsif html_element?(tag)
           Element.new(tag: tag, attributes: attributes, children: children)
+        elsif (radix = radix_primitive_for(tag))
+          # `<SeparatorPrimitive.Root .../>` (imported from radix-ui) lowers
+          # to a plain `<div role="separator">` so the consumer doesn't have
+          # to define a Components::SeparatorPrimitive::Root shim.
+          Element.new(
+            tag: radix[:tag],
+            attributes: merge_radix_attrs(radix[:attrs], attributes),
+            children: children
+          )
         else
           ComponentInvocation.new(name: tag, props: attributes, children: children)
         end
       end
 
+      # Returns the Radix registry entry for `<LocalName.Member />` when:
+      #   - the tag is a two-segment member chain
+      #   - the root segment was imported from a Radix-shaped package
+      #   - the (LocalName, Member) pair is in the registry
+      # Otherwise nil — the caller falls through to a ComponentInvocation.
+      def radix_primitive_for(tag)
+        segments = tag.split(".")
+        return nil if segments.length != 2
+
+        local, member = segments
+        return nil unless imported_from_radix?(local)
+
+        RadixRegistry.lookup(local, member)
+      end
+
+      def imported_from_radix?(local_name)
+        @module_imports.any? do |imp|
+          imp.name == local_name && RADIX_SOURCE_PATTERN.match?(imp.source)
+        end
+      end
+
+      # Combine the registry's fixed attrs (role, type, etc.) with the
+      # consumer's own JSX attributes. Consumer attrs win on collision — the
+      # JSX is the source of truth; the registry just supplies safe defaults.
+      # Collision keys normalize away case + hyphens/underscores so future
+      # registry entries like `data-state` don't slip past a consumer's
+      # `dataState`.
+      def merge_radix_attrs(fixed_attrs, jsx_attrs)
+        user_keys = jsx_attrs.filter_map do |a|
+          a.respond_to?(:name) ? normalize_attr_key(a.name) : nil
+        end.to_set
+        injected = fixed_attrs.filter_map do |name, value|
+          attr_name = name.to_s
+          next if user_keys.include?(normalize_attr_key(attr_name))
+
+          Attribute.new(name: attr_name, value: value.to_s)
+        end
+        injected + jsx_attrs
+      end
+
+      def normalize_attr_key(name)
+        name.to_s.downcase.tr("-_", "")
+      end
+
       def lower_polymorphic_tag_use(poly, attributes, children)
+        if (chosen = drop_slot_branch(poly))
+          # The shadcn `<Comp asChild>` pattern routes through Radix's
+          # Slot.Root, which has no Ruby class on the Phlex side. Drop the
+          # Slot branch and render the underlying HTML/component branch
+          # directly. Pass `--keep-slot` to preserve the conditional if
+          # the consumer is shimming Slot::Root themselves.
+          return build_polymorphic_branch(chosen, attributes, children)
+        end
+
         Conditional.new(
           test: Interpolation.new(expression: source_of(poly[:test])),
           consequent: build_polymorphic_branch(poly[:true_branch], attributes, children),
@@ -1184,6 +1373,41 @@ module JsxRosetta
           Element.new(tag: branch[:tag], attributes: attributes, children: children)
         when :component
           ComponentInvocation.new(name: branch[:tag], props: attributes, children: children)
+        end
+      end
+
+      # Returns the non-Slot branch when exactly one of the polymorphic
+      # branches resolves to a Radix Slot reference (`Slot` or `Slot.Root`
+      # rooted at a `radix-ui` import). Returns nil otherwise — including
+      # when `--keep-slot` is in effect — so the caller emits the full
+      # conditional unchanged.
+      def drop_slot_branch(poly)
+        return nil if @keep_slot
+
+        t = poly[:true_branch]
+        f = poly[:false_branch]
+        t_is_slot = radix_slot_branch?(t)
+        f_is_slot = radix_slot_branch?(f)
+        return f if t_is_slot && !f_is_slot
+        return t if f_is_slot && !t_is_slot
+
+        nil
+      end
+
+      # True iff `branch` references a Slot import from a Radix-shaped
+      # package. The local binding is one of {`Slot`, `SlotPrimitive`} —
+      # both correspond to the canonical "import from radix-ui / @radix-ui/
+      # react-slot" pattern. Anything else (e.g. a user-defined
+      # `SlotMachine` from a random package whose path happens to contain
+      # "radix") falls through and renders the conditional unchanged.
+      def radix_slot_branch?(branch)
+        return false unless branch[:kind] == :component
+
+        root = branch[:tag].split(".").first
+        return false unless root && SLOT_LOCAL_NAME_PATTERN.match?(root)
+
+        @module_imports.any? do |imp|
+          imp.name == root && RADIX_SOURCE_PATTERN.match?(imp.source)
         end
       end
 
@@ -1536,8 +1760,114 @@ module JsxRosetta
         if value.is_a?(AST::JSXExpressionContainer)
           decomposed = try_lower_class_helper(value.expression)
           return decomposed if decomposed
+
+          cva_call = try_lower_cva_call_site(value.expression)
+          return cva_call if cva_call
         end
         StyleBinding.new(expression: style_binding_expression(value))
+      end
+
+      # Recognize the cva call shape — `cn(<cvaName>({ axes }), <classArg>)`
+      # or the bare `<cvaName>({ axes })` direct form — against a CvaBinding
+      # captured during module-level lowering. Returns an IR::CvaCallSite,
+      # or nil so the caller falls through to the generic StyleBinding.
+      # AST-driven instead of regexing over verbatim source, which lets us
+      # handle reversed-arg `cn(<classArg>, <cvaName>(...))`, the no-cn
+      # direct form, and literal-pinned axes naturally.
+      def try_lower_cva_call_site(expression)
+        return nil unless expression.respond_to?(:type)
+        return nil unless expression.type == "CallExpression"
+
+        callee = expression.child(:callee)
+        return nil unless callee
+
+        if callee.of_type?("Identifier") && %w[cn clsx classnames].include?(callee[:name])
+          build_cva_call_site_from_class_helper(expression[:arguments] || [])
+        else
+          build_cva_call_site_from_direct(expression)
+        end
+      end
+
+      # `cn(<cvaCall>, <classArg>)` or `cn(<classArg>, <cvaCall>)` — accept
+      # the first argument that resolves to a known cva call; the remaining
+      # argument (if any) becomes the optional `class_arg`. Anything more
+      # complex (3+ args, nested cn, multiple cva calls) bails to nil.
+      def build_cva_call_site_from_class_helper(args)
+        return nil unless args.length.between?(1, 2)
+
+        cva_arg_index = args.find_index { |a| cva_call_against_known_binding?(a) }
+        return nil unless cva_arg_index
+
+        cva_arg = args[cva_arg_index]
+        class_arg = args.length == 2 ? args[1 - cva_arg_index] : nil
+        build_cva_call_site_node(cva_arg, class_arg)
+      end
+
+      # Bare `<cvaName>({ axes })` — same shape with no class_arg.
+      def build_cva_call_site_from_direct(expression)
+        return nil unless cva_call_against_known_binding?(expression)
+
+        build_cva_call_site_node(expression, nil)
+      end
+
+      def build_cva_call_site_node(cva_call, class_arg_node)
+        callee_name = cva_call[:callee][:name]
+        options = cva_call[:arguments]&.first
+        return nil unless options && options.type == "ObjectExpression"
+
+        axes = options[:properties].filter_map { |prop| build_cva_axis_pair(prop) }
+        class_arg = class_arg_node && Interpolation.new(expression: source_of(class_arg_node))
+        CvaCallSite.new(binding_name: callee_name, axes: axes, class_arg: class_arg)
+      end
+
+      # Pull one axis-value pair off the cva options object. Shorthand
+      # (`{ variant }`) and explicit (`{ variant: someExpr }`) both work;
+      # spread (`{ ...rest }`) and computed keys bail to nil so the call
+      # site falls through to the generic translator with a TODO.
+      def build_cva_axis_pair(prop)
+        return nil unless prop.type == "ObjectProperty"
+
+        axis = property_key_name(prop)
+        return nil unless axis
+
+        value_node = prop[:value]
+        kind, source = classify_cva_axis_value(value_node)
+        CvaAxisPair.new(axis: axis, kind: kind, source: source)
+      end
+
+      def property_key_name(prop)
+        case prop[:key].type
+        when "Identifier" then prop[:key][:name]
+        when "StringLiteral" then prop[:key][:value]
+        end
+      end
+
+      def classify_cva_axis_value(node)
+        case node.type
+        when "StringLiteral" then [:literal_string, node[:value]]
+        when "NumericLiteral", "BooleanLiteral" then [:literal_other, source_of(node)]
+        when "NullLiteral" then [:literal_nil, nil]
+        when "Identifier"
+          # Shorthand `{ variant }` and explicit `{ variant: ident }` both
+          # land here; the source is the identifier name itself.
+          node[:name] == "undefined" ? [:literal_nil, nil] : [:prop_ref, node[:name]]
+        else
+          # Member chains, calls, etc. — pass the source through as a
+          # raw expression. The backend re-translates it through
+          # ExpressionTranslator like any other prop reference.
+          [:prop_ref, source_of(node)]
+        end
+      end
+
+      def cva_call_against_known_binding?(node)
+        return false unless node.respond_to?(:type)
+        return false unless node.type == "CallExpression"
+
+        callee = node.child(:callee)
+        return false unless callee&.of_type?("Identifier")
+
+        binding_name = callee[:name]
+        @module_bindings.any? { |b| b.is_a?(CvaBinding) && b.name == binding_name }
       end
 
       def try_lower_class_helper(expression)
@@ -1620,9 +1950,18 @@ module JsxRosetta
       def promote_arrow_to_stimulus(attr_name, event, arrow_node, name_hint:)
         base = name_hint || default_stimulus_method_name(attr_name)
         method_name = stimulus_method_name(base)
-        body_source = source_of(arrow_node[:body])
+        body_node = arrow_node[:body]
+        body_source = source_of(body_node)
+        # Preserve nil entries for non-Identifier params (ObjectPattern,
+        # ArrayPattern, RestElement) so emit-time bails to TODO rather
+        # than pasting a body that references undefined locals.
+        params = Array(arrow_node[:params]).map { |p| p.type == "Identifier" ? p[:name] : nil }
         @stimulus_methods << StimulusMethod.new(
-          name: method_name, body_source: body_source, original_name: base
+          name: method_name,
+          body_source: body_source,
+          original_name: base,
+          params: params,
+          body_is_block: body_node.type == "BlockStatement"
         )
         @local_arrows.delete(name_hint) if name_hint
         StimulusBinding.new(event: event, method_name: method_name)
@@ -1636,7 +1975,11 @@ module JsxRosetta
         method_name = stimulus_method_name(identifier_name)
         body_source = "// originally bound to: #{identifier_name}"
         @stimulus_methods << StimulusMethod.new(
-          name: method_name, body_source: body_source, original_name: identifier_name
+          name: method_name,
+          body_source: body_source,
+          original_name: identifier_name,
+          params: [],
+          body_is_block: false
         )
         StimulusBinding.new(event: event, method_name: method_name)
       end

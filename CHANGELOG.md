@@ -1,5 +1,129 @@
 # Changelog
 
+## [Unreleased]
+
+### Added — translate cva() variant builders into Ruby constants
+
+- **`const fooVariants = cva(base, { variants, defaultVariants })`** —
+  the dominant variant-builder pattern in shadcn/ui-shaped components —
+  used to land as a 40-line TODO comment block above the class, and
+  its use-site `cn(fooVariants({ variant }), className)` emitted the
+  verbatim JS as a literal string into the `class:` attribute. Both
+  paths are now translated end-to-end.
+  - Lowering recognizes the `cva(<base>, { variants, defaultVariants,
+    compoundVariants })` call shape and records it as a new
+    `IR::CvaBinding` node (parallel to `IR::LocalBinding`).
+  - Phlex backend renders each `CvaBinding` as three module-level
+    Ruby constants alongside the class — `FOO_BASE_CLASS`,
+    `FOO_VARIANT_CLASSES` (a frozen hash of axis → option → class
+    string), and `FOO_DEFAULT_VARIANTS`.
+  - The use-site call `cn(fooVariants({ variant, size }), className)`
+    in a `className={...}` attribute now emits a Ruby string
+    interpolation against those constants:
+    `"#{FOO_BASE_CLASS} #{FOO_VARIANT_CLASSES["variant"][@variant]}
+    #{FOO_VARIANT_CLASSES["size"][@size]} #{@class_name}"`.
+  - `render_initializer` now uses `defaultVariants` as the Ruby kwarg
+    default for any prop name matching a cva axis (so `variant:
+    "default"` flows from the cva binding even though the React
+    function signature took the prop undefaulted).
+- `compoundVariants` (the rule-of-rules cva feature) is not yet
+  translated — the verbatim JS source surfaces as a `# TODO:
+  compoundVariants from FOO aren't translated` comment alongside the
+  emitted constants so the reviewer can hand-port the rules.
+- Other module-level constants (non-cva) still take the existing
+  "# TODO: module-level constants" pre-class comment path.
+
+### Added — drop Slot.Root branch from polymorphic asChild tags
+
+- **shadcn's `<Comp asChild>` no longer NameErrors at render.** Components
+  using `const Comp = asChild ? Slot : "div"` (or `Slot.Root`) routed
+  the truthy branch through Radix's `Slot`, which has no Ruby class on
+  the Phlex side. Lowering now detects this Slot-vs-tag conditional
+  (Slot rooted at a `radix-ui`/`@radix-ui/react-*` import) and emits
+  only the non-Slot branch — no conditional, no `as_child` kwarg,
+  just the underlying tag.
+- New CLI flag `--keep-slot` and `JsxRosetta.translate(..., keep_slot:
+  true)` preserves the full polymorphic conditional for consumers
+  that shim `Components::Slot::Root` themselves.
+- Detection respects the import source: a project-local `import
+  { Slot } from "./my-slot"` is untouched.
+
+### Added — map known Radix primitive tags to underlying HTML elements
+
+- **`<SeparatorPrimitive.Root />`, `<LabelPrimitive.Root />`, etc.**
+  used to lower as `ComponentInvocation`s, producing
+  `render SeparatorPrimitive::Root.new(...)` — undefined constants,
+  NameError on render. Now: when the import source matches a Radix
+  package (`radix-ui`, `@radix-ui/react-*`) and the
+  `(LocalName, Member)` pair is in a small registry, lower as an
+  HTML Element with the underlying tag and any always-applied
+  attributes (`role`, `type`, etc.). Consumer attrs win on collision
+  with the registry defaults.
+- Registry lives at `lib/jsx_rosetta/ir/radix_registry.rb`. Covers
+  Separator / Label / Avatar (Root/Image/Fallback) / Switch
+  (Root/Thumb) / Progress (Root/Indicator) / AspectRatio (Root) /
+  ScrollArea (Root/Viewport). Unknown primitives fall through to
+  the existing `ComponentInvocation` / TODO behavior.
+- Works with both named-aliased imports
+  (`import { Separator as SeparatorPrimitive } from "radix-ui"`)
+  and namespace imports
+  (`import * as AvatarPrimitive from "@radix-ui/react-avatar"`).
+
+### Added — auto-emit Lucide icon shims as a translation sidecar
+
+- **`import { ChevronRight } from "lucide-react"` now lands a working
+  `ChevronRight` Phlex class.** Previously the translator carried the
+  React import through verbatim, so the generated component contained
+  `render ChevronRight.new(...)` referencing a non-existent Ruby class
+  — NameError at render time. The Phlex backend now detects Lucide
+  imports (`lucide-react`, `lucide`) that are actually used as JSX
+  component tags and emits two kinds of sidecar files:
+  - `lucide_icon.rb` — a shared `LucideIcon < Phlex::HTML` base.
+  - `<icon>.rb` — one file per referenced icon, defining a subclass
+    that renders the vendored SVG path data inline. One file per
+    icon means Zeitwerk autoloads each cleanly under the consumer's
+    `app/components/` (or wherever the output directory points).
+- Vendored path data lives at `lib/jsx_rosetta/icons/lucide.json`
+  (the ~35 icons most commonly imported by shadcn/ui sources). Icons
+  not in the vendored set emit a class whose `inner_svg` is empty
+  with a TODO comment pointing at the lucide.json refresh path.
+- Tolerates both canonical (`ChevronRight`) and legacy `*Icon`
+  (`ChevronRightIcon`) names — same path data either way.
+- `--phlex-namespace=Components` wraps every sidecar in the same
+  module as the main translation, so the consumer's autoloader
+  config doesn't need a special case.
+
+### Added — translate Stimulus controller bodies when safe
+
+- **Paste JSX handler bodies into the generated `_controller.js`.**
+  Auto-generated Stimulus controllers used to leave the handler body
+  as a TODO comment with the verbatim source above an empty
+  `clickHandler(event) { // ... }` stub. For DOM-driven handlers (the
+  common shape in shadcn-style UI), the JSX body is *already valid JS*
+  — we now paste it directly into the method, using the original
+  arrow's parameter name so identifier references in the body still
+  resolve.
+  - `IR::StimulusMethod` gains a `params:` field — the original arrow
+    parameter names — used as the Stimulus method's parameter signature.
+  - New `safe_to_paste_handler?` heuristic on the Phlex backend bails
+    out (falls back to the previous TODO behavior) when the body
+    references React state setters (`setX(`), React hooks (`useX(`),
+    or is just an identifier-bound `// originally bound to: …` comment.
+  - Collision markers are preserved across the new path.
+
+### Fixed — silent children loss on self-closing-with-spread tags
+
+- **Auto-yield on blockless spread-children tags.** The shadcn idiom
+  `<tag {...props} />` (self-closing JSX whose rest-spread carries React
+  `children`) translated to a Phlex `tag(..., **(@props || {}))` call
+  with no block — so callers' `Component.new { ... }` blocks were
+  silently dropped at render. Now: when an Element or
+  ComponentInvocation has no explicit IR children, a `SpreadAttribute`,
+  and a non-void tag, emit `tag(...) do; yield if block_given?; end`.
+  The `block_given?` guard preserves the no-block use case. Void HTML
+  elements (input, img, br, …) still emit blockless. Explicit-children
+  paths and `RenderProp` flows are untouched.
+
 ## [0.5.1] - 2026-05-11
 
 A correctness pass on the v0.5.0 Phlex output. A random-sample review

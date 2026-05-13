@@ -89,6 +89,7 @@ module JsxRosetta
       end
 
       def emit(component, source_filename: nil)
+        @current_component = component
         translator = build_translator(component)
         @stimulus_identifier = component.stimulus_methods.any? ? stimulus_identifier(component) : nil
         @lambda_methods = []
@@ -104,7 +105,13 @@ module JsxRosetta
             contents: render_stimulus_controller_js(component)
           )
         end
+        files.concat(lucide_icon_files(component))
         files
+      ensure
+        # Drop the per-emit IR reference so a long-running emitter
+        # instance doesn't pin the entire component tree until the
+        # next emit() call.
+        @current_component = nil
       end
 
       # When a source file lowers to multiple sibling components, lower_all
@@ -258,21 +265,78 @@ module JsxRosetta
       end
 
       # Top-level `const`/`let` declarations outside the component
-      # function — captured at lowering time and surfaced here as a TODO
-      # comment block above the class definition. We don't try to
-      # translate the JS; the human reviewer either copies the value as
-      # a Ruby constant or moves it to a Rails initializer.
+      # function — captured at lowering time. Cva-shaped bindings get
+      # emitted as real Ruby constants (FOO_BASE_CLASS, etc.); generic
+      # local bindings still surface as a TODO comment block.
       def render_module_bindings_prefix(component)
         return "" if component.module_bindings.empty?
-        # Sibling components from the same source file share the same
-        # module_bindings list; emit the prefix only on the first sibling
-        # so a 40-line GraphQL TODO doesn't appear in every sibling file.
-        return "" unless @emit_module_prefix
 
+        cva_bindings, other_bindings = component.module_bindings.partition { |b| b.is_a?(IR::CvaBinding) }
+        sections = []
+        # cva constants are *referenced* by every sibling's class body via
+        # FOO_BASE_CLASS / FOO_VARIANT_CLASSES — they have to land in every
+        # sibling's file or non-first siblings NameError at render. The
+        # non-cva TODO block is informational only, so it suppresses on
+        # later siblings to avoid duplicating 40-line GraphQL blocks.
+        sections << render_cva_constants(cva_bindings) unless cva_bindings.empty?
+        emit_todo_block = @emit_module_prefix && !other_bindings.empty?
+        sections << render_module_local_bindings_todo(other_bindings) if emit_todo_block
+        sections.compact.join("\n")
+      end
+
+      # Emit one cva binding as a triplet of Ruby constants —
+      # FOO_BASE_CLASS, FOO_VARIANT_CLASSES, FOO_DEFAULT_VARIANTS — that
+      # the call-site interpolation in the class body references.
+      def render_cva_constants(cva_bindings)
+        lines = []
+        cva_bindings.each do |cva|
+          prefix = cva_constant_prefix(cva.name)
+          lines << "#{prefix}_BASE_CLASS = #{cva.base_class.inspect}"
+          lines << "#{prefix}_VARIANT_CLASSES = #{format_variants_literal(cva.variants)}.freeze"
+          unless cva.default_variants.empty?
+            lines << "#{prefix}_DEFAULT_VARIANTS = #{cva.default_variants.inspect}.freeze"
+          end
+          if cva.compound_source
+            lines << "# TODO: compoundVariants from #{cva.name} aren't translated — port by hand:"
+            lines.concat(comment_lines(cva.compound_source))
+          end
+          lines << ""
+        end
+        "#{lines.join("\n").rstrip}\n"
+      end
+
+      # Non-cva module bindings — the original Gap E pre-class TODO block.
+      # Distinct from the body-level `render_local_bindings_todo` further
+      # below in this file.
+      def render_module_local_bindings_todo(bindings)
         lines = ["# TODO: module-level constants — translate to Ruby constants " \
                  "or move to a Rails initializer:"]
-        component.module_bindings.each { |b| lines.concat(comment_lines(b.source)) }
+        bindings.each { |b| lines.concat(comment_lines(b.source)) }
         "#{lines.join("\n")}\n"
+      end
+
+      # buttonVariants → BUTTON, alertVariants → ALERT. The degenerate
+      # name `"Variants"` would strip to `""` (a Ruby SyntaxError when
+      # used as a `_BASE_CLASS` prefix) — fall back to the raw name in
+      # that case. Two cva bindings whose names collapse to the same
+      # prefix (`fooVariant` and `fooVariants` → `FOO`) keep both forms
+      # disambiguated by upcasing the unstripped name as the fallback.
+      def cva_constant_prefix(cva_name)
+        stripped = cva_name.sub(/Variants?\z/, "")
+        base = stripped.empty? ? cva_name : stripped
+        AST::Inflector.underscore(base).upcase
+      end
+
+      def format_variants_literal(variants)
+        return "{}" if variants.empty?
+
+        lines = ["{"]
+        variants.each do |axis, options|
+          opts_pairs = options.map { |k, v| "#{k.inspect} => #{v.inspect}" }.join(", ")
+          lines << "  #{axis.inspect} => { #{opts_pairs} },"
+        end
+        lines << "}"
+        lines.join("\n")
       end
 
       def wrap_in_namespace(body)
@@ -425,6 +489,15 @@ module JsxRosetta
       end
 
       def ruby_default_for(prop, translator)
+        # Use the cva defaultVariants entry as the initializer default when
+        # the prop name matches a cva axis and the JSX didn't already
+        # specify its own default. So `variant: 'default'` flows from the
+        # cva binding's defaultVariants, even though the React function
+        # signature took it as an undefaulted prop.
+        if prop.default.nil? && (cva_default = cva_axis_default_for(prop.name))
+          return cva_default.inspect
+        end
+
         return "nil" if prop.default.nil?
 
         case prop.default
@@ -442,6 +515,21 @@ module JsxRosetta
         else
           "nil"
         end
+      end
+
+      # Look up `prop_name` (e.g. "variant") across every CvaBinding on the
+      # current component. Returns the cva default value (e.g. "default") or
+      # nil when no cva binding declares that axis with a default.
+      def cva_axis_default_for(prop_name)
+        return nil unless @current_component
+
+        @current_component.module_bindings.each do |b|
+          next unless b.is_a?(IR::CvaBinding)
+          next unless b.default_variants.key?(prop_name)
+
+          return b.default_variants[prop_name]
+        end
+        nil
       end
 
       def render_view_template(component, translator)
@@ -552,15 +640,32 @@ module JsxRosetta
         attrs_source = format_attributes(element.attributes, translator,
                                          context: :html, tag: element.tag, todos: todos, indent: indent)
         method_call = "#{element.tag}#{attrs_source}"
-
-        body = if VOID_ELEMENTS.include?(element.tag) || element.children.empty?
-                 "#{spaces(indent)}#{method_call}"
-               else
-                 inner = element.children.map { |c| render_ir_node(c, translator, indent: indent + 2) }.join("\n")
-                 "#{spaces(indent)}#{method_call} do\n#{inner}\n#{spaces(indent)}end"
-               end
-
+        body = element_body(element, method_call, translator, indent)
         prepend_attribute_todos(todos, indent, body)
+      end
+
+      # Decide whether the HTML tag is blockless, yield-only (auto-yield for
+      # self-closing-with-spread), or full do/end (explicit children).
+      def element_body(element, method_call, translator, indent)
+        return "#{spaces(indent)}#{method_call}" if blockless_element?(element)
+
+        if element.children.empty?
+          # `<tag {...rest} />` — the rest-spread carries React `children`,
+          # but JSX self-closes so there are no explicit IR children. Yield
+          # to the Phlex caller's block so `Component.new { ... }` nesting
+          # actually renders; guard with `block_given?` so callers who pass
+          # no block don't blow up.
+          yield_only_block(method_call, indent)
+        else
+          inner = element.children.map { |c| render_ir_node(c, translator, indent: indent + 2) }.join("\n")
+          "#{spaces(indent)}#{method_call} do\n#{inner}\n#{spaces(indent)}end"
+        end
+      end
+
+      def blockless_element?(element)
+        return true if VOID_ELEMENTS.include?(element.tag)
+
+        element.children.empty? && !spreads_children?(element)
       end
 
       def render_component_invocation(invocation, translator, indent:)
@@ -569,18 +674,44 @@ module JsxRosetta
                                              todos: todos, indent: indent, tag: invocation.name)
         class_ref = component_class_reference(invocation.name)
         new_call = kwargs.empty? ? "#{class_ref}.new" : "#{class_ref}.new(#{kwargs})"
-
-        render_prop = invocation.children.find { |c| c.is_a?(IR::RenderProp) }
-        body = if render_prop
-                 render_with_render_prop(new_call, render_prop, translator, indent)
-               elsif invocation.children.empty?
-                 "#{spaces(indent)}render #{new_call}"
-               else
-                 inner = invocation.children.map { |c| render_ir_node(c, translator, indent: indent + 2) }.join("\n")
-                 "#{spaces(indent)}render #{new_call} do\n#{inner}\n#{spaces(indent)}end"
-               end
-
+        body = component_invocation_body(invocation, new_call, translator, indent)
         prepend_attribute_todos(todos, indent, body)
+      end
+
+      def component_invocation_body(invocation, new_call, translator, indent)
+        render_prop = invocation.children.find { |c| c.is_a?(IR::RenderProp) }
+        return render_with_render_prop(new_call, render_prop, translator, indent) if render_prop
+
+        call = "render #{new_call}"
+        return "#{spaces(indent)}#{call}" if blockless_invocation?(invocation)
+
+        if invocation.children.empty?
+          # `<Component {...rest} />` — same idiom as element_body. The
+          # spread carries `children`; yield to the caller's block.
+          yield_only_block(call, indent)
+        else
+          inner = invocation.children.map { |c| render_ir_node(c, translator, indent: indent + 2) }.join("\n")
+          "#{spaces(indent)}#{call} do\n#{inner}\n#{spaces(indent)}end"
+        end
+      end
+
+      def blockless_invocation?(invocation)
+        invocation.children.empty? && !spreads_children?(invocation)
+      end
+
+      def yield_only_block(call, indent)
+        outer = spaces(indent)
+        inner = spaces(indent + 2)
+        "#{outer}#{call} do\n#{inner}yield if block_given?\n#{outer}end"
+      end
+
+      # Does this Element/ComponentInvocation carry a JSX rest-spread
+      # (`{...props}`) that may transport React `children` we can't see in
+      # the IR? Used to decide whether a self-closing JSX tag should still
+      # yield to the Phlex caller's block.
+      def spreads_children?(node)
+        attrs = node.respond_to?(:attributes) ? node.attributes : node.props
+        attrs.any?(IR::SpreadAttribute)
       end
 
       # Emit a render-prop child as a Ruby block on the parent `render` call.
@@ -868,6 +999,7 @@ module JsxRosetta
       # element already describes what was lost.
       def phlex_attribute_part(attribute, translator, context:, todos:, indent: 0, tag: nil)
         case attribute
+        when IR::CvaCallSite then cva_call_site_attribute_part(attribute, translator)
         when IR::StyleBinding then class_attribute_part(attribute.expression, translator)
         when IR::ClassList then { string_key: false, source: "class: #{class_list_to_ruby_string(attribute, translator)}" }
         when IR::Style then style_attribute_part(attribute, translator, todos: todos)
@@ -906,6 +1038,54 @@ module JsxRosetta
         translated = translator.translate(expression)
         ruby = translated ? translated.ruby : expression.inspect
         { string_key: false, source: "class: #{ruby}" }
+      end
+
+      # Render an IR::CvaCallSite as the `class:` kwarg. Always produces
+      # a single Ruby string-interpolation literal that references the
+      # backend-emitted constants for the cva binding. The detection
+      # happened at lowering time (in `try_lower_cva_call_site`), so the
+      # node already carries the binding name, axes, and optional
+      # class_arg — no regex over verbatim JS source here.
+      def cva_call_site_attribute_part(node, translator)
+        cva = find_cva_binding(node.binding_name)
+        return { string_key: false, source: "class: nil" } unless cva
+
+        parts = cva_call_site_parts(node, cva, translator)
+        { string_key: false, source: %(class: "#{parts.join(" ")}") }
+      end
+
+      def find_cva_binding(binding_name)
+        @current_component&.module_bindings&.find do |b|
+          b.is_a?(IR::CvaBinding) && b.name == binding_name
+        end
+      end
+
+      def cva_call_site_parts(node, cva, translator)
+        prefix = cva_constant_prefix(cva.name)
+        parts = ["\#{#{prefix}_BASE_CLASS}"]
+        node.axes.each do |pair|
+          next unless cva.variants.key?(pair.axis)
+
+          parts << "\#{#{prefix}_VARIANT_CLASSES[#{pair.axis.inspect}][#{cva_axis_ruby_value(pair)}]}"
+        end
+        parts << "\#{#{cva_class_arg_ruby(node.class_arg, translator)}}" if node.class_arg
+        parts
+      end
+
+      def cva_class_arg_ruby(class_arg, translator)
+        translated = translator.translate(class_arg.expression)
+        return translated.ruby if translated
+
+        "@#{AST::Inflector.underscore(class_arg.expression)}"
+      end
+
+      def cva_axis_ruby_value(pair)
+        case pair.kind
+        when :literal_string then pair.source.inspect
+        when :literal_other then pair.source
+        when :literal_nil then "nil"
+        when :prop_ref then "@#{AST::Inflector.underscore(pair.source)}"
+        end
       end
 
       # Map a JSX attribute name to its Ruby kwarg form. For HTML element
@@ -1365,15 +1545,77 @@ module JsxRosetta
         "#{lines.join("\n")}\n"
       end
 
+      # Stimulus method emission. JSX inline arrow bodies are valid JS already;
+      # for DOM-driven handlers (the common shadcn shape) we just paste the body
+      # verbatim into the method, naming the JS parameter to match the original
+      # arrow's parameter so identifier references in the body still resolve.
+      #
+      # When the body references React-state setters or hooks we can't run in
+      # the browser, fall back to the previous TODO-comment behavior so the
+      # human reviewer ports it by hand.
       def stimulus_method_lines(method)
+        lines = []
+        if method.name != method.original_name
+          lines << "  // NOTE: method renamed from #{method.original_name.inspect} " \
+                   "to avoid collision with an earlier handler"
+        end
+
+        if safe_to_paste_handler?(method)
+          lines.concat(pasted_handler_lines(method))
+        else
+          lines.concat(todo_handler_lines(method))
+        end
+
+        lines
+      end
+
+      # Heuristic for "this JS body is safe to drop into a Stimulus method
+      # verbatim." Bails out when:
+      #   - any arrow param wasn't a plain Identifier (destructured / rest) —
+      #     pasting would reference an undefined local at runtime;
+      #   - the body is the identifier-bound pseudo-comment we synthesize
+      #     when an `onClick={onChange}` reference resolved to no arrow;
+      #   - the body calls a top-level React state setter (`setX(`) or hook
+      #     (`useX(`) — the negative lookbehind on `[.\w]` makes sure DOM
+      #     methods like `e.setAttribute(` / `el.setPointerCapture(` don't
+      #     trip the guard.
+      def safe_to_paste_handler?(method)
+        return false unless method.params.all?
+
+        body = method.body_source
+        return false if body.lstrip.start_with?("//")
+        return false if body =~ /(?<![.\w])set[A-Z]\w*\(/
+        return false if body =~ /(?<![.\w])use[A-Z]\w*\(/
+
+        true
+      end
+
+      # Paste the JS body into the method, using the original arrow's first
+      # parameter name (so the body's references still resolve). Strip the
+      # outer `{ … }` wrapper only when the body was an arrow BlockStatement
+      # (`(e) => { … }`), not an expression-form body like `(e) => ({ x: 1 })`
+      # which Babel hands back as `{ x: 1 }` already — stripping would yield
+      # `x: 1`, a JS label statement (no-op).
+      def pasted_handler_lines(method)
+        param = method.params.first || "event"
+        body = method.body_source.strip
+        body = body[1..-2].strip if method.body_is_block
+        inner_lines = body.split("\n").map { |l| "    #{l.lstrip}" }
+        [
+          "  #{method.name}(#{param}) {",
+          *inner_lines,
+          "  }"
+        ]
+      end
+
+      # Fallback for handlers that aren't safe to paste verbatim — preserve
+      # the original body as a comment and emit an empty method body.
+      def todo_handler_lines(method)
         body_lines = method.body_source.strip.split("\n")
         commented = body_lines.map { |line| "  //   #{line}" }
-        header = ["  // TODO: translate from the original JSX handler:"]
-        if method.name != method.original_name
-          header.unshift("  // NOTE: method renamed from #{method.original_name.inspect} " \
-                         "to avoid collision with an earlier handler")
-        end
-        header + commented + [
+        [
+          "  // TODO: translate from the original JSX handler:",
+          *commented,
           "  #{method.name}(event) {",
           "    // ...",
           "  }"
@@ -1382,6 +1624,159 @@ module JsxRosetta
 
       def spaces(count)
         " " * count
+      end
+
+      # ----------------------------------------------------------------------
+      # Lucide icon sidecars
+      # ----------------------------------------------------------------------
+      #
+      # When a translated component references `<ChevronRight />` after
+      # `import { ChevronRight } from "lucide-react"`, the consumer ends up
+      # with a `render ChevronRight.new(...)` call against a Ruby class that
+      # doesn't exist. To close that NameError, we emit one Phlex class per
+      # referenced icon as a sidecar file (`chevron_right.rb` etc.) plus a
+      # shared `lucide_icon.rb` base. Each file follows Zeitwerk's
+      # one-constant-per-file convention so it drops straight into
+      # `app/components/` without further configuration.
+
+      def lucide_icon_files(component)
+        usages = referenced_lucide_icons(component)
+        return [] if usages.empty?
+
+        @seen_lucide_icons ||= Set.new
+        files = []
+        unless @seen_lucide_icons.include?(:base)
+          files << File.new(path: "lucide_icon.rb", contents: render_lucide_icon_base_rb)
+          @seen_lucide_icons << :base
+        end
+
+        usages.sort_by { |u| u[:local_name] }.each do |usage|
+          next if @seen_lucide_icons.include?(usage[:local_name])
+
+          path = "#{AST::Inflector.underscore(usage[:local_name])}.rb"
+          files << File.new(
+            path: path,
+            contents: render_lucide_icon_class_rb(usage[:local_name], canonical: usage[:canonical_name])
+          )
+          @seen_lucide_icons << usage[:local_name]
+        end
+        files
+      end
+
+      # Lucide imports used as JSX tags, each carrying both the local
+      # binding (what the emitted file/class is named after) and the
+      # canonical export (used to look up the vendored SVG path data).
+      # The two diverge under aliased imports — `import { ChevronRight as
+      # CR }` should still resolve `ChevronRight`'s SVG while emitting a
+      # `cr.rb` defining `class CR < LucideIcon`. Names not in the
+      # vendored data still emit, but the class falls back to a TODO
+      # `inner_svg` instead of NameError-ing at render.
+      def referenced_lucide_icons(component)
+        lucide_by_local = component.module_imports
+                                   .select { |i| Icons.lucide_source?(i.source) }
+                                   .to_h { |i| [i.name, i.imported_name || i.name] }
+        return [] if lucide_by_local.empty?
+
+        invocations = Set.new
+        collect_component_invocations(component.body, invocations)
+        invocations.intersection(lucide_by_local.keys).map do |local_name|
+          { local_name: local_name, canonical_name: lucide_by_local.fetch(local_name) }
+        end
+      end
+
+      # Walk an IR subtree and collect every ComponentInvocation tag name we
+      # see. Recurses through any field that holds an IR node or array of
+      # nodes. Conservative — visits every container; cost is proportional
+      # to IR size.
+      def collect_component_invocations(node, acc)
+        return if node.nil?
+
+        acc << node.name if node.is_a?(IR::ComponentInvocation)
+        return unless node.respond_to?(:members)
+
+        node.members.each do |field|
+          value = node.public_send(field)
+          if value.is_a?(Array)
+            value.each { |child| collect_component_invocations(child, acc) }
+          elsif value.respond_to?(:members)
+            collect_component_invocations(value, acc)
+          end
+        end
+      end
+
+      def render_lucide_icon_base_rb
+        mod_open, mod_close, indent = lucide_module_wrap
+        <<~RUBY
+          # frozen_string_literal: true
+
+          # Generated by jsx_rosetta. Don't edit by hand — re-translate the source
+          # to refresh. Shared SVG-wrapper base for Lucide icon shims; one subclass
+          # per icon (e.g. ChevronRight, Search) sits alongside this file.
+          #{mod_open}#{indent}class LucideIcon < Phlex::HTML
+          #{indent}  BASE_ATTRS = %{xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"}.freeze
+
+          #{indent}  def initialize(class_name: nil, **)
+          #{indent}    super()
+          #{indent}    @class_name = class_name
+          #{indent}  end
+
+          #{indent}  def view_template
+          #{indent}    cls = @class_name.to_s.empty? ? "" : %{ class="\#{@class_name}"}
+          #{indent}    raw safe("<svg \#{BASE_ATTRS}\#{cls}>\#{inner_svg}</svg>")
+          #{indent}  end
+
+          #{indent}  def inner_svg
+          #{indent}    raise NotImplementedError
+          #{indent}  end
+          #{indent}end
+          #{mod_close}
+        RUBY
+      end
+
+      # `name` is the local binding (the Ruby class name we emit), `canonical`
+      # is the original Lucide export — they diverge under aliased imports.
+      # SVG lookup keys on `canonical`; the class definition keys on `name`.
+      def render_lucide_icon_class_rb(name, canonical: name)
+        inner = Icons.lucide_for(canonical)
+        mod_open, mod_close, indent = lucide_module_wrap
+        body = if inner
+                 "#{indent}  def inner_svg = #{format_svg_string(inner)}"
+               else
+                 "#{indent}  # TODO: #{canonical.inspect} isn't in jsx_rosetta's vendored lucide.json.\n" \
+                   "#{indent}  # Fill in inner_svg with the SVG path data from lucide.dev, or refresh\n" \
+                   "#{indent}  # `lib/jsx_rosetta/icons/lucide.json`.\n" \
+                   "#{indent}  def inner_svg = \"\""
+               end
+        <<~RUBY
+          # frozen_string_literal: true
+
+          # Generated by jsx_rosetta from a "lucide-react" import. Refresh with
+          # a re-translate; don't edit by hand.
+          #{mod_open}#{indent}class #{name} < LucideIcon
+          #{body}
+          #{indent}end
+          #{mod_close}
+        RUBY
+      end
+
+      # Match the namespace wrapping we use for the main component class.
+      # Returns ["module Foo\n", "end\n", "  "] when a namespace is set,
+      # or ["", "", ""] for the top-level case.
+      def lucide_module_wrap
+        return ["", "", ""] unless @namespace
+
+        ["module #{@namespace}\n", "end\n", "  "]
+      end
+
+      # Wrap an SVG inner-markup snippet in a Ruby string literal that
+      # preserves its embedded double quotes. Single-quoted when the markup
+      # contains no single quotes (most cases), otherwise %q delimited.
+      def format_svg_string(svg)
+        if svg.include?("'")
+          %(%q{#{svg}})
+        else
+          "'#{svg}'"
+        end
       end
     end
   end

@@ -92,11 +92,19 @@ module JsxRosetta
     #          to reference the imported value). For `import { foo as bar }`
     #          this is "bar"; for `import * as styles` this is "styles";
     #          for `import Default` this is "Default".
-    # source : String — the module specifier verbatim (e.g. "./styles.module.css",
-    #          "@apollo/client", "react"). Lets backends apply per-source
-    #          policy later (e.g. always strip `*.module.css` references).
-    # kind   : Symbol — :default | :named | :namespace.
-    ModuleImport = Data.define(:name, :source, :kind) do
+    # source        : String — the module specifier verbatim
+    #                 (e.g. "./styles.module.css", "@apollo/client", "react").
+    #                 Lets backends apply per-source policy later (e.g. always
+    #                 strip `*.module.css` references).
+    # kind          : Symbol — :default | :named | :namespace.
+    # imported_name : String? — original exported name from the source module.
+    #                 For `import { ChevronRight as CR } from "lucide-react"`,
+    #                 `name` is `"CR"` and `imported_name` is `"ChevronRight"`.
+    #                 nil for default / namespace imports where there's no
+    #                 distinct exported name. Backends that look up vendored
+    #                 data by canonical name (icons) need the imported name;
+    #                 most callers want the local binding.
+    ModuleImport = Data.define(:name, :source, :kind, :imported_name) do
       include Node
     end
 
@@ -107,6 +115,64 @@ module JsxRosetta
     # name   : String
     # source : String — verbatim JS of the entire VariableDeclaration statement.
     LocalBinding = Data.define(:name, :source) do
+      include Node
+    end
+
+    # A module-level call to `cva()` from class-variance-authority. shadcn
+    # components ubiquitously use this builder to attach a base class string
+    # plus per-axis variant maps to a JSX component. The translator
+    # recognizes the pattern at lowering time so backends can emit real
+    # Ruby constants (`FOO_BASE_CLASS`, `FOO_VARIANT_CLASSES`) instead of
+    # leaving the call as a TODO comment, and so the use-site
+    # `cn(fooVariants({ variant }), className)` translates to a proper
+    # Ruby string interpolation.
+    #
+    # name             : String — the const binding name (e.g. "buttonVariants").
+    # base_class       : String — the first string argument to cva().
+    # variants         : Hash[String => Hash[String => String]]
+    #                    — { "variant" => { "default" => "...", "outline" => "..." } }
+    # default_variants : Hash[String => String] — per-axis default value name
+    #                    (matched against the variant axis keys).
+    # compound_source  : String | nil — INTENTIONALLY UNPARSED verbatim JS
+    #                    source of any `compoundVariants` entry. Field name
+    #                    reads structural; it isn't — backends only print
+    #                    it as a TODO comment alongside the constants since
+    #                    compoundVariants semantics aren't supported in the
+    #                    first cut.
+    CvaBinding = Data.define(:name, :base_class, :variants, :default_variants, :compound_source) do
+      include Node
+    end
+
+    # A className attribute value that resolves to a known cva binding's
+    # call shape — `className={cn(buttonVariants({ variant, size }),
+    # className)}` or the no-cn direct form `className={buttonVariants({
+    # variant })}`. The translator recognizes the AST shape at lowering
+    # so the backend never has to regex over verbatim JS source; this
+    # naturally handles literal-pinned axes, reversed arg order, and
+    # the cn-vs-no-cn forms.
+    #
+    # binding_name : String — referenced cva binding's const name.
+    # axes         : [CvaAxisPair] — preserved in JSX source order.
+    # class_arg    : Interpolation | nil — the optional trailing className
+    #                arg from `cn(<cvaCall>, <classArg>)`. Nil for the
+    #                single-arg `cn(<cvaCall>)` and the no-cn direct
+    #                forms.
+    CvaCallSite = Data.define(:binding_name, :axes, :class_arg) do
+      include Node
+    end
+
+    # One axis-value pair inside a cva call's options object. The
+    # discriminator `kind` tells the backend how to render the value:
+    #
+    #   :prop_ref — JS identifier referencing a prop (`{ variant }` or
+    #               `{ variant: someProp }`). Backends render as
+    #               `@snake_case` against the receiving Phlex component.
+    #   :literal_string  — `{ variant: "default" }` — the literal value
+    #                      is the variant-table key.
+    #   :literal_other   — `{ size: 42 }` / `{ active: true }` — Ruby
+    #                      literal passed through to the bracket key.
+    #   :literal_nil     — `{ variant: null }` or `undefined`.
+    CvaAxisPair = Data.define(:axis, :kind, :source) do
       include Node
     end
 
@@ -340,7 +406,17 @@ module JsxRosetta
     #                 `name != original_name`, backends emit a collision
     #                 marker comment in the generated controller JS so the
     #                 reviewer can see the silent rename.
-    StimulusMethod = Data.define(:name, :body_source, :original_name) do
+    # params        : [String | nil] — original arrow/function parameter
+    #                 names (e.g. `["e"]`, `["event"]`, or `[]` for
+    #                 `() => …`). A `nil` entry signals a non-identifier
+    #                 param (destructured `({target}) =>`, rest `(...args) =>`)
+    #                 that the pasted body can't safely reference — backends
+    #                 bail to the TODO form when any entry is nil.
+    # body_is_block : Boolean — true when the arrow body was a BlockStatement
+    #                 (`(e) => { … }`), false for an expression-form body
+    #                 (`(e) => doX(e)`). Backends use this to decide whether
+    #                 to strip outer braces when pasting verbatim.
+    StimulusMethod = Data.define(:name, :body_source, :original_name, :params, :body_is_block) do
       include Node
     end
 
