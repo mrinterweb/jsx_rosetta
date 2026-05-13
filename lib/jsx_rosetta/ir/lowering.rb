@@ -183,19 +183,19 @@ module JsxRosetta
         raise no_component_error(file.program) if candidates.empty?
 
         name, function = candidates.first
-        module_bindings = capture_module_bindings(file.program, candidates)
+        @module_bindings = capture_module_bindings(file.program, candidates)
         @module_imports = capture_module_imports(file.program)
-        attach_module_metadata(lower_component(name, function), module_bindings, @module_imports)
+        attach_module_metadata(lower_component(name, function), @module_bindings, @module_imports)
       end
 
       def lower_all_components(file)
         candidates = find_component_functions(file.program)
         raise no_component_error(file.program) if candidates.empty?
 
-        module_bindings = capture_module_bindings(file.program, candidates)
+        @module_bindings = capture_module_bindings(file.program, candidates)
         @module_imports = capture_module_imports(file.program)
         candidates.map do |name, function|
-          attach_module_metadata(lower_component(name, function), module_bindings, @module_imports)
+          attach_module_metadata(lower_component(name, function), @module_bindings, @module_imports)
         end
       end
 
@@ -1760,8 +1760,114 @@ module JsxRosetta
         if value.is_a?(AST::JSXExpressionContainer)
           decomposed = try_lower_class_helper(value.expression)
           return decomposed if decomposed
+
+          cva_call = try_lower_cva_call_site(value.expression)
+          return cva_call if cva_call
         end
         StyleBinding.new(expression: style_binding_expression(value))
+      end
+
+      # Recognize the cva call shape — `cn(<cvaName>({ axes }), <classArg>)`
+      # or the bare `<cvaName>({ axes })` direct form — against a CvaBinding
+      # captured during module-level lowering. Returns an IR::CvaCallSite,
+      # or nil so the caller falls through to the generic StyleBinding.
+      # AST-driven instead of regexing over verbatim source, which lets us
+      # handle reversed-arg `cn(<classArg>, <cvaName>(...))`, the no-cn
+      # direct form, and literal-pinned axes naturally.
+      def try_lower_cva_call_site(expression)
+        return nil unless expression.respond_to?(:type)
+        return nil unless expression.type == "CallExpression"
+
+        callee = expression.child(:callee)
+        return nil unless callee
+
+        if callee.of_type?("Identifier") && %w[cn clsx classnames].include?(callee[:name])
+          build_cva_call_site_from_class_helper(expression[:arguments] || [])
+        else
+          build_cva_call_site_from_direct(expression)
+        end
+      end
+
+      # `cn(<cvaCall>, <classArg>)` or `cn(<classArg>, <cvaCall>)` — accept
+      # the first argument that resolves to a known cva call; the remaining
+      # argument (if any) becomes the optional `class_arg`. Anything more
+      # complex (3+ args, nested cn, multiple cva calls) bails to nil.
+      def build_cva_call_site_from_class_helper(args)
+        return nil unless args.length.between?(1, 2)
+
+        cva_arg_index = args.find_index { |a| cva_call_against_known_binding?(a) }
+        return nil unless cva_arg_index
+
+        cva_arg = args[cva_arg_index]
+        class_arg = args.length == 2 ? args[1 - cva_arg_index] : nil
+        build_cva_call_site_node(cva_arg, class_arg)
+      end
+
+      # Bare `<cvaName>({ axes })` — same shape with no class_arg.
+      def build_cva_call_site_from_direct(expression)
+        return nil unless cva_call_against_known_binding?(expression)
+
+        build_cva_call_site_node(expression, nil)
+      end
+
+      def build_cva_call_site_node(cva_call, class_arg_node)
+        callee_name = cva_call[:callee][:name]
+        options = cva_call[:arguments]&.first
+        return nil unless options && options.type == "ObjectExpression"
+
+        axes = options[:properties].filter_map { |prop| build_cva_axis_pair(prop) }
+        class_arg = class_arg_node && Interpolation.new(expression: source_of(class_arg_node))
+        CvaCallSite.new(binding_name: callee_name, axes: axes, class_arg: class_arg)
+      end
+
+      # Pull one axis-value pair off the cva options object. Shorthand
+      # (`{ variant }`) and explicit (`{ variant: someExpr }`) both work;
+      # spread (`{ ...rest }`) and computed keys bail to nil so the call
+      # site falls through to the generic translator with a TODO.
+      def build_cva_axis_pair(prop)
+        return nil unless prop.type == "ObjectProperty"
+
+        axis = property_key_name(prop)
+        return nil unless axis
+
+        value_node = prop[:value]
+        kind, source = classify_cva_axis_value(value_node)
+        CvaAxisPair.new(axis: axis, kind: kind, source: source)
+      end
+
+      def property_key_name(prop)
+        case prop[:key].type
+        when "Identifier" then prop[:key][:name]
+        when "StringLiteral" then prop[:key][:value]
+        end
+      end
+
+      def classify_cva_axis_value(node)
+        case node.type
+        when "StringLiteral" then [:literal_string, node[:value]]
+        when "NumericLiteral", "BooleanLiteral" then [:literal_other, source_of(node)]
+        when "NullLiteral" then [:literal_nil, nil]
+        when "Identifier"
+          # Shorthand `{ variant }` and explicit `{ variant: ident }` both
+          # land here; the source is the identifier name itself.
+          node[:name] == "undefined" ? [:literal_nil, nil] : [:prop_ref, node[:name]]
+        else
+          # Member chains, calls, etc. — pass the source through as a
+          # raw expression. The backend re-translates it through
+          # ExpressionTranslator like any other prop reference.
+          [:prop_ref, source_of(node)]
+        end
+      end
+
+      def cva_call_against_known_binding?(node)
+        return false unless node.respond_to?(:type)
+        return false unless node.type == "CallExpression"
+
+        callee = node.child(:callee)
+        return false unless callee&.of_type?("Identifier")
+
+        binding_name = callee[:name]
+        @module_bindings.any? { |b| b.is_a?(CvaBinding) && b.name == binding_name }
       end
 
       def try_lower_class_helper(expression)

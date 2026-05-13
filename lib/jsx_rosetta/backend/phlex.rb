@@ -31,12 +31,6 @@ module JsxRosetta
       VALID_IDENTIFIER = /\A[a-z_][a-z0-9_]*\z/i
       VOID_ELEMENTS = %w[area base br col embed hr img input link meta param source track wbr].freeze
 
-      # Matches `cn(<name>({...}), <maybeClassName>)` — the call shape shadcn
-      # uses ubiquitously for variant-bearing components. Multi-line tolerant.
-      # The class body's `class:` translation consults this against the known
-      # CvaBindings on the current component (see rewrite_cva_call_site).
-      CVA_CALL_PATTERN = /\Acn\(\s*(\w+)\(\s*\{([^{}]*)\}\s*\)\s*(?:,\s*([^()]+?))?\s*\)\z/m
-
       # Inline budget for object/array literal rendering. When the
       # single-line rendering of a literal exceeds this width — measured
       # from the opening bracket — it switches to a multi-line layout
@@ -976,6 +970,7 @@ module JsxRosetta
       # element already describes what was lost.
       def phlex_attribute_part(attribute, translator, context:, todos:, indent: 0)
         case attribute
+        when IR::CvaCallSite then cva_call_site_attribute_part(attribute, translator)
         when IR::StyleBinding then class_attribute_part(attribute.expression, translator)
         when IR::ClassList then { string_key: false, source: "class: #{class_list_to_ruby_string(attribute, translator)}" }
         when IR::Style then style_attribute_part(attribute, translator, todos: todos)
@@ -1011,17 +1006,57 @@ module JsxRosetta
       end
 
       def class_attribute_part(expression, translator)
-        # cva-aware fast path — see rewrite_cva_call_site. The class attr
-        # is the by-far-most-common cva use site, so we check here first
-        # before the generic translator (which would bail to a literal
-        # string holding the verbatim `cn(...)` source).
-        if (rewritten = rewrite_cva_call_site(expression, translator))
-          return { string_key: false, source: "class: #{rewritten}" }
-        end
-
         translated = translator.translate(expression)
         ruby = translated ? translated.ruby : expression.inspect
         { string_key: false, source: "class: #{ruby}" }
+      end
+
+      # Render an IR::CvaCallSite as the `class:` kwarg. Always produces
+      # a single Ruby string-interpolation literal that references the
+      # backend-emitted constants for the cva binding. The detection
+      # happened at lowering time (in `try_lower_cva_call_site`), so the
+      # node already carries the binding name, axes, and optional
+      # class_arg — no regex over verbatim JS source here.
+      def cva_call_site_attribute_part(node, translator)
+        cva = find_cva_binding(node.binding_name)
+        return { string_key: false, source: "class: nil" } unless cva
+
+        parts = cva_call_site_parts(node, cva, translator)
+        { string_key: false, source: %(class: "#{parts.join(" ")}") }
+      end
+
+      def find_cva_binding(binding_name)
+        @current_component&.module_bindings&.find do |b|
+          b.is_a?(IR::CvaBinding) && b.name == binding_name
+        end
+      end
+
+      def cva_call_site_parts(node, cva, translator)
+        prefix = cva_constant_prefix(cva.name)
+        parts = ["\#{#{prefix}_BASE_CLASS}"]
+        node.axes.each do |pair|
+          next unless cva.variants.key?(pair.axis)
+
+          parts << "\#{#{prefix}_VARIANT_CLASSES[#{pair.axis.inspect}][#{cva_axis_ruby_value(pair)}]}"
+        end
+        parts << "\#{#{cva_class_arg_ruby(node.class_arg, translator)}}" if node.class_arg
+        parts
+      end
+
+      def cva_class_arg_ruby(class_arg, translator)
+        translated = translator.translate(class_arg.expression)
+        return translated.ruby if translated
+
+        "@#{AST::Inflector.underscore(class_arg.expression)}"
+      end
+
+      def cva_axis_ruby_value(pair)
+        case pair.kind
+        when :literal_string then pair.source.inspect
+        when :literal_other then pair.source
+        when :literal_nil then "nil"
+        when :prop_ref then "@#{AST::Inflector.underscore(pair.source)}"
+        end
       end
 
       # Map a JSX attribute name to its Ruby kwarg form. For HTML element
@@ -1221,87 +1256,12 @@ module JsxRosetta
       #      be parsed at all (e.g. `<LeftOutlined .../>`, array literals,
       #      template literals with method calls). Same TODO + nil path.
       def interpolated_attribute_value(name, value, translator, todos:)
-        # cva use-site rewrite: when the attribute value is a
-        # `cn(<knownCvaName>({...}), className)` call against a CvaBinding
-        # we recognized at lowering, emit a real Ruby string interpolation
-        # using the hoisted constants. Saves the generic translator from
-        # bailing to a literal-string class attribute.
-        if (rewritten = rewrite_cva_call_site(value.expression, translator))
-          return rewritten
-        end
-
         translated = translator.translate(value.expression)
         return translated.ruby if translated && !uppercase_unresolved?(translated.unresolved_identifiers)
 
         compact = value.expression.tr("\n", " ").squeeze(" ")
         todos << "attribute #{name.inspect} dropped — couldn't translate: #{compact}"
         "nil"
-      end
-
-      # Returns a Ruby string-literal source when `expression` matches the
-      # cva call shape against a known CvaBinding; nil otherwise (caller
-      # falls through to the generic translator).
-      def rewrite_cva_call_site(expression, translator)
-        return nil unless @current_component
-
-        match = CVA_CALL_PATTERN.match(expression.strip)
-        return nil unless match
-
-        cva_name = match[1]
-        axes_src = match[2]
-        class_arg = match[3]
-        cva = @current_component.module_bindings.find do |b|
-          b.is_a?(IR::CvaBinding) && b.name == cva_name
-        end
-        return nil unless cva
-
-        prefix = cva_constant_prefix(cva.name)
-        axis_parts = cva_call_axes(axes_src, cva).map do |axis_name, ruby_value|
-          "\#{#{prefix}_VARIANT_CLASSES[#{axis_name.inspect}][#{ruby_value}]}"
-        end
-        class_part = class_arg && translate_cva_class_arg(class_arg, translator)
-
-        parts = ["\#{#{prefix}_BASE_CLASS}", *axis_parts]
-        parts << "\#{#{class_part}}" if class_part
-        %("#{parts.join(" ")}")
-      end
-
-      # Parse the inner `{...}` of the cva call. Supports:
-      #   { variant }                  → axis "variant" sourced from prop @variant
-      #   { variant: variant }         → same as shorthand
-      #   { variant: someOtherProp }   → axis "variant" sourced from @some_other_prop
-      #   { variant: "default" }       → literal pin, looks up by the literal key
-      #   { variant: true / null / 4 } → other literals, emit as Ruby equivalents
-      # Returns [[axis_name, ruby_value_expr], ...] in the order they appear.
-      def cva_call_axes(axes_src, cva)
-        axes_src.split(",").filter_map do |raw|
-          key, value = raw.split(":", 2).map(&:strip)
-          axis_name = key
-          value_src = (value || key).strip
-          next unless cva.variants.key?(axis_name)
-
-          [axis_name, cva_axis_value_expr(value_src)]
-        end
-      end
-
-      # Decide how to render the value side of a cva axis pair. JS
-      # identifiers map to a snake_case `@ivar`; string / numeric /
-      # boolean / null literals map to the equivalent Ruby literal so
-      # the resulting `VARIANT_CLASSES["axis"][...]` lookup is well-formed.
-      def cva_axis_value_expr(value_src)
-        case value_src
-        when /\A"(.*)"\z/m, /\A'(.*)'\z/m then ::Regexp.last_match(1).inspect
-        when /\A-?\d/, "true", "false" then value_src
-        when "null", "undefined" then "nil"
-        else "@#{AST::Inflector.underscore(value_src)}"
-        end
-      end
-
-      def translate_cva_class_arg(class_arg, translator)
-        translated = translator.translate(class_arg.strip)
-        return translated.ruby if translated
-
-        "@#{AST::Inflector.underscore(class_arg.strip)}"
       end
 
       def uppercase_unresolved?(unresolved_identifiers)

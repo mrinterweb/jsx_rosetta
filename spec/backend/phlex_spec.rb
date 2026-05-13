@@ -2262,6 +2262,40 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(contents["b.rb"]).to include("SHARED_VARIANT_CLASSES")
     end
 
+    it "handles the bare `<cvaName>({ axes })` direct form (no cn wrapper)" do
+      # AST detection recognizes the no-cn variant — some shadcn wrappers
+      # don't import `cn` and just splat the cva call straight into
+      # `className`. Without this, the call landed in the class as a
+      # literal `"buttonVariants({ variant })"` string.
+      source = <<~JSX
+        import { cva } from "class-variance-authority";
+        const xVariants = cva("base", { variants: { variant: { default: "v" } } });
+        function X({ variant, ...props }) {
+          return <div className={xVariants({ variant })} {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include('X_VARIANT_CLASSES["variant"][@variant]')
+      expect(content).not_to include("xVariants({")
+    end
+
+    it "handles the reversed-arg form `cn(className, cvaName(...))`" do
+      # AST detection finds the cva-call argument by shape, not position —
+      # the regex used to require cva first.
+      source = <<~JSX
+        import { cva } from "class-variance-authority";
+        const xVariants = cva("base", { variants: { variant: { default: "v" } } });
+        function X({ className, variant, ...props }) {
+          return <div className={cn(className, xVariants({ variant }))} {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include('X_VARIANT_CLASSES["variant"][@variant]')
+      expect(content).to include("@class_name")
+    end
+
     it "guards cva_constant_prefix against an empty prefix" do
       # The degenerate name `Variants` would strip to `""` and emit
       # `_BASE_CLASS` (a Ruby SyntaxError). Falls back to the bare

@@ -143,6 +143,39 @@ module JsxRosetta
       include Node
     end
 
+    # A className attribute value that resolves to a known cva binding's
+    # call shape — `className={cn(buttonVariants({ variant, size }),
+    # className)}` or the no-cn direct form `className={buttonVariants({
+    # variant })}`. The translator recognizes the AST shape at lowering
+    # so the backend never has to regex over verbatim JS source; this
+    # naturally handles literal-pinned axes, reversed arg order, and
+    # the cn-vs-no-cn forms.
+    #
+    # binding_name : String — referenced cva binding's const name.
+    # axes         : [CvaAxisPair] — preserved in JSX source order.
+    # class_arg    : Interpolation | nil — the optional trailing className
+    #                arg from `cn(<cvaCall>, <classArg>)`. Nil for the
+    #                single-arg `cn(<cvaCall>)` and the no-cn direct
+    #                forms.
+    CvaCallSite = Data.define(:binding_name, :axes, :class_arg) do
+      include Node
+    end
+
+    # One axis-value pair inside a cva call's options object. The
+    # discriminator `kind` tells the backend how to render the value:
+    #
+    #   :prop_ref — JS identifier referencing a prop (`{ variant }` or
+    #               `{ variant: someProp }`). Backends render as
+    #               `@snake_case` against the receiving Phlex component.
+    #   :literal_string  — `{ variant: "default" }` — the literal value
+    #                      is the variant-table key.
+    #   :literal_other   — `{ size: 42 }` / `{ active: true }` — Ruby
+    #                      literal passed through to the bracket key.
+    #   :literal_nil     — `{ variant: null }` or `undefined`.
+    CvaAxisPair = Data.define(:axis, :kind, :source) do
+      include Node
+    end
+
     # A hook invocation detected in the component body. Covers React's
     # built-in hooks plus framework hooks we recognize (Apollo's `useQuery`/
     # `useMutation`/etc., Next.js's `useRouter`/`usePathname`/etc.).
