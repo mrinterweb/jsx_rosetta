@@ -195,6 +195,62 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("# TODO: port the original Next.js `getStaticProps` to the host controller action:")
     end
 
+    context "HOC unwrapping" do
+      it "emits the class and a memo TODO line for a memo-wrapped component" do
+        jsx = "const NoteTag = memo(function NoteTag({ label }) { return <span>{label}</span>; });"
+        content = files_for(jsx).values.first
+
+        expect(content).to include("# TODO: original component was wrapped in memo(...)")
+        expect(content).to include("fragment caching")
+        expect(content).to include("class NoteTag")
+        expect(content).to match(/span do\s+plain @label/m)
+      end
+
+      it "emits a forwardRef TODO line and drops the ref param from the initializer" do
+        jsx = <<~JSX
+          const Button = forwardRef(function Button({ size, label }, ref) {
+            return <button>{label}</button>;
+          });
+        JSX
+        content = files_for(jsx).values.first
+
+        expect(content).to include("# TODO: original component was wrapped in forwardRef(...)")
+        expect(content).to include("ref-forwarding")
+        # initializer should accept the props but NOT a ref kwarg
+        expect(content).to include("def initialize(size: nil, label: nil)")
+        expect(content).not_to match(/def initialize\([^)]*ref:/)
+      end
+
+      it "emits one TODO line per nested wrapper, outside-in" do
+        jsx = <<~JSX
+          const Button = memo(forwardRef(function Button({ label }, ref) {
+            return <button>{label}</button>;
+          }));
+        JSX
+        content = files_for(jsx).values.first
+
+        memo_idx = content.index("wrapped in memo(...)")
+        ref_idx = content.index("wrapped in forwardRef(...)")
+        expect(memo_idx).not_to be_nil
+        expect(ref_idx).not_to be_nil
+        expect(memo_idx).to be < ref_idx
+      end
+
+      it "uses the React.memo namespace form transparently" do
+        jsx = "const Tag = React.memo(function Tag({ label }) { return <span>{label}</span>; });"
+        content = files_for(jsx).values.first
+
+        expect(content).to include("# TODO: original component was wrapped in memo(...)")
+      end
+
+      it "emits no HOC TODO for plain components" do
+        jsx = "function Plain() { return <p />; }"
+        content = files_for(jsx).values.first
+
+        expect(content).not_to include("# TODO: original component was wrapped")
+      end
+    end
+
     it "rejects rails_view: combined with suffix:" do
       expect { described_class.new(rails_view: rails_route(controller: "pages", action: "home"), suffix: "Component") }
         .to raise_error(ArgumentError, /cannot be combined/)

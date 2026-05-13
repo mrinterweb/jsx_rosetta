@@ -85,11 +85,22 @@ module JsxRosetta
     #                  to the first component when a file contains
     #                  multiple — Next.js page files have exactly one
     #                  default-export component, so collisions are rare.
+    # hoc_wrappers   : [String] — Higher-Order Component wrapper names
+    #                  that the lowering peeled off when finding this
+    #                  component (e.g. `memo`, `forwardRef`, `observer`,
+    #                  `connect`, `withRouter`). Recorded in
+    #                  outside-in order so a `memo(forwardRef(...))`
+    #                  emits as ["memo", "forwardRef"]. Backends surface
+    #                  these as a TODO comment block above the class
+    #                  explaining each wrapper's Rails analog (or
+    #                  lack of one). Empty for components without
+    #                  wrappers — the common case.
     Component = Data.define(:name, :props, :body, :rest_prop_name,
                             :local_bindings, :local_binding_names,
                             :module_bindings, :module_imports,
                             :stimulus_methods, :react_hooks,
-                            :render_methods, :mode, :server_data_source) do
+                            :render_methods, :mode, :server_data_source,
+                            :hoc_wrappers) do
       include Node
     end
 

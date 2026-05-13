@@ -617,6 +617,92 @@ RSpec.describe JsxRosetta::IR::Lowering do
     end
   end
 
+  describe "HOC unwrapping" do
+    it "unwraps `const X = memo(function X(...) {...})` to find the component" do
+      ir = lower(<<~JSX)
+        const NoteTag = memo(function NoteTag({ label }) { return <span>{label}</span>; });
+      JSX
+
+      expect(ir.name).to eq("NoteTag")
+      expect(ir.hoc_wrappers).to eq(["memo"])
+      expect(ir.props.map(&:name)).to eq(["label"])
+    end
+
+    it "unwraps the React.memo namespace form" do
+      ir = lower(<<~JSX)
+        const NoteTag = React.memo(function NoteTag({ label }) { return <span>{label}</span>; });
+      JSX
+
+      expect(ir.hoc_wrappers).to eq(["memo"])
+    end
+
+    it "unwraps an arrow-form memo() argument" do
+      ir = lower(<<~JSX)
+        const NoteTag = memo(({ label }) => <span>{label}</span>);
+      JSX
+
+      expect(ir.name).to eq("NoteTag")
+      expect(ir.hoc_wrappers).to eq(["memo"])
+    end
+
+    it "unwraps forwardRef and drops the trailing ref param" do
+      ir = lower(<<~JSX)
+        const Button = forwardRef(function Button({ children }, ref) { return <button>{children}</button>; });
+      JSX
+
+      expect(ir.hoc_wrappers).to eq(["forwardRef"])
+      expect(ir.props.map(&:name)).to eq(["children"])
+    end
+
+    it "unwraps an arrow forwardRef without an inner identifier" do
+      ir = lower(<<~JSX)
+        const Button = forwardRef(({ children }, ref) => <button>{children}</button>);
+      JSX
+
+      expect(ir.name).to eq("Button")
+      expect(ir.hoc_wrappers).to eq(["forwardRef"])
+      expect(ir.props.map(&:name)).to eq(["children"])
+    end
+
+    it "unwraps `export default memo(function X() {...})`" do
+      ir = lower(<<~JSX)
+        export default memo(function Greeting({ name }) { return <h1>{name}</h1>; });
+      JSX
+
+      expect(ir.name).to eq("Greeting")
+      expect(ir.hoc_wrappers).to eq(["memo"])
+    end
+
+    it "flattens nested wrappers in outside-in order" do
+      ir = lower(<<~JSX)
+        const Button = memo(forwardRef(function Button({ label }, ref) { return <button>{label}</button>; }));
+      JSX
+
+      expect(ir.hoc_wrappers).to eq(%w[memo forwardRef])
+      expect(ir.props.map(&:name)).to eq(["label"])
+    end
+
+    it "doesn't record the HOC-wrapped declaration as a module binding" do
+      ir = lower(<<~JSX)
+        const NoteTag = memo(function NoteTag({ label }) { return <span>{label}</span>; });
+      JSX
+
+      expect(ir.module_bindings.map(&:name)).not_to include("NoteTag")
+    end
+
+    it "leaves unrecognized wrappers alone (still no component found)" do
+      expect do
+        lower("const X = wrapWithMagic(function X() { return <p/>; });")
+      end.to raise_error(JsxRosetta::IR::Lowering::LoweringError, /no component function/)
+    end
+
+    it "returns an empty hoc_wrappers list for non-HOC components" do
+      ir = lower("function X() { return <p />; }")
+
+      expect(ir.hoc_wrappers).to eq([])
+    end
+  end
+
   describe "B1: getServerSideProps / getStaticProps capture" do
     it "captures an exported `async function getServerSideProps(ctx)` verbatim" do
       ir = lower(<<~JSX)
@@ -1346,8 +1432,12 @@ RSpec.describe JsxRosetta::IR::Lowering do
         .to raise_error(JsxRosetta::IR::Lowering::LoweringError, /data export.*not a component/)
     end
 
-    it "labels a HOC-wrapped component" do
-      expect { lower("export const X = React.memo(function X() { return foo; });") }
+    it "labels a HOC-wrapped component when the wrapper isn't peelable (React.lazy)" do
+      # `React.memo` / `forwardRef` / `observer` etc. now peel through to
+      # the inner component. `React.lazy(() => import(...))` carries no
+      # inline function body to lower — the wrapper-detection shape
+      # classifier still fires for it.
+      expect { lower("export const X = React.lazy(() => import('./X'));") }
         .to raise_error(JsxRosetta::IR::Lowering::LoweringError, /HOC-wrapped component/)
     end
 
@@ -1810,7 +1900,8 @@ RSpec.describe JsxRosetta::IR::Lowering do
         react_hooks: [],
         render_methods: [],
         mode: :view,
-        server_data_source: nil
+        server_data_source: nil,
+        hoc_wrappers: []
       )
 
       expect(ir).to eq(expected)

@@ -126,6 +126,14 @@ module JsxRosetta
         "LogicalExpression" => ->(n) { [n[:left], n[:right]] }
       }.freeze
 
+      # Known wrapper-call names that lowering peers through to find the
+      # inner component definition. Both bare (`memo(...)`) and React-
+      # namespaced (`React.memo(...)`) forms count. Wrappers we don't
+      # unwrap (e.g. `React.lazy` — different shape, no inline function
+      # body) stay off this list on purpose; declarations using them
+      # won't be recognized as components, same as pre-unwrap behavior.
+      HOC_WRAPPER_NAMES = %w[memo forwardRef observer connect withRouter withTranslation].to_set.freeze
+
       SHAPE_MESSAGES = {
         hoc_wrapped: "looks like a HOC-wrapped component (React.memo / forwardRef / lazy / observer) — " \
                      "this version doesn't peel HOC wrappers; remove the wrapper or upgrade when supported",
@@ -290,14 +298,14 @@ module JsxRosetta
         init = declarator[:init]
         return unless init.is_a?(AST::Node)
 
-        # Component declarators (`const Foo = () => ...`) are handled by
-        # the component pipeline; skip them here so the source doesn't
-        # show up twice.
-        return if %w[ArrowFunctionExpression FunctionExpression].include?(init.type) &&
-                  component_names.include?(declarator[:id]&.[](:name))
-
         name = declarator[:id]&.[](:name)
         return unless name
+
+        # Component declarators (`const Foo = () => ...` and the
+        # HOC-wrapped `const Foo = memo(() => ...)` form) are handled by
+        # the component pipeline; skip them here so the source doesn't
+        # surface twice (once as a TODO, once as the class).
+        return if component_names.include?(name)
 
         # shadcn-style `const fooVariants = cva(base, { variants, ... })` gets
         # recognized at lowering and stored as a CvaBinding — the backend
@@ -642,8 +650,27 @@ module JsxRosetta
         when "FunctionDeclaration" then [[declaration[:id]&.[](:name), declaration]]
         when "VariableDeclaration" then extract_arrow_components(declaration)
         when "ClassDeclaration" then extract_class_component(declaration)
+        when "CallExpression" then extract_hoc_default_export(declaration)
         else []
         end
+      end
+
+      # `export default memo(function X() {...})` — the declaration is a
+      # CallExpression whose argument is a named FunctionExpression. Peer
+      # through to the inner function and record the wrapper. Anonymous
+      # forms (`export default memo(function () {...})`) get skipped —
+      # `lower_component` rejects anonymous functions and the pre-unwrap
+      # behavior was the same.
+      def extract_hoc_default_export(call_expression)
+        unwrapped = unwrap_hoc(call_expression)
+        return [] unless unwrapped
+
+        inner = unwrapped[:function]
+        name = inner[:id]&.[](:name) if inner.respond_to?(:[])
+        return [] unless name
+
+        record_hoc_wrappers(name, unwrapped[:wrappers])
+        [[name, inner]]
       end
 
       # Recognize a class component by the presence of a `render()` method.
@@ -772,11 +799,72 @@ module JsxRosetta
         variable_declaration[:declarations].filter_map do |declarator|
           init = declarator[:init]
           next nil unless init.is_a?(AST::Node)
-          next nil unless %w[ArrowFunctionExpression FunctionExpression].include?(init.type)
 
           name = declarator[:id]&.[](:name)
-          name ? [name, init] : nil
+          next nil unless name
+
+          if %w[ArrowFunctionExpression FunctionExpression].include?(init.type)
+            [name, init]
+          elsif (unwrapped = unwrap_hoc(init))
+            record_hoc_wrappers(name, unwrapped[:wrappers])
+            [name, unwrapped[:function]]
+          end
         end
+      end
+
+      # Peer through a CallExpression initializer to find an inline
+      # function/arrow argument that's the real component definition.
+      # Recurses through nested wrappers so `memo(forwardRef(fn))` flattens
+      # to `["memo", "forwardRef"]` + the innermost `fn`. Returns
+      # `{ function: AST, wrappers: [String] }` or nil when no unwrap
+      # applies (the initializer is a CallExpression but doesn't match
+      # a known wrapper shape).
+      def unwrap_hoc(node)
+        wrappers = []
+        current = node
+        while current.is_a?(AST::Node) && current.type == "CallExpression"
+          callee_name = hoc_callee_name(current[:callee])
+          break unless callee_name
+
+          inner = current[:arguments].first
+          break unless inner.is_a?(AST::Node)
+
+          wrappers << callee_name
+          if %w[ArrowFunctionExpression FunctionExpression].include?(inner.type)
+            return { function: inner, wrappers: wrappers }
+          end
+
+          current = inner
+        end
+        nil
+      end
+
+      # Extract the wrapper name from a CallExpression callee. Accepts the
+      # bare form (`memo(...)`) and the React-namespace form (`React.memo(...)`).
+      # Returns the local name ("memo") in both cases so the wrapper TODO
+      # text doesn't have to handle both spellings.
+      def hoc_callee_name(callee)
+        return nil unless callee.is_a?(AST::Node)
+
+        name =
+          case callee.type
+          when "Identifier"
+            callee[:name]
+          when "MemberExpression"
+            object = callee[:object]
+            property = callee[:property]
+            return nil unless object.is_a?(AST::Node) && object.of_type?("Identifier")
+            return nil unless object[:name] == "React"
+            return nil unless property.is_a?(AST::Node) && property.of_type?("Identifier")
+
+            property[:name]
+          end
+        name if name && HOC_WRAPPER_NAMES.include?(name)
+      end
+
+      def record_hoc_wrappers(name, wrappers)
+        @component_hoc_wrappers ||= {}
+        @component_hoc_wrappers[name] = wrappers
       end
 
       def lower_component(name, function)
@@ -785,7 +873,12 @@ module JsxRosetta
         end
 
         reset_per_component_state!
-        props, rest_prop_name = lower_params(function[:params])
+        hoc_wrappers = (@component_hoc_wrappers || {})[name] || []
+        # forwardRef's inner function is `(props, ref) => …` — the second
+        # param has no Rails analog, so drop it before lower_params sees
+        # it (otherwise it'd land as a `ref:` ivar with no use site).
+        params_for_lowering = drop_forward_ref_param(function[:params], hoc_wrappers)
+        props, rest_prop_name = lower_params(params_for_lowering)
         @prop_names = props.map(&:name)
         absorb_class_metadata(name, function, props) if function.of_type?("ClassMethod", "MethodDefinition")
 
@@ -809,8 +902,15 @@ module JsxRosetta
           react_hooks: @react_hooks,
           render_methods: @render_methods,
           mode: mode,
-          server_data_source: nil
+          server_data_source: nil,
+          hoc_wrappers: hoc_wrappers
         )
+      end
+
+      def drop_forward_ref_param(params, wrappers)
+        return params unless wrappers.include?("forwardRef") && params.size > 1
+
+        params[0..-2]
       end
 
       # A "data factory" function — common for AG-Grid / antd column

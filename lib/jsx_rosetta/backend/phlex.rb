@@ -91,6 +91,31 @@ module JsxRosetta
       # sources, not in react_hooks, so they're naturally out of scope.
       ROUTER_PUSH_PATTERN = /router\.push\(\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)\s*[,)]/
 
+      # Per-wrapper TODO header text. Each HOC that lowering peeled off the
+      # source (recorded on IR::Component#hoc_wrappers) gets one short line
+      # above the class explaining the Rails analog. Falls back to a
+      # generic line for wrappers not in this map.
+      HOC_WRAPPER_TODO_LINES = {
+        "memo" => "TODO: original component was wrapped in memo(...). React's memo memoizes " \
+                  "by shallow prop equality. Rails analog: fragment caching (`cache @model do …`) " \
+                  "when the view is expensive.",
+        "forwardRef" => "TODO: original component was wrapped in forwardRef(...). The second " \
+                        "arg (`ref`) was dropped — Rails has no view-side ref-forwarding analog; " \
+                        "use Stimulus targets / DOM ids if the host needs a handle.",
+        "observer" => "TODO: original component was wrapped in observer(...) (mobx). React's " \
+                      "observer auto-subscribes to observable state. Rails analog: the controller " \
+                      "loads data and sets @ivars; reactivity moves to Turbo Streams / Hotwire.",
+        "connect" => "TODO: original component was wrapped in connect(...)(X) (redux). Props " \
+                     "injected by mapState/mapDispatch in the source — in Rails, expect those as " \
+                     "controller-passed instance variables instead.",
+        "withRouter" => "TODO: original component was wrapped in withRouter(...) (React Router). " \
+                        "Injected router props (location, history, match) map to Rails: request.path, " \
+                        "redirect_to / form actions, and params.",
+        "withTranslation" => "TODO: original component was wrapped in withTranslation()(X) (i18n). " \
+                             "Injected `t` translator function maps to Rails I18n: `I18n.t(\"…\")` " \
+                             "or the `t` view helper."
+      }.freeze
+
       def initialize(suffix: nil, namespace: nil, rails_view: nil, route_table: nil)
         super()
         raise ArgumentError, "Phlex backend: pass either suffix: or namespace:, not both" if suffix && namespace
@@ -292,8 +317,21 @@ module JsxRosetta
 
       def render_ruby_class(component, translator)
         class_body = render_class_body(component, translator)
-        prefix = "#{render_server_data_source_prefix(component)}#{render_module_bindings_prefix(component)}"
+        prefix = "#{render_hoc_wrappers_prefix(component)}" \
+                 "#{render_server_data_source_prefix(component)}" \
+                 "#{render_module_bindings_prefix(component)}"
         wrap_in_namespace("#{prefix}#{class_body}")
+      end
+
+      def render_hoc_wrappers_prefix(component)
+        return "" if component.hoc_wrappers.empty?
+
+        lines = component.hoc_wrappers.map do |wrapper|
+          "# #{HOC_WRAPPER_TODO_LINES[wrapper] ||
+               "TODO: original component was wrapped in #{wrapper}(...). " \
+               "Verify the Rails-side equivalent (or absence) and adjust before shipping."}"
+        end
+        "#{lines.join("\n")}\n"
       end
 
       # When the source file exports `getServerSideProps` /
