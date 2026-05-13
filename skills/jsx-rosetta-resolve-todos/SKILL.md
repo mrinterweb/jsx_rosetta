@@ -33,7 +33,7 @@ The TODO comments emitted by `jsx_rosetta` follow stable shapes. Routing is rege
 | TODO regex | Recipe | Default action |
 |---|---|---|
 | `# TODO: (attribute\|style declaration) "X" dropped — couldn't translate: <RHS>` (RHS matches a configured token regex) | `recipes/01_design_tokens.md` | resolve via `tools/apply_substitutions.rb` |
-| `# TODO: render condition references binding\(s\) promoted to @ivar` | `recipes/02_promoted_ivar.md` | resolve via `tools/apply_promoted_ivar.rb` (verifies `def initialize`) |
+| `# TODO: render condition references binding\(s\) promoted to @ivar` | `recipes/02_promoted_ivar.md` | resolve or sharpen via `tools/apply_promoted_ivar.rb` |
 | `# TODO: React hooks detected` | `recipes/03_react_hooks.md` | sharpen — sub-classify hook flavor |
 | `# TODO: Apollo data-fetching hooks detected` | `recipes/04_apollo_hooks.md` | sharpen — extract query name + variables |
 | `# TODO: translate the original JSX `<event>` handler` | `recipes/05_event_handlers.md` | sharpen — classify behavioral vs mutation |
@@ -72,6 +72,16 @@ Conservative by design:
 - Pre-write `ruby -c` validation; on failure, the file is left untouched and the run is reported as `parse_failed`
 
 See `examples/design_tokens.ant_design_v5.yml` for a full reference config (Ant Design v5 defaults, ~85 tokens). See `data/design_tokens.template.yml` for a blank schema you can fill in for your own design system.
+
+### `tools/apply_promoted_ivar.rb`
+
+Pure-Ruby resolution of the `# TODO: render condition references binding(s) promoted to @ivar` reminders. Reads each file's `def initialize` signature and either deletes the TODO (when every named prop is already in the signature) or sharpens it to a tagged single-liner naming exactly what's missing — distinguishing missing controller props from missing PascalCase imports.
+
+```bash
+ruby tools/apply_promoted_ivar.rb [--dry-run] [--quiet] <file_or_dir>...
+```
+
+Idempotent: safe to re-run after wiring more controllers.
 
 ### Recipe content (`recipes/*.md`)
 
