@@ -1734,7 +1734,8 @@ RSpec.describe JsxRosetta::IR::Lowering do
           JsxRosetta::IR::StimulusMethod.new(
             name: "onClick",
             body_source: "// originally bound to: onClick",
-            original_name: "onClick"
+            original_name: "onClick",
+            params: []
           )
         ],
         react_hooks: [],

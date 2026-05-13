@@ -1621,8 +1621,9 @@ module JsxRosetta
         base = name_hint || default_stimulus_method_name(attr_name)
         method_name = stimulus_method_name(base)
         body_source = source_of(arrow_node[:body])
+        params = Array(arrow_node[:params]).map { |p| p[:name] }.compact
         @stimulus_methods << StimulusMethod.new(
-          name: method_name, body_source: body_source, original_name: base
+          name: method_name, body_source: body_source, original_name: base, params: params
         )
         @local_arrows.delete(name_hint) if name_hint
         StimulusBinding.new(event: event, method_name: method_name)
@@ -1636,7 +1637,7 @@ module JsxRosetta
         method_name = stimulus_method_name(identifier_name)
         body_source = "// originally bound to: #{identifier_name}"
         @stimulus_methods << StimulusMethod.new(
-          name: method_name, body_source: body_source, original_name: identifier_name
+          name: method_name, body_source: body_source, original_name: identifier_name, params: []
         )
         StimulusBinding.new(event: event, method_name: method_name)
       end

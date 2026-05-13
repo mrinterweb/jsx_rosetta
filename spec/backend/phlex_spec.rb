@@ -242,11 +242,55 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("clickHandler(event) {")
     end
 
-    it "preserves the original handler body as a TODO comment" do
+    it "pastes the JSX handler body into the generated Stimulus method" do
       content = file_contents(source, "x_controller.js")
 
-      expect(content).to include("// TODO: translate from the original JSX handler:")
+      # The DOM-driven body `doThing()` is valid JS, so we drop it straight
+      # into the method instead of leaving the human reviewer with a TODO
+      # comment to translate.
+      expect(content).to include("clickHandler(event) {")
       expect(content).to include("doThing()")
+      expect(content).not_to include("// TODO: translate from the original JSX handler:")
+    end
+
+    it "falls back to a TODO comment when the body uses a React state setter" do
+      # `setOpen(!open)` references a hook return; we can't run the setter
+      # in the browser, so preserve the body as a comment and leave the
+      # method body empty for the reviewer to port.
+      state_source = "function X() { return <button onClick={() => setOpen(!open)}>x</button>; }"
+      content = file_contents(state_source, "x_controller.js")
+
+      expect(content).to include("// TODO: translate from the original JSX handler:")
+      expect(content).to include("setOpen(!open)")
+      expect(content).to match(%r{clickHandler\(event\) \{\s+// \.\.\.\s+\}})
+    end
+
+    it "uses the arrow's parameter name so the pasted body's references resolve" do
+      # `(e) => e.currentTarget...` pastes verbatim AND the method's
+      # parameter is named `e` to match — body references resolve at runtime.
+      param_source = <<~JSX
+        function X() {
+          return (
+            <button onClick={(e) => { e.currentTarget.dataset.x = "y"; }}>
+              click
+            </button>
+          );
+        }
+      JSX
+      content = file_contents(param_source, "x_controller.js")
+
+      expect(content).to include("clickHandler(e) {")
+      expect(content).to include('e.currentTarget.dataset.x = "y"')
+    end
+
+    it "leaves identifier-bound handlers (no inline arrow body) as a TODO" do
+      # `onClick={handleClick}` with `handleClick` not declared locally has
+      # no body to paste; the existing identifier-bound TODO behavior stays.
+      ident_source = "function X({ handleClick }) { return <button onClick={handleClick}>x</button>; }"
+      content = file_contents(ident_source, "x_controller.js")
+
+      expect(content).to include("// TODO: translate from the original JSX handler:")
+      expect(content).to include("// originally bound to: handleClick")
     end
 
     it "emits a collision marker when a handler name was uniquified" do

@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added — translate Stimulus controller bodies when safe
+
+- **Paste JSX handler bodies into the generated `_controller.js`.**
+  Auto-generated Stimulus controllers used to leave the handler body
+  as a TODO comment with the verbatim source above an empty
+  `clickHandler(event) { // ... }` stub. For DOM-driven handlers (the
+  common shape in shadcn-style UI), the JSX body is *already valid JS*
+  — we now paste it directly into the method, using the original
+  arrow's parameter name so identifier references in the body still
+  resolve.
+  - `IR::StimulusMethod` gains a `params:` field — the original arrow
+    parameter names — used as the Stimulus method's parameter signature.
+  - New `safe_to_paste_handler?` heuristic on the Phlex backend bails
+    out (falls back to the previous TODO behavior) when the body
+    references React state setters (`setX(`), React hooks (`useX(`),
+    or is just an identifier-bound `// originally bound to: …` comment.
+  - Collision markers are preserved across the new path.
+
 ### Fixed — silent children loss on self-closing-with-spread tags
 
 - **Auto-yield on blockless spread-children tags.** The shadcn idiom

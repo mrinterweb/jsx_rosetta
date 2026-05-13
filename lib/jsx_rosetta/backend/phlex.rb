@@ -1320,15 +1320,66 @@ module JsxRosetta
         "#{lines.join("\n")}\n"
       end
 
+      # Stimulus method emission. JSX inline arrow bodies are valid JS already;
+      # for DOM-driven handlers (the common shadcn shape) we just paste the body
+      # verbatim into the method, naming the JS parameter to match the original
+      # arrow's parameter so identifier references in the body still resolve.
+      #
+      # When the body references React-state setters or hooks we can't run in
+      # the browser, fall back to the previous TODO-comment behavior so the
+      # human reviewer ports it by hand.
       def stimulus_method_lines(method)
+        lines = []
+        if method.name != method.original_name
+          lines << "  // NOTE: method renamed from #{method.original_name.inspect} " \
+                   "to avoid collision with an earlier handler"
+        end
+
+        if safe_to_paste_handler?(method.body_source)
+          lines.concat(pasted_handler_lines(method))
+        else
+          lines.concat(todo_handler_lines(method))
+        end
+
+        lines
+      end
+
+      # Heuristic for "this JS body is safe to drop into a Stimulus method
+      # verbatim." Bails out when the body references React state setters
+      # (`setX(`), React hooks (`useX(`), or comment-form pseudo-bodies from
+      # identifier-bound handlers we never resolved (`// originally bound to:`).
+      def safe_to_paste_handler?(body)
+        return false if body.lstrip.start_with?("//")
+        return false if body =~ /\bset[A-Z]\w*\(/
+        return false if body =~ /\buse[A-Z]\w*\(/
+
+        true
+      end
+
+      # Paste the JS body into the method, using the original arrow's first
+      # parameter name (so the body's references still resolve). Strip an
+      # outer `{ … }` wrapper if present (arrow bodies can be either expr or
+      # block form); reindent inner lines to 4 spaces.
+      def pasted_handler_lines(method)
+        param = method.params.first || "event"
+        body = method.body_source.strip
+        body = body[1..-2].strip if body.start_with?("{") && body.end_with?("}")
+        inner_lines = body.split("\n").map { |l| "    #{l.lstrip}" }
+        [
+          "  #{method.name}(#{param}) {",
+          *inner_lines,
+          "  }"
+        ]
+      end
+
+      # Fallback for handlers that aren't safe to paste verbatim — preserve
+      # the original body as a comment and emit an empty method body.
+      def todo_handler_lines(method)
         body_lines = method.body_source.strip.split("\n")
         commented = body_lines.map { |line| "  //   #{line}" }
-        header = ["  // TODO: translate from the original JSX handler:"]
-        if method.name != method.original_name
-          header.unshift("  // NOTE: method renamed from #{method.original_name.inspect} " \
-                         "to avoid collision with an earlier handler")
-        end
-        header + commented + [
+        [
+          "  // TODO: translate from the original JSX handler:",
+          *commented,
           "  #{method.name}(event) {",
           "    // ...",
           "  }"

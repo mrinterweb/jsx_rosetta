@@ -340,7 +340,12 @@ module JsxRosetta
     #                 `name != original_name`, backends emit a collision
     #                 marker comment in the generated controller JS so the
     #                 reviewer can see the silent rename.
-    StimulusMethod = Data.define(:name, :body_source, :original_name) do
+    # params        : [String] — original arrow/function parameter names
+    #                 (e.g. `["e"]`, `["event"]`, or `[]` for `() => …`).
+    #                 Backends use the first param as the Stimulus method's
+    #                 parameter name when pasting the body verbatim, so the
+    #                 body's references to that name still resolve.
+    StimulusMethod = Data.define(:name, :body_source, :original_name, :params) do
       include Node
     end
 
