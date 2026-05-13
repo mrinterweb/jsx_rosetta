@@ -11,7 +11,7 @@ You are a fan-out worker for the **jsx-rosetta-resolve-todos** skill. You receiv
 The user message will name a single `.rb` file path. You may also be given:
 
 - A path to a `data/design_tokens.yml` (for recipe 01)
-- A path to a `data/target_app_conventions.md` (for recipes 03–07)
+- A path to a `data/target_app_conventions.yml` (for recipes 03–07)
 - The host Rails app's root path (so you can grep for available helpers, controllers, Stimulus controllers)
 
 ## Hard rules

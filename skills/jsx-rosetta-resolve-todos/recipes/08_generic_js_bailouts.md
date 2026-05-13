@@ -11,31 +11,27 @@
 
 ## Status
 
-**STUB.** Full recipe to be written.
+**Documented intentions** — recipe describes the recommended LLM-driven action; no tooling yet. Always-sharpen by design (see below).
 
 ## Action
 
-**Default: sharpen.** This is the largest, most heterogeneous category. The project rule is explicit: prefer leaving a sharper TODO over speculative JS-to-Ruby translation.
+**Always sharpen. No resolve whitelist.**
 
-### Resolve (whitelist only)
+This is the largest, most heterogeneous TODO category and the one most prone to "looks easy" hazards. Earlier drafts of this recipe carried a small whitelist (`String(x) → x.to_s`, `x ?? y → x || y`, etc.); on review every entry had at least one observable-behavior divergence:
 
-The following JS shapes have safe 1:1 Ruby equivalents. Resolve when the bailout RHS exactly matches one:
-
-| JS shape | Ruby |
+| Tempting JS → Ruby | Why it's wrong |
 |---|---|
-| `String(x)` | `x.to_s` |
-| `Number(x)` | `x.to_f` (or `.to_i` if integer-typed in source) |
-| `Array.isArray(x) ? x[0] : x` | `Array(x).first` |
-| `x ?? y` | `x \|\| y` |
-| `x ?? <default literal>` | `x \|\| <literal>` |
-| `Boolean(x)` | `!!x` |
-| Inline `const X = "literal"` / `const X = <number>` | Ruby local at top of `view_template` |
+| `Number(x)` → `x.to_f` | JS returns `NaN` on bad input; Ruby returns `0.0` |
+| `Boolean(x)` → `!!x` | JS-falsy `0`, `""` are Ruby-truthy |
+| `String(x)` → `x.to_s` | Diverges on `null`/`undefined` |
+| `x ?? y` → `x \|\| y` | `??` is null/undefined-only; `\|\|` checks all falsy |
+| `Array.isArray(x) ? x[0] : x` → `Array(x).first` | Object inputs become `[k,v]` tuples in Ruby |
 
-Whitelist is conservative on purpose — every entry should have unambiguous semantics across both languages.
+The gem's hard rule applies here too: **if `jsx_rosetta` bailed, it's not safe**. The gem already attempts every translation that has unambiguous semantics; a generic JS bailout is by definition something it considered unsafe to translate. This recipe inherits that posture.
 
-### Sharpen (default)
+## Sharpen template
 
-For everything else, replace the multi-line dump with:
+Replace the multi-line dump with:
 
 ```ruby
 # TODO[js_bailout]: <one-line description of what the source computes>.
@@ -44,7 +40,7 @@ For everything else, replace the multi-line dump with:
 #   <verbatim, indented>
 ```
 
-If the bailout's intent isn't clear from a single read, just preserve and tag — don't invent a description.
+If the bailout's intent isn't clear from a single read, just preserve and tag — don't invent a description. A truthful "see Original" is more useful than a guessed summary.
 
 ## When to escalate
 
@@ -54,5 +50,6 @@ If the bailout's intent isn't clear from a single read, just preserve and tag �
 
 ## Anti-patterns
 
-- **Don't** extend the whitelist with shapes that have semantic edge cases. `==` vs `===`, `null` vs `undefined`, `[]` vs `Array(...)` — each of these has corner cases that make a "looks easy" rewrite a hazard.
+- **Don't** add to the resolve whitelist. If a future class of bailout has genuinely unambiguous semantics, the right home is the gem itself, not this recipe — the gem will then stop emitting the bailout in the first place.
 - **Don't** translate function calls whose Ruby/Rails equivalent isn't in the consuming app. Sharpen instead so the human can introduce the helper deliberately.
+- **Don't** speculate about author intent. The verbatim JS is the most useful artifact when the worker can't classify with confidence.

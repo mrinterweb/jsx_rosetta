@@ -9,7 +9,7 @@
 
 ## Status
 
-**STUB.** Full recipe to be written.
+**Documented intentions** — recipe describes the recommended LLM-driven action; no backing tooling yet. The per-declaration sub-type table below is usable by an agent today.
 
 ## Action
 

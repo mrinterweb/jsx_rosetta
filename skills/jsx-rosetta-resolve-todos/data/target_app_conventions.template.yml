@@ -1,0 +1,107 @@
+# target_app_conventions.template.yml
+#
+# Conventions of the consuming Rails application. The LLM-driven recipes
+# (03–07) read this file to know where extracted helpers, controllers, and
+# Stimulus controllers belong, and to know how the app is structured. Without
+# values here, recipes sharpen with `<TBD: see target_app_conventions.yml>`
+# rather than guessing.
+#
+# Copy this file to your consuming app's
+#   .claude/skills/jsx-rosetta-resolve-todos/data/target_app_conventions.yml
+# and fill in the values that apply. Leave a key as `null` (or omit it) if
+# your app doesn't use that surface — recipes will treat it as unavailable
+# and escalate or sharpen accordingly.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# File-system layout
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Where Rails controllers live. Recipe 04 (Apollo) sharpens with
+# "in <controller_path>/<name>_controller.rb#<action>" when extracting
+# data fetches.
+controller_path: app/controllers
+
+# Where view-scoped helpers live. Recipe 06 (module constants) directs
+# pure helper functions here.
+helper_path: app/helpers
+
+# Where app-wide service objects / POROs live. Recipe 06 directs more
+# substantial helpers here when they're shared across controllers.
+service_path: app/services
+
+# Where Phlex / ViewComponent components are dropped. The components
+# being resolved by this skill live here.
+component_dir: app/components
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GraphQL — server-side
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Where GraphQL resolvers / query objects live, if your app uses
+# graphql-ruby (or similar) server-side. Recipe 04 (Apollo) names this
+# path when sharpening "extract this query into a resolver."
+#
+# Set to `null` if your app doesn't run GraphQL server-side (e.g. you're
+# replacing client-side gql with REST endpoints or Turbo Frames).
+graphql_resolver_path: null   # e.g. app/graphql/resolvers
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stimulus
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Where Stimulus controllers live. Recipes 03 (useState→value) and 05
+# (event handlers→actions) reference this path.
+stimulus_controller_path: app/javascript/controllers
+
+# How Stimulus controller files are named. Determines the data-controller
+# value emitted in HTML attributes.
+#   kebab-case   → file `foo_bar_controller.js` exposes `data-controller="foo-bar"`
+#   underscore   → file `foo_bar_controller.js` exposes `data-controller="foo_bar"`
+# (Rails default with importmap is kebab-case via the Stimulus loader.)
+stimulus_controller_naming: kebab-case
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Styling
+# ─────────────────────────────────────────────────────────────────────────────
+
+# How the consuming app handles styles. Affects recipe 01's design-token
+# substitution suggestions and recipe 03/05 advice on inline-style refactoring.
+#   tailwind     → recipes prefer className utility classes (the YAML's
+#                  `tailwind:` field becomes the suggested target)
+#   css-modules  → recipes leave inline styles in place, suggest extraction
+#                  to <component>.module.css for substantial blocks
+#   plain        → inline styles stay inline; no refactor recommendation
+css_strategy: tailwind
+
+# Path to your Tailwind config, if css_strategy is tailwind. Recipe 01
+# can reference this when the design-token YAML's tailwind suggestions
+# don't match a class your config exposes.
+tailwind_config_path: tailwind.config.js
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Routing
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Path to your Rails routes file. Recipe 07 (Next.js navigation) references
+# it when sharpening `useRouter().push("/foo/[id]")` → "confirm in <routes>".
+routes_path: config/routes.rb
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Naming
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Suffix appended to generated Phlex component class names. The skill
+# uses this when generating cross-references (e.g. "controller passes
+# @foo to FooComponent"). Match what you set with `--phlex-suffix=` on
+# `jsx_rosetta translate`.
+component_class_suffix: Component   # e.g. ButtonComponent
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Optional — anything else recipes should know
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Free-text notes the recipes can read. Use for app-specific quirks the
+# schema doesn't capture (e.g. "we use Pundit for authorization, not
+# CanCanCan", "Turbo Frames are namespaced under app/views/frames/").
+notes: |
+  (none)

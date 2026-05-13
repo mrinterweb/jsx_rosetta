@@ -7,6 +7,10 @@
 <valid Ruby that uses @<name1>, @<name2>>
 ```
 
+## Status
+
+**Backed by `tools/apply_promoted_ivar.rb`** — pure-Ruby mechanical pass, no LLM.
+
 ## Action
 
 **Resolve / sharpen** via `tools/apply_promoted_ivar.rb`. Pure-Ruby, no LLM.

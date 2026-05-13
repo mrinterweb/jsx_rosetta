@@ -30,17 +30,21 @@ The mechanical pre-passes (design tokens, promoted-@ivar reminders) run as stand
 
 The TODO comments emitted by `jsx_rosetta` follow stable shapes. Routing is regex-based:
 
-| TODO regex | Recipe | Default action |
-|---|---|---|
-| `# TODO: (attribute\|style declaration) "X" dropped — couldn't translate: <RHS>` (RHS matches a configured token regex) | `recipes/01_design_tokens.md` | resolve via `tools/apply_substitutions.rb` |
-| `# TODO: render condition references binding\(s\) promoted to @ivar` | `recipes/02_promoted_ivar.md` | resolve or sharpen via `tools/apply_promoted_ivar.rb` |
-| `# TODO: React hooks detected` | `recipes/03_react_hooks.md` | sharpen — sub-classify hook flavor |
-| `# TODO: Apollo data-fetching hooks detected` | `recipes/04_apollo_hooks.md` | sharpen — extract query name + variables |
-| `# TODO: translate the original JSX `<event>` handler` | `recipes/05_event_handlers.md` | sharpen — classify behavioral vs mutation |
-| `# TODO: module-level constants` | `recipes/06_module_constants.md` | dispatch by sub-type |
-| `# TODO: Next.js navigation hooks detected` | `recipes/07_nextjs_navigation.md` | sharpen — extract route + params |
-| `# TODO: translate JS to Ruby — original:` | `recipes/08_generic_js_bailouts.md` | sharpen by default; resolve only on whitelist |
-| `# TODO: (attribute\|style declaration) "X" dropped` (RHS doesn't match any token regex) | `recipes/08_generic_js_bailouts.md` | sharpen |
+| TODO regex | Recipe | Default action | Backing |
+|---|---|---|---|
+| `# TODO: (attribute\|style declaration) "X" dropped — couldn't translate: <RHS>` (RHS matches a configured token regex) | `recipes/01_design_tokens.md` | resolve via `tools/apply_substitutions.rb` | **script** |
+| `# TODO: render condition references binding\(s\) promoted to @ivar` | `recipes/02_promoted_ivar.md` | resolve or sharpen via `tools/apply_promoted_ivar.rb` | **script** |
+| `# TODO: React hooks detected` | `recipes/03_react_hooks.md` | sharpen — sub-classify hook flavor | docs only |
+| `# TODO: Apollo data-fetching hooks detected` | `recipes/04_apollo_hooks.md` | sharpen — extract query name + variables | docs only |
+| `# TODO: translate the original JSX `<event>` handler` | `recipes/05_event_handlers.md` | sharpen — classify behavioral vs mutation | docs only |
+| `# TODO: module-level constants` | `recipes/06_module_constants.md` | dispatch by sub-type | docs only |
+| `# TODO: Next.js navigation hooks detected` | `recipes/07_nextjs_navigation.md` | sharpen — extract route + params | docs only |
+| `# TODO: translate JS to Ruby — original:` | `recipes/08_generic_js_bailouts.md` | always sharpen | docs only |
+| `# TODO: (attribute\|style declaration) "X" dropped` (RHS doesn't match any token regex) | `recipes/08_generic_js_bailouts.md` | always sharpen | docs only |
+
+**Backing column legend:**
+- **script** — pure-Ruby tool ships with the skill. No LLM required; safe to run unattended.
+- **docs only** — recipe text is usable today by an LLM agent (e.g. via `jsx-rosetta-resolve-todo-file`). No mechanical tool yet; sub-classification and sharpening are agent work.
 
 When in doubt, sharpen.
 
@@ -151,7 +155,7 @@ Recommended order in batch mode:
 This skill ships with no app-specific assumptions. The files you (the consuming user) own:
 
 - `data/design_tokens.yml` (or any other YAML you point `apply_substitutions.rb` at). Created from `data/design_tokens.template.yml` or copied from `examples/`.
-- `data/target_app_conventions.md` — paths, naming, CSS strategy. Recipes 03–07 read this to know where extracted helpers, controllers, and Stimulus controllers belong in your Rails app. Without it, recipes sharpen with `<TBD: see target_app_conventions.md>` rather than guessing. (Template file forthcoming.)
+- `data/target_app_conventions.yml` — paths, naming, CSS strategy. Recipes 03–07 read this to know where extracted helpers, controllers, and Stimulus controllers belong in your Rails app. Without it, recipes sharpen with `<TBD: see target_app_conventions.yml>` rather than guessing. Copy `data/target_app_conventions.template.yml` to seed it.
 
 Anything in `data/` other than `*.template.*` should be `.gitignored` in the consuming repo if it contains overrides specific to that app's theme or conventions.
 
@@ -163,4 +167,40 @@ This skill addresses the corpus of `# TODO:` comments that `jsx_rosetta` emits. 
 - Touch business logic
 - Make architectural decisions about how a React app should map to Rails (controllers vs. service objects, Turbo Frames vs. plain links, etc.) — those are flagged for human review via sharpened TODOs
 
-Effort expectation: a meaningful fraction (~30–45%) of TODOs reflect genuine human-judgment decisions and will not auto-resolve under any system. The skill's value is auto-resolving the mechanical chunk and compressing the rest into single-decision items.
+Effort expectation: a meaningful fraction of TODOs reflect genuine human-judgment decisions and will not auto-resolve under any system. The skill's value is auto-resolving the mechanical chunk and compressing the rest into single-decision items. See "Validation" below for measured impact on the gem's own stress corpus.
+
+## Validation
+
+Measured against the `jsx_rosetta` gem's own Phlex stress corpus (1,245 generated `.rb` files, 4,846 `# TODO:` comments) using `tools/diff_corpus.rb`. The corpus represents a *fresh translation* — controllers haven't been wired yet, so promoted-ivar TODOs sharpen rather than resolve.
+
+| Pass | Files modified | TODOs resolved | TODOs sharpened | Parse failures |
+|---|---|---|---|---|
+| `apply_substitutions.rb --config examples/design_tokens.ant_design_v5.yml` | 158 / 1,245 | 336 | 0 | 0 / 1,245 |
+| `apply_promoted_ivar.rb` | 333 / 1,245 | 0 (corpus state) | 665 | 0 / 1,245 |
+| **Combined mechanical pre-pass** | **428 / 1,245** | **336 deleted** | **665 compressed** | **0 / 1,245** |
+
+Net change: 4,846 → 4,510 TODO comments. Of the 1,001 TODOs the mechanical passes touched:
+
+- 336 were deleted outright (Ant Design token references → literal values spliced into render calls)
+- 665 were compressed from verbose multi-line reminders into tagged single-liners (`# TODO[promoted_ivar]: controller must pass <names>...`) with explicit "missing prop" vs "missing import" verdicts
+
+The 117 unaddressed token TODOs are conservative bailouts (multi-line render shapes, hash-form `style:`, complex RHS expressions) that the substitution script intentionally skips rather than risk breaking output.
+
+What's *not* measured here:
+
+- The LLM-driven recipes (03–08) — they ship as documented intentions; their resolve/sharpen rate depends on a live conversion to validate against.
+- The remaining ~3,500 TODOs are concentrated in categories (`react_hooks` 378, `event_handler` 428, `module_constants` 355, `apollo_hooks` 222, `nextjs_navigation` 105, generic JS bailouts 1,053) where the recipes default to *sharpening* — measurable as compression once an agent runs the recipes on a real corpus.
+
+Reproduce with:
+
+```bash
+ruby tools/diff_corpus.rb <baseline_dir> <after_pipeline_dir>
+```
+
+## Future work
+
+Tracked here so the skill's roadmap is visible alongside its current shape:
+
+- **Cross-file context for fan-out workers.** Today each `jsx-rosetta-resolve-todo-file` worker is stateless — the same gql query referenced from 5 files would sharpen identically 5 times. A pre-pass that builds a project-wide "discovery digest" (recurring queries, recurring helpers, controller signatures already seen) and feeds it to each worker would let the corpus learn once. Hard to design ahead of real-conversion evidence; bolt-on later.
+- **Drift-detection spec.** The TODO regexes in this skill's recipes need to stay in sync with the strings emitted by `lib/jsx_rosetta/backend/phlex.rb`. One round-trip test per category (fixture → translate → resolve-todos → assert N matched) would catch silent emit-format drift. Worth doing once more recipes are backed by scripts; testing stub recipes is testing a sketch.
+- **Backing scripts for recipes 03–08.** Some sub-classifications (e.g. recipe 03's hook → Stimulus mapping for unambiguous shapes like `useState(false)`) may be mechanical enough to ship as scripts. Others (event handler classification, gql operation extraction) probably stay LLM-driven. The split will become clear after running the recipes on a real conversion.

@@ -11,7 +11,7 @@
 
 ## Status
 
-**STUB.** Recipe content sketched in OUTLINE.md; full version to be written.
+**Documented intentions** — recipe describes the recommended LLM-driven action (the sub-classification table below is usable by an agent today); no backing tooling yet. Validation against a real conversion will inform whether parts of this become mechanical.
 
 ## Action
 

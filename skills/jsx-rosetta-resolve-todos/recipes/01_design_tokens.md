@@ -9,6 +9,10 @@
 
 …where `<RHS>` matches a token-system regex you've configured (e.g. `token\.(\w+)` for Ant Design, `theme\.palette\.(\w+)\.main` for MUI, `vars\.colors\.(\w+)` for vanilla-extract).
 
+## Status
+
+**Backed by `tools/apply_substitutions.rb`** — pure-Ruby mechanical pass, no LLM.
+
 ## Action
 
 **Resolve** via `tools/apply_substitutions.rb`. This is a pure-Ruby pass — no LLM call, no agent dispatch.

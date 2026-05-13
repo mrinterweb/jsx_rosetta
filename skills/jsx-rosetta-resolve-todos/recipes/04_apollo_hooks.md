@@ -10,7 +10,7 @@
 
 ## Status
 
-**STUB.** Full recipe to be written.
+**Documented intentions** — recipe describes the recommended LLM-driven action; no backing tooling yet. The sharpen template + extraction rule below is usable by an agent today, but the GraphQL operation parsing has only been spec'd, not implemented.
 
 ## Action
 
@@ -26,7 +26,7 @@ Extract the GraphQL operation name and variables from the dumped block, then emi
 #   <verbatim hook>
 ```
 
-Look up `target_app_conventions.md` for the consuming repo's resolver/service path. If absent, mark `<TBD: see target_app_conventions.md>` rather than guessing.
+Look up `target_app_conventions.yml` for the consuming repo's resolver/service path. If absent, mark `<TBD: see target_app_conventions.yml>` rather than guessing.
 
 ## When to escalate
 

@@ -10,7 +10,7 @@
 
 ## Status
 
-**STUB.** Full recipe to be written.
+**Documented intentions** — recipe describes the recommended LLM-driven action; no backing tooling yet. The sharpen templates below are usable by an agent today.
 
 ## Action
 

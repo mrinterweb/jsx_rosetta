@@ -15,7 +15,7 @@ end
 
 ## Status
 
-**STUB.** Full recipe to be written.
+**Documented intentions** — recipe describes the recommended LLM-driven action; no backing tooling yet. The classification table below is usable by an agent today.
 
 ## Action
 
