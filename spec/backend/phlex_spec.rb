@@ -1369,6 +1369,99 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     end
   end
 
+  describe "Radix primitive → HTML element registry" do
+    # Shadcn-style components wrap Radix UI primitives like
+    # `<SeparatorPrimitive.Root />` (after `import { Separator as
+    # SeparatorPrimitive } from "radix-ui"`). Without a registry, the
+    # translator emits `render SeparatorPrimitive::Root.new(...)` which
+    # references a non-existent Ruby class — NameError at render. With
+    # the registry, known primitives lower as plain HTML elements with
+    # always-applied attributes.
+    it "lowers <SeparatorPrimitive.Root /> to a <div role=\"separator\">" do
+      source = <<~JSX
+        import { Separator as SeparatorPrimitive } from "radix-ui";
+        function X() {
+          return <SeparatorPrimitive.Root orientation="horizontal" />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("div(role: 'separator', orientation: 'horizontal')")
+      expect(content).not_to include("SeparatorPrimitive::Root")
+    end
+
+    it "lowers <LabelPrimitive.Root /> to a <label>" do
+      # NOTE: htmlFor stays camelCase on lowercase HTML tags — that's the
+      # existing Phlex-attribute convention, not specific to this change.
+      source = <<~JSX
+        import { Label as LabelPrimitive } from "radix-ui";
+        function X() { return <LabelPrimitive.Root htmlFor="email">Email</LabelPrimitive.Root>; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("label(htmlFor: 'email')")
+      expect(content).not_to include("LabelPrimitive::Root")
+    end
+
+    it "lowers <SwitchPrimitive.Root> to a <button type=\"button\" role=\"switch\">" do
+      source = <<~JSX
+        import { Switch as SwitchPrimitive } from "radix-ui";
+        function X() { return <SwitchPrimitive.Root />; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("button(type: 'button', role: 'switch')")
+    end
+
+    it "respects the consumer's own attribute when it collides with a registry default" do
+      # The consumer's `role="dialog"` wins over the registry's `role="separator"`.
+      source = <<~JSX
+        import { Separator as SeparatorPrimitive } from "radix-ui";
+        function X() { return <SeparatorPrimitive.Root role="dialog" />; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("role: 'dialog'")
+      expect(content).not_to include("role: 'separator'")
+    end
+
+    it "falls through to ComponentInvocation when the LocalName isn't a Radix import" do
+      # Same JSX shape but the import isn't from radix-ui — keep current
+      # behavior (renders as Foo::Root component invocation).
+      source = <<~JSX
+        import { Foo } from "./local-lib";
+        function X() { return <Foo.Root />; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("Foo::Root")
+    end
+
+    it "falls through when the (LocalName, Member) pair isn't in the registry" do
+      # Imported from radix-ui but `BogusPrimitive.Root` isn't a registered shape.
+      source = <<~JSX
+        import { Bogus as BogusPrimitive } from "radix-ui";
+        function X() { return <BogusPrimitive.Root />; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("BogusPrimitive::Root")
+    end
+
+    it "also matches @radix-ui/react-* per-primitive package paths" do
+      # AvatarPrimitive.Root → <span>, even when imported from a per-primitive
+      # package (`@radix-ui/react-avatar`) and via a namespace import.
+      source = <<~JSX
+        import * as AvatarPrimitive from "@radix-ui/react-avatar";
+        function X() { return <AvatarPrimitive.Root />; }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to match(/^    span\s*$/)
+      expect(content).not_to include("AvatarPrimitive::Root")
+    end
+  end
+
   describe "Lucide icon sidecars (lucide-react imports)" do
     # When a JSX source imports an icon from `lucide-react` and uses it as a
     # component tag, the translator emits sidecar Phlex classes alongside

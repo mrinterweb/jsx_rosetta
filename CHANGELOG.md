@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Added — map known Radix primitive tags to underlying HTML elements
+
+- **`<SeparatorPrimitive.Root />`, `<LabelPrimitive.Root />`, etc.**
+  used to lower as `ComponentInvocation`s, producing
+  `render SeparatorPrimitive::Root.new(...)` — undefined constants,
+  NameError on render. Now: when the import source matches a Radix
+  package (`radix-ui`, `@radix-ui/react-*`) and the
+  `(LocalName, Member)` pair is in a small registry, lower as an
+  HTML Element with the underlying tag and any always-applied
+  attributes (`role`, `type`, etc.). Consumer attrs win on collision
+  with the registry defaults.
+- Registry lives at `lib/jsx_rosetta/ir/radix_registry.rb`. Covers
+  Separator / Label / Avatar (Root/Image/Fallback) / Switch
+  (Root/Thumb) / Progress (Root/Indicator) / AspectRatio (Root) /
+  ScrollArea (Root/Viewport). Unknown primitives fall through to
+  the existing `ComponentInvocation` / TODO behavior.
+- Works with both named-aliased imports
+  (`import { Separator as SeparatorPrimitive } from "radix-ui"`)
+  and namespace imports
+  (`import * as AvatarPrimitive from "@radix-ui/react-avatar"`).
+
 ### Added — auto-emit Lucide icon shims as a translation sidecar
 
 - **`import { ChevronRight } from "lucide-react"` now lands a working

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "ir/types"
+require_relative "ir/radix_registry"
 require_relative "ir/lowering"
 
 module JsxRosetta

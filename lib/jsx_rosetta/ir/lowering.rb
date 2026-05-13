@@ -160,6 +160,11 @@ module JsxRosetta
         @react_hooks = []
         @render_methods = []
         @render_method_seen = {}
+        # File-level imports; populated once at lower_file / lower_all_components
+        # entry and consulted by JSX lowering to decide whether a member-chain
+        # tag like `SeparatorPrimitive.Root` should resolve through the Radix
+        # registry into an HTML Element.
+        @module_imports = []
         # Class-component non-render members (constructor, lifecycle hooks,
         # custom handlers). Keyed by class name; populated by
         # extract_class_component, drained by lower_component to surface
@@ -173,8 +178,8 @@ module JsxRosetta
 
         name, function = candidates.first
         module_bindings = capture_module_bindings(file.program, candidates)
-        module_imports = capture_module_imports(file.program)
-        attach_module_metadata(lower_component(name, function), module_bindings, module_imports)
+        @module_imports = capture_module_imports(file.program)
+        attach_module_metadata(lower_component(name, function), module_bindings, @module_imports)
       end
 
       def lower_all_components(file)
@@ -182,9 +187,9 @@ module JsxRosetta
         raise no_component_error(file.program) if candidates.empty?
 
         module_bindings = capture_module_bindings(file.program, candidates)
-        module_imports = capture_module_imports(file.program)
+        @module_imports = capture_module_imports(file.program)
         candidates.map do |name, function|
-          attach_module_metadata(lower_component(name, function), module_bindings, module_imports)
+          attach_module_metadata(lower_component(name, function), module_bindings, @module_imports)
         end
       end
 
@@ -1165,9 +1170,53 @@ module JsxRosetta
           ComponentInvocation.new(name: "#{parent}.#{tag}", props: attributes, children: children)
         elsif html_element?(tag)
           Element.new(tag: tag, attributes: attributes, children: children)
+        elsif (radix = radix_primitive_for(tag))
+          # `<SeparatorPrimitive.Root .../>` (imported from radix-ui) lowers
+          # to a plain `<div role="separator">` so the consumer doesn't have
+          # to define a Components::SeparatorPrimitive::Root shim.
+          Element.new(
+            tag: radix[:tag],
+            attributes: merge_radix_attrs(radix[:attrs], attributes),
+            children: children
+          )
         else
           ComponentInvocation.new(name: tag, props: attributes, children: children)
         end
+      end
+
+      # Returns the Radix registry entry for `<LocalName.Member />` when:
+      #   - the tag is a two-segment member chain
+      #   - the root segment was imported from a Radix-shaped package
+      #   - the (LocalName, Member) pair is in the registry
+      # Otherwise nil — the caller falls through to a ComponentInvocation.
+      def radix_primitive_for(tag)
+        segments = tag.split(".")
+        return nil if segments.length != 2
+
+        local, member = segments
+        return nil unless imported_from_radix?(local)
+
+        RadixRegistry.lookup(local, member)
+      end
+
+      def imported_from_radix?(local_name)
+        @module_imports.any? do |imp|
+          imp.name == local_name && RADIX_SOURCE_PATTERN.match?(imp.source)
+        end
+      end
+
+      # Combine the registry's fixed attrs (role, type, etc.) with the
+      # consumer's own JSX attributes. Consumer attrs win on collision — the
+      # JSX is the source of truth; the registry just supplies safe defaults.
+      def merge_radix_attrs(fixed_attrs, jsx_attrs)
+        user_names = jsx_attrs.filter_map { |a| a.respond_to?(:name) ? a.name : nil }.to_set
+        injected = fixed_attrs.filter_map do |name, value|
+          attr_name = name.to_s
+          next if user_names.include?(attr_name)
+
+          Attribute.new(name: attr_name, value: value.to_s)
+        end
+        injected + jsx_attrs
       end
 
       def lower_polymorphic_tag_use(poly, attributes, children)
