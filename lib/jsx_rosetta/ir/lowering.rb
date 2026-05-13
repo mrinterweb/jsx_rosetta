@@ -55,12 +55,12 @@ module JsxRosetta
         end
       end
 
-      def self.lower(file, source:)
-        new(source).lower_file(file)
+      def self.lower(file, source:, keep_slot: false)
+        new(source, keep_slot: keep_slot).lower_file(file)
       end
 
-      def self.lower_all(file, source:)
-        new(source).lower_all_components(file)
+      def self.lower_all(file, source:, keep_slot: false)
+        new(source, keep_slot: keep_slot).lower_all_components(file)
       end
 
       REACT_HOOKS = %w[
@@ -146,8 +146,14 @@ module JsxRosetta
         unknown: nil
       }.freeze
 
-      def initialize(source)
+      def initialize(source, keep_slot: false)
         @source = source
+        # When false (default), the shadcn `<Comp asChild>` pattern that
+        # routes through Radix's Slot.Root gets its Slot branch dropped at
+        # lowering time, leaving only the non-Slot HTML/component branch.
+        # When true, preserve the full polymorphic conditional (legacy
+        # behavior; useful if the consumer shims Components::Slot::Root).
+        @keep_slot = keep_slot
         @prop_names = []
         @local_jsx = {}
         @local_bindings = []
@@ -1220,6 +1226,15 @@ module JsxRosetta
       end
 
       def lower_polymorphic_tag_use(poly, attributes, children)
+        if (chosen = drop_slot_branch(poly))
+          # The shadcn `<Comp asChild>` pattern routes through Radix's
+          # Slot.Root, which has no Ruby class on the Phlex side. Drop the
+          # Slot branch and render the underlying HTML/component branch
+          # directly. Pass `--keep-slot` to preserve the conditional if
+          # the consumer is shimming Slot::Root themselves.
+          return build_polymorphic_branch(chosen, attributes, children)
+        end
+
         Conditional.new(
           test: Interpolation.new(expression: source_of(poly[:test])),
           consequent: build_polymorphic_branch(poly[:true_branch], attributes, children),
@@ -1233,6 +1248,38 @@ module JsxRosetta
           Element.new(tag: branch[:tag], attributes: attributes, children: children)
         when :component
           ComponentInvocation.new(name: branch[:tag], props: attributes, children: children)
+        end
+      end
+
+      # Returns the non-Slot branch when exactly one of the polymorphic
+      # branches resolves to a Radix Slot reference (`Slot` or `Slot.Root`
+      # rooted at a `radix-ui` import). Returns nil otherwise — including
+      # when `--keep-slot` is in effect — so the caller emits the full
+      # conditional unchanged.
+      def drop_slot_branch(poly)
+        return nil if @keep_slot
+
+        t = poly[:true_branch]
+        f = poly[:false_branch]
+        t_is_slot = radix_slot_branch?(t)
+        f_is_slot = radix_slot_branch?(f)
+        return f if t_is_slot && !f_is_slot
+        return t if f_is_slot && !t_is_slot
+
+        nil
+      end
+
+      # True iff `branch` references a Slot import from a Radix-shaped
+      # package. The local binding name varies (`Slot`, `SlotPrimitive`)
+      # but the canonical pattern is "import { Slot } from radix-ui".
+      def radix_slot_branch?(branch)
+        return false unless branch[:kind] == :component
+
+        root = branch[:tag].split(".").first
+        return false unless root
+
+        @module_imports.any? do |imp|
+          imp.name == root && imp.source.to_s.include?("radix") && imp.name.start_with?("Slot")
         end
       end
 

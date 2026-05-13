@@ -9,15 +9,15 @@ module JsxRosetta
     Parser.new.parse(source, typescript: typescript, source_filename: source_filename)
   end
 
-  def self.lower(source, typescript: false, source_filename: nil)
+  def self.lower(source, typescript: false, source_filename: nil, keep_slot: false)
     ast = parse(source, typescript: typescript, source_filename: source_filename)
-    IR.lower(ast, source: source)
+    IR.lower(ast, source: source, keep_slot: keep_slot)
   end
 
   def self.translate(source, backend: :view_component, backend_options: {},
-                     typescript: false, source_filename: nil, **legacy_options)
+                     typescript: false, source_filename: nil, keep_slot: false, **legacy_options)
     ast = parse(source, typescript: typescript, source_filename: source_filename)
-    components = IR.lower_all(ast, source: source)
+    components = IR.lower_all(ast, source: source, keep_slot: keep_slot)
     backend_instance = backend_for(backend, **legacy_options, **backend_options)
     components.flat_map { |component| backend_instance.emit(component, source_filename: source_filename) }
   end

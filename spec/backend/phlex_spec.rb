@@ -1369,6 +1369,89 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     end
   end
 
+  describe "Slot / asChild branch drop" do
+    # The shadcn `<Comp asChild>` pattern routes through Radix's Slot.Root:
+    #   const Comp = asChild ? Slot : "div"
+    #   return <Comp ...>
+    # That used to lower as a polymorphic conditional whose true-branch
+    # rendered `Slot::Root.new(...)` — a non-existent Ruby class. By default
+    # the Slot branch is dropped at lowering time, leaving only the non-Slot
+    # render path. Pass `--keep-slot` / `keep_slot: true` to preserve the
+    # conditional when the consumer shims Slot::Root.
+    def keep_slot_files(source, **opts)
+      backend = described_class.new(**opts)
+      component = JsxRosetta.lower(source, keep_slot: true)
+      backend.emit(component).to_h { |file| [file.path, file.contents] }
+    end
+
+    it "drops the Slot branch and renders only the non-Slot tag by default" do
+      source = <<~JSX
+        import { Slot } from "radix-ui";
+        function X({ asChild, ...props }) {
+          const Comp = asChild ? Slot : "div";
+          return <Comp {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("div(")
+      expect(content).not_to include("Slot")
+    end
+
+    it "drops Slot.Root (member-chain form) the same way" do
+      source = <<~JSX
+        import { Slot } from "radix-ui";
+        function X({ asChild, ...props }) {
+          const Comp = asChild ? Slot.Root : "span";
+          return <Comp {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("span(")
+      expect(content).not_to include("Slot")
+    end
+
+    it "leaves the conditional intact under keep_slot: true" do
+      source = <<~JSX
+        import { Slot } from "radix-ui";
+        function X({ asChild, ...props }) {
+          const Comp = asChild ? Slot : "div";
+          return <Comp {...props} />;
+        }
+      JSX
+      content = keep_slot_files(source).fetch("x.rb")
+
+      expect(content).to include("Slot")
+    end
+
+    it "does NOT drop when neither branch references a Radix Slot" do
+      source = <<~JSX
+        function X({ withSection, ...props }) {
+          const Comp = withSection ? "section" : "div";
+          return <Comp {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("section(")
+      expect(content).to include("div(")
+    end
+
+    it "does NOT drop when the Slot import isn't from a Radix package" do
+      source = <<~JSX
+        import { Slot } from "./my-slot";
+        function X({ asChild, ...props }) {
+          const Comp = asChild ? Slot : "div";
+          return <Comp {...props} />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("Slot")
+    end
+  end
+
   describe "Radix primitive → HTML element registry" do
     # Shadcn-style components wrap Radix UI primitives like
     # `<SeparatorPrimitive.Root />` (after `import { Separator as

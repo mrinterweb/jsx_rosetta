@@ -72,7 +72,8 @@ module JsxRosetta
         backend: backend,
         backend_options: backend_options,
         typescript: typescript,
-        source_filename: input_path
+        source_filename: input_path,
+        keep_slot: options[:keep_slot] || false
       )
 
       write_emitted_files(files, out_dir)
@@ -166,6 +167,7 @@ module JsxRosetta
         when /\A--phlex-suffix=(.*)\z/ then options[:phlex_suffix] = ::Regexp.last_match(1)
         when "--phlex-namespace" then options[:phlex_namespace] = @argv.shift
         when /\A--phlex-namespace=(.+)\z/ then options[:phlex_namespace] = ::Regexp.last_match(1)
+        when "--keep-slot" then options[:keep_slot] = true
         else positional << arg
         end
       end

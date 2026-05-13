@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added — drop Slot.Root branch from polymorphic asChild tags
+
+- **shadcn's `<Comp asChild>` no longer NameErrors at render.** Components
+  using `const Comp = asChild ? Slot : "div"` (or `Slot.Root`) routed
+  the truthy branch through Radix's `Slot`, which has no Ruby class on
+  the Phlex side. Lowering now detects this Slot-vs-tag conditional
+  (Slot rooted at a `radix-ui`/`@radix-ui/react-*` import) and emits
+  only the non-Slot branch — no conditional, no `as_child` kwarg,
+  just the underlying tag.
+- New CLI flag `--keep-slot` and `JsxRosetta.translate(..., keep_slot:
+  true)` preserves the full polymorphic conditional for consumers
+  that shim `Components::Slot::Root` themselves.
+- Detection respects the import source: a project-local `import
+  { Slot } from "./my-slot"` is untouched.
+
 ### Added — map known Radix primitive tags to underlying HTML elements
 
 - **`<SeparatorPrimitive.Root />`, `<LabelPrimitive.Root />`, etc.**
