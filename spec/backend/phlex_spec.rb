@@ -1369,6 +1369,79 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     end
   end
 
+  describe "Lucide icon sidecars (lucide-react imports)" do
+    # When a JSX source imports an icon from `lucide-react` and uses it as a
+    # component tag, the translator emits sidecar Phlex classes alongside
+    # the .rb so the consumer doesn't NameError on `render ChevronRight.new`.
+    it "emits per-icon sidecar files for icons referenced in JSX" do
+      source = <<~JSX
+        import { ChevronRight } from "lucide-react";
+        function X() { return <ChevronRight />; }
+      JSX
+      files = files_for(source)
+
+      expect(files.keys).to include("chevron_right.rb", "lucide_icon.rb")
+      expect(files["chevron_right.rb"]).to include("class ChevronRight < LucideIcon")
+      expect(files["chevron_right.rb"]).to include("m9 18 6-6-6-6")
+      expect(files["lucide_icon.rb"]).to include("class LucideIcon < Phlex::HTML")
+    end
+
+    it "honors --phlex-namespace by wrapping icon classes in the same module" do
+      source = <<~JSX
+        import { Search } from "lucide-react";
+        function X() { return <Search />; }
+      JSX
+      files = files_for(source, namespace: "Components")
+
+      expect(files["search.rb"]).to include("module Components")
+      expect(files["search.rb"]).to include("  class Search < LucideIcon")
+      expect(files["lucide_icon.rb"]).to include("module Components")
+    end
+
+    it "does NOT emit sidecars when a Lucide import is unused in JSX" do
+      source = <<~JSX
+        import { Star } from "lucide-react";
+        function X() { return <div />; }
+      JSX
+      files = files_for(source)
+
+      expect(files.keys).not_to include("star.rb", "lucide_icon.rb")
+    end
+
+    it "does NOT emit sidecars when the import source isn't a Lucide package" do
+      source = <<~JSX
+        import { ChevronRight } from "react-icons/fi";
+        function X() { return <ChevronRight />; }
+      JSX
+      files = files_for(source)
+
+      expect(files.keys).not_to include("chevron_right.rb", "lucide_icon.rb")
+    end
+
+    it "leaves a TODO body when the imported icon isn't in the vendored data" do
+      source = <<~JSX
+        import { BogusIcon } from "lucide-react";
+        function X() { return <BogusIcon />; }
+      JSX
+      files = files_for(source)
+
+      expect(files["bogus_icon.rb"]).to include("TODO: \"BogusIcon\" isn't in jsx_rosetta's vendored")
+      expect(files["bogus_icon.rb"]).to include('def inner_svg = ""')
+    end
+
+    it "accepts the legacy *Icon suffix and resolves to the canonical icon" do
+      source = <<~JSX
+        import { ChevronRightIcon } from "lucide-react";
+        function X() { return <ChevronRightIcon />; }
+      JSX
+      files = files_for(source)
+
+      expect(files["chevron_right_icon.rb"]).to include("class ChevronRightIcon < LucideIcon")
+      # Same path data as the canonical ChevronRight.
+      expect(files["chevron_right_icon.rb"]).to include("m9 18 6-6-6-6")
+    end
+  end
+
   describe "auto-yield on blockless spread-children tags" do
     # The shadcn idiom `<tag {...props} />` (self-closing tag whose rest-spread
     # carries React `children`) lowers to a Phlex tag call with no block, so

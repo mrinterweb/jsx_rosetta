@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### Added — auto-emit Lucide icon shims as a translation sidecar
+
+- **`import { ChevronRight } from "lucide-react"` now lands a working
+  `ChevronRight` Phlex class.** Previously the translator carried the
+  React import through verbatim, so the generated component contained
+  `render ChevronRight.new(...)` referencing a non-existent Ruby class
+  — NameError at render time. The Phlex backend now detects Lucide
+  imports (`lucide-react`, `lucide`) that are actually used as JSX
+  component tags and emits two kinds of sidecar files:
+  - `lucide_icon.rb` — a shared `LucideIcon < Phlex::HTML` base.
+  - `<icon>.rb` — one file per referenced icon, defining a subclass
+    that renders the vendored SVG path data inline. One file per
+    icon means Zeitwerk autoloads each cleanly under the consumer's
+    `app/components/` (or wherever the output directory points).
+- Vendored path data lives at `lib/jsx_rosetta/icons/lucide.json`
+  (the ~35 icons most commonly imported by shadcn/ui sources). Icons
+  not in the vendored set emit a class whose `inner_svg` is empty
+  with a TODO comment pointing at the lucide.json refresh path.
+- Tolerates both canonical (`ChevronRight`) and legacy `*Icon`
+  (`ChevronRightIcon`) names — same path data either way.
+- `--phlex-namespace=Components` wraps every sidecar in the same
+  module as the main translation, so the consumer's autoloader
+  config doesn't need a special case.
+
 ### Added — translate Stimulus controller bodies when safe
 
 - **Paste JSX handler bodies into the generated `_controller.js`.**
