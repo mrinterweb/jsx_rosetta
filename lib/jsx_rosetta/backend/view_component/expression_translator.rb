@@ -76,7 +76,12 @@ module JsxRosetta
         OPEN_BRACKETS = ["(", "[", "{"].freeze
         CLOSE_BRACKETS = [")", "]", "}"].freeze
 
-        Result = Data.define(:ruby, :unresolved_identifiers)
+        # `promoted_locals` lists names that the condition-mode translator
+        # rendered as `@ivar` despite being known-but-unresolvable locals or
+        # imports (bucket 4 in the resolution rules). The caller is expected
+        # to surface this list in a TODO so a reviewer knows which bindings
+        # need to become controller-passed props.
+        Result = Data.define(:ruby, :unresolved_identifiers, :promoted_locals)
 
         # prop_aliases maps a local-binding name (the alias) to the
         # underlying prop name. `"data-testid": dataTestId` records
@@ -98,14 +103,47 @@ module JsxRosetta
         end
 
         def translate(source)
-          source = source.strip
-          unresolved = []
+          do_translate(source, condition_mode: false)
+        end
 
-          ruby = translate_ruby(source, unresolved)
-          ruby && Result.new(ruby: ruby, unresolved_identifiers: unresolved.uniq)
+        # Render-condition entry point. Same recursive translator as
+        # `translate`, but bucket-4 hits (known-but-unresolvable locals /
+        # imports) emit `@snake_case` instead of returning `nil` (member-
+        # chain root, unary/binary operand) or `"nil"` (leaf identifier).
+        # The promoted names come back via `Result#promoted_locals` so the
+        # caller can surface a TODO naming the bindings that need to become
+        # controller-passed props.
+        #
+        # Only safe here because driving an `if` with a known-but-nil value
+        # silently disables the branch — destroying the source's intent.
+        # Promoting to an ivar trades silence for a clear render-time error
+        # (NameError on @ivar if the user never threads the prop) that the
+        # accompanying TODO points the reviewer at.
+        def translate_condition(source)
+          do_translate(source, condition_mode: true)
         end
 
         private
+
+        def do_translate(source, condition_mode:)
+          source = source.strip
+          unresolved = []
+          promoted = []
+          previous_mode = @condition_mode
+          previous_promoted = @promoted_locals
+          @condition_mode = condition_mode
+          @promoted_locals = promoted
+
+          ruby = translate_ruby(source, unresolved)
+          ruby && Result.new(
+            ruby: ruby,
+            unresolved_identifiers: unresolved.uniq,
+            promoted_locals: promoted.uniq
+          )
+        ensure
+          @condition_mode = previous_mode
+          @promoted_locals = previous_promoted
+        end
 
         def translate_ruby(source, unresolved)
           source = unwrap_outer_parens(source.strip)
@@ -343,12 +381,17 @@ module JsxRosetta
             "@#{snake}"
           elsif @local_binding_names.include?(name) || @imported_names.include?(name)
             # We know this binding exists (destructure, hook tuple, top-level
-            # import) but can't model its value. As a leaf identifier, return
-            # `nil` so the file loads (a bare snake_case ref would NameError).
-            # As a member-chain root, `nil.member` would NoMethodError and
-            # the bare-snake fallback would NameError — both crash at render
-            # time. Bail so the whole expression fails translation and the
-            # caller emits a TODO comment with the verbatim source.
+            # import) but can't model its value. In `translate_condition`
+            # mode the test is load-bearing — emitting `nil` would silently
+            # false-arm the branch — so promote the binding to an `@ivar`
+            # and record it for the caller's TODO. In default mode, return
+            # `nil` so the file loads (leaf) / bail so the caller emits a
+            # TODO (member-chain root).
+            if @condition_mode
+              @promoted_locals << name
+              return "@#{snake}"
+            end
+
             return nil if member_chain_root
 
             "nil"
@@ -366,6 +409,10 @@ module JsxRosetta
         # a TODO instead of silently changing semantics.
         def unresolvable_local?(source)
           return false unless source.match?(IDENTIFIER)
+          # In render-condition mode we promote bucket-4 hits to @ivars
+          # (see translate_identifier) — so they aren't unresolvable here.
+          # Skip the bail so unary/binary translation succeeds.
+          return false if @condition_mode
 
           (@local_binding_names.include?(source) || @imported_names.include?(source)) &&
             !in_local_scope?(source) &&

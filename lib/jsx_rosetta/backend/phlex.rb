@@ -74,6 +74,12 @@ module JsxRosetta
 
       HREF_ATTR_NAMES = %w[href to].freeze
       LINK_TAGS = %w[a Link NavLink RouterLink].freeze
+      # Matches `router.push("…")` / `router.push('…')` / `router.push(\`…\`)`
+      # in verbatim hook source, capturing the quoted argument (including the
+      # surrounding quote/backtick). A3: only fires for sync hook bodies —
+      # event-handler bodies live in IR::EventHandler / IR::StimulusMethod
+      # sources, not in react_hooks, so they're naturally out of scope.
+      ROUTER_PUSH_PATTERN = /router\.push\(\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)\s*[,)]/
 
       def initialize(suffix: nil, namespace: nil, rails_view: nil, route_table: nil)
         super()
@@ -271,7 +277,10 @@ module JsxRosetta
       def render_module_bindings_prefix(component)
         return "" if component.module_bindings.empty?
 
-        cva_bindings, other_bindings = component.module_bindings.partition { |b| b.is_a?(IR::CvaBinding) }
+        groups = component.module_bindings.group_by { |b| binding_group(b) }
+        cva_bindings = groups[:cva] || []
+        module_constants = groups[:module_constant] || []
+        other_bindings = groups[:other] || []
         sections = []
         # cva constants are *referenced* by every sibling's class body via
         # FOO_BASE_CLASS / FOO_VARIANT_CLASSES — they have to land in every
@@ -279,9 +288,33 @@ module JsxRosetta
         # non-cva TODO block is informational only, so it suppresses on
         # later siblings to avoid duplicating 40-line GraphQL blocks.
         sections << render_cva_constants(cva_bindings) unless cva_bindings.empty?
+        sections << render_module_constants(module_constants) unless module_constants.empty?
         emit_todo_block = @emit_module_prefix && !other_bindings.empty?
         sections << render_module_local_bindings_todo(other_bindings) if emit_todo_block
         sections.compact.join("\n")
+      end
+
+      def binding_group(binding)
+        case binding
+        when IR::CvaBinding then :cva
+        when IR::ModuleConstant then :module_constant
+        else :other
+        end
+      end
+
+      # Emit each literal-shaped module-level const as a real Ruby constant.
+      # Hash and array values are emitted via Ruby's `inspect` and frozen so
+      # accidental mutation surfaces immediately. Scalars (string / number /
+      # bool / nil) skip the `.freeze` since they're already immutable in
+      # Ruby — keeps the output terse for the common `const TITLE = "X"` case.
+      def render_module_constants(constants)
+        lines = constants.map do |constant|
+          literal = constant.value.inspect
+          literal += ".freeze" if constant.value.is_a?(Hash) || constant.value.is_a?(Array) ||
+                                  constant.value.is_a?(String)
+          "#{constant.constant_name} = #{literal}"
+        end
+        "#{lines.join("\n")}\n"
       end
 
       # Emit one cva binding as a triplet of Ruby constants —
@@ -534,37 +567,86 @@ module JsxRosetta
 
       def render_view_template(component, translator)
         body = render_template_body(component, translator)
-        prefix = render_template_prefix(component)
+        prefix = render_template_prefix(component, translator)
         body_with_prefix = prefix.empty? ? body : "#{prefix}#{body}"
         "  def view_template\n#{body_with_prefix}\n  end"
       end
 
-      def render_template_prefix(component)
+      def render_template_prefix(component, translator)
         lines = []
-        lines.concat(render_react_hooks_todo(component.react_hooks))
+        lines.concat(render_react_hooks_todo(component.react_hooks, translator))
         lines.concat(render_local_bindings_todo(component.local_bindings))
         return "" if lines.empty?
 
         "#{lines.map { |l| "    #{l}" }.join("\n")}\n"
       end
 
-      def render_react_hooks_todo(hooks)
+      def render_react_hooks_todo(hooks, translator)
         return [] if hooks.empty?
 
         # Preserve the source order of the first occurrence per library so
         # the React block (typical) lands before Apollo/Next.js blocks when
         # all three are present. group_by preserves first-seen order.
-        hooks.group_by(&:library).flat_map { |library, calls| hook_todo_block_lines(library, calls) }
+        hooks.group_by(&:library).flat_map { |library, calls| hook_todo_block_lines(library, calls, translator) }
       end
 
-      def hook_todo_block_lines(library, calls)
+      def hook_todo_block_lines(library, calls, translator)
         header_lines = HOOK_TODO_HEADERS.fetch(library, HOOK_TODO_HEADERS[:react])
         lines = header_lines.map { |line| "# #{line}" }
         calls.each do |call|
+          lines.concat(router_push_hint_lines(call.source, translator))
           lines << "#   operation: #{call.operation}" if call.operation
           lines.concat(comment_lines(call.source))
         end
         lines
+      end
+
+      # Scan a hook's verbatim source for `router.push("…")` invocations and
+      # emit a one-line hint per match. With a route table the hint names
+      # the matching URL helper (`redirect_to user_path(@id)`); without one,
+      # it suggests adding the helper. See ROUTER_PUSH_PATTERN for the
+      # accepted shapes and why event-handler bodies are out of scope.
+      def router_push_hint_lines(source, translator)
+        source.scan(ROUTER_PUSH_PATTERN).flat_map do |(arg)|
+          hint = router_push_hint(arg, translator)
+          hint ? ["# #{hint}"] : []
+        end
+      end
+
+      def router_push_hint(arg, translator)
+        if arg.start_with?("`")
+          template_router_push_hint(arg, translator)
+        else
+          path = arg[1..-2]
+          literal_router_push_hint(path)
+        end
+      end
+
+      def literal_router_push_hint(path)
+        helper = @href_rewriter&.rewrite_literal(path)
+        return "→ redirect_to #{helper} (translated from router.push(#{path.inspect}))" if helper
+
+        "→ consider redirect_to <helper> for router.push(#{path.inspect}) (not in route table)"
+      end
+
+      def template_router_push_hint(template_src, translator)
+        segments = PagesRouting::HrefRewriter.parse_template_source(template_src)
+        return "→ consider redirect_to <helper> for router.push(#{template_src})" unless segments
+
+        translated = segments.map { |kind, value| kind == :hole ? translate_hole(value, translator) : [kind, value] }
+        return "→ consider redirect_to <helper> for router.push(#{template_src})" if translated.any?(&:nil?)
+
+        helper = @href_rewriter&.rewrite_template(translated)
+        return "→ redirect_to #{helper} (translated from router.push(#{template_src}))" if helper
+
+        "→ consider redirect_to <helper> for router.push(#{template_src}) (path not in route table)"
+      end
+
+      def translate_hole(js_source, translator)
+        translated = translator.translate(js_source)
+        return nil unless translated && translated.ruby != "nil"
+
+        [:hole, translated.ruby]
       end
 
       def render_local_bindings_todo(bindings)
@@ -805,7 +887,15 @@ module JsxRosetta
       end
 
       def test_translates_to_untranslatable?(expression, translator)
-        translated = translator.translate(expression)
+        # Use condition-mode translation so bucket-4 hits (hook-tuple
+        # destructures, top-level imports) count as translatable. When a
+        # guard ladder's tests *do* translate under widening, the ladder
+        # collapses to nothing — render_conditional emits the real
+        # `if @ivar / elsif @ivar / else <main>` form, which correctly
+        # short-circuits to render nothing when any guard fires. Only
+        # untranslatable tests (verbatim JS we can't ivar-promote) still
+        # trip the collapse-to-TODO path.
+        translated = translator.translate_condition(expression)
         translated.nil? || translated.ruby == "nil"
       end
 
@@ -828,8 +918,13 @@ module JsxRosetta
       # this, deeply nested conditional chains explode the file's
       # indentation and trip Style/IfInsideElse + Metrics/BlockNesting.
       def emit_conditional_branches(conditional, translator, indent, lines, leading_keyword:)
-        test_ruby, todo = safe_test_expression(conditional.test.expression, translator, fallback: "false")
-        lines << "#{spaces(indent)}# TODO: translate condition: #{todo}" if todo
+        test_ruby, todo, promoted = safe_test_expression(conditional.test.expression, translator, fallback: "false")
+        if todo
+          lines << "#{spaces(indent)}# TODO: translate condition: #{todo}"
+        elsif promoted && !promoted.empty?
+          lines << "#{spaces(indent)}# TODO: render condition references binding(s) promoted to @ivar — " \
+                   "thread as controller-passed prop(s): #{promoted.join(", ")}"
+        end
         lines << "#{spaces(indent)}#{leading_keyword} #{test_ruby}"
         lines << render_ir_node(conditional.consequent, translator, indent: indent + 2)
 
@@ -871,32 +966,51 @@ module JsxRosetta
         when IR::ArrayLiteral
           [render_array_literal_value(iterable, translator, todos: []), nil]
         when IR::Interpolation
-          safe_test_expression(iterable.expression, translator, fallback: "[]")
+          safe_iterable_expression(iterable.expression, translator)
         else
           ["[]", iterable.inspect]
         end
       end
 
-      # Translate an expression intended to drive an `if` or `.each` call.
-      # Returns `[ruby_source, todo_text]`. When the translator can parse
-      # the expression, `todo_text` is nil. When it can't, the caller's
-      # `fallback` (e.g. `"false"` for conditions, `"[]"` for iterables)
-      # is returned along with the original expression so a TODO comment
-      # can be emitted above the call. Without this, JS operators like
-      # `!==`, `===`, optional chaining, and `in` would leak into the
-      # emitted Ruby and produce SyntaxError on load.
-      #
-      # A translated value of `"nil"` is treated as untranslatable: the
-      # translator returns `"nil"` for known-local bindings (so the file
-      # loads as a leaf reference), but driving an `if` with `nil` silently
-      # disables the whole branch. Fall through to the TODO path instead so
-      # the human reviewer sees what needs filling in.
-      def safe_test_expression(expression, translator, fallback:)
+      # Iterable variant of safe_test_expression. Uses narrow (non-condition)
+      # translation: a hook-tuple `items` translates to `nil` here rather than
+      # being promoted to `@items`. Rationale: `nil.each` would crash at
+      # render time; `[].each` renders nothing while the accompanying TODO
+      # documents what didn't translate. Render-condition contexts (A1)
+      # take the opposite trade-off because driving `if nil` silently
+      # disables a load-bearing decision.
+      def safe_iterable_expression(expression, translator)
         translated = translator.translate(expression)
         return [translated.ruby, nil] if translated && translated.ruby != "nil"
 
         compact = expression.tr("\n", " ").squeeze(" ")
-        [fallback, compact]
+        ["[]", compact]
+      end
+
+      # Translate an expression intended to drive an `if` or `.each` call.
+      # Returns `[ruby_source, todo_text, promoted_locals]`:
+      #   - When the translator can parse the expression cleanly, `todo_text`
+      #     is nil. `promoted_locals` carries any bucket-4 names the
+      #     condition-mode translator promoted to `@ivar` — the caller
+      #     surfaces these in a TODO so a reviewer knows which bindings need
+      #     to become controller-passed props.
+      #   - When the translator can't, the caller's `fallback` (`"false"` for
+      #     conditions, `"[]"` for iterables) is returned with the verbatim
+      #     expression in `todo_text` so a TODO comment can be emitted. Without
+      #     this, JS operators like `!==`, `===`, optional chaining, and `in`
+      #     would leak into Ruby and produce SyntaxError on load.
+      #
+      # Condition-mode translation (`translate_condition`) is used for both
+      # branches — it widens bucket-4 hits to `@ivar` so `if loading; …`
+      # becomes `if @loading; …` instead of the dead `if false` fallback.
+      # The promoted list separates that path from full-clean translation,
+      # which has nothing to flag.
+      def safe_test_expression(expression, translator, fallback:)
+        translated = translator.translate_condition(expression)
+        return [translated.ruby, nil, translated.promoted_locals] if translated && translated.ruby != "nil"
+
+        compact = expression.tr("\n", " ").squeeze(" ")
+        [fallback, compact, []]
       end
 
       def render_slot(slot, indent:)

@@ -265,7 +265,111 @@ module JsxRosetta
           return
         end
 
+        # Literal-shaped `const FOO = "x"` / `const COLUMNS = [...]` /
+        # `const TAGS = {...}` lowers to a real Ruby constant emitted above
+        # the class. Anything richer (call expressions, identifier refs,
+        # JSX) bails to the LocalBinding TODO-block fallback below.
+        if (constant = parse_module_constant(init, name))
+          bindings << constant
+          return
+        end
+
         bindings << LocalBinding.new(name: name, source: source_of(stmt).strip)
+      end
+
+      # Returns an IR::ModuleConstant when `init` reduces to a Ruby-literal-
+      # friendly value, or nil otherwise. Anything that depends on runtime
+      # state (call expressions, identifier references, function expressions,
+      # JSX) bails out so the existing LocalBinding TODO path still surfaces
+      # the original JS source.
+      def parse_module_constant(init, name)
+        value = literal_value(init)
+        return nil if value == :__not_literal__
+
+        ModuleConstant.new(
+          name: name,
+          constant_name: AST::Inflector.underscore(name).upcase,
+          value: value
+        )
+      end
+
+      # Returns the Ruby-literal-friendly value for `node`, or the sentinel
+      # `:__not_literal__` when the node isn't translatable. Sentinel rather
+      # than `nil` so a JS `null` (which legitimately maps to Ruby `nil`)
+      # is distinguishable from "couldn't parse this."
+      def literal_value(node)
+        return :__not_literal__ unless node.is_a?(AST::Node)
+
+        case node.type
+        when "StringLiteral", "NumericLiteral", "BooleanLiteral" then node[:value]
+        when "NullLiteral" then nil
+        when "TemplateLiteral" then literal_value_from_template(node)
+        when "ArrayExpression" then literal_value_from_array(node)
+        when "ObjectExpression" then literal_value_from_object(node)
+        when "UnaryExpression" then literal_value_from_unary(node)
+        when "TSAsExpression", "TSSatisfiesExpression", "TSTypeAssertion"
+          literal_value(node[:expression])
+        else :__not_literal__
+        end
+      end
+
+      def literal_value_from_template(node)
+        return :__not_literal__ unless (node[:expressions] || []).empty?
+
+        # `quasi[:value]` is a plain Hash with String keys ("cooked" / "raw"),
+        # not an AST::Node — Babel's AST wraps Hashes only when they carry a
+        # "type" field. Use the String key directly.
+        (node[:quasis] || []).map { |q| q[:value]["cooked"] }.join
+      end
+
+      def literal_value_from_array(node)
+        elements = node[:elements] || []
+        result = []
+        elements.each do |elem|
+          # Holes in array literals (`[1, , 3]`) come through as nil; map to
+          # Ruby `nil` to preserve length. Spread elements bail — we can't
+          # statically expand the spread target.
+          if elem.nil?
+            result << nil
+            next
+          end
+          return :__not_literal__ if elem.is_a?(AST::Node) && elem.type == "SpreadElement"
+
+          value = literal_value(elem)
+          return :__not_literal__ if value == :__not_literal__
+
+          result << value
+        end
+        result
+      end
+
+      def literal_value_from_object(node)
+        properties = node[:properties] || []
+        result = {}
+        properties.each do |prop|
+          return :__not_literal__ unless prop.is_a?(AST::Node) && prop.type == "ObjectProperty"
+          return :__not_literal__ if prop[:computed]
+          return :__not_literal__ if prop[:shorthand] && prop[:value].is_a?(AST::Node) &&
+                                     prop[:value].type == "Identifier"
+
+          key = property_key(prop)
+          return :__not_literal__ unless key.is_a?(String)
+
+          value = literal_value(prop[:value])
+          return :__not_literal__ if value == :__not_literal__
+
+          result[key] = value
+        end
+        result
+      end
+
+      def literal_value_from_unary(node)
+        return :__not_literal__ unless %w[- +].include?(node[:operator])
+
+        inner = literal_value(node[:argument])
+        return :__not_literal__ unless inner.is_a?(Numeric)
+
+        node[:operator] == "-" ? -inner : inner
       end
 
       # Returns a CvaBinding when `init` is a `cva(base, options)` call we

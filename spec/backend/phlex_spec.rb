@@ -180,6 +180,101 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     end
   end
 
+  describe "A3: router.push() hints in hook bodies" do
+    def make_route(rails_path:, controller:, action:)
+      JsxRosetta::PagesRouting::Route.new(
+        rails_path: rails_path, controller: controller, action: action, source_path: "src.tsx"
+      )
+    end
+
+    let(:route_table) do
+      [
+        make_route(rails_path: "/accounts", controller: "accounts", action: "index"),
+        make_route(rails_path: "/accounts/:id", controller: "accounts", action: "show")
+      ]
+    end
+
+    it "emits a `redirect_to` hint above the hook TODO for a literal router.push path" do
+      source = <<~JSX
+        function X() {
+          useEffect(() => { router.push("/accounts"); }, []);
+          return <p />;
+        }
+      JSX
+      content = file_contents(source, "x.rb", route_table: route_table)
+
+      expect(content).to include('# → redirect_to accounts_path (translated from router.push("/accounts"))')
+      # Hint sits above the verbatim hook source.
+      hint_idx = content.index("redirect_to accounts_path")
+      source_idx = content.index("router.push")
+      expect(hint_idx).to be < source_idx
+    end
+
+    it "emits a hint with prop interpolation for a template router.push path" do
+      source = <<~JSX
+        function X({ id }) {
+          useEffect(() => { router.push(`/accounts/${id}`); }, [id]);
+          return <p />;
+        }
+      JSX
+      content = file_contents(source, "x.rb", route_table: route_table)
+
+      expect(content).to include("redirect_to account_path(@id)")
+    end
+
+    it "emits the generic 'consider' hint when the path is not in the route table" do
+      source = <<~JSX
+        function X() {
+          useEffect(() => { router.push("/somewhere-else"); }, []);
+          return <p />;
+        }
+      JSX
+      content = file_contents(source, "x.rb", route_table: route_table)
+
+      expect(content).to include("→ consider redirect_to <helper> for router.push")
+    end
+
+    it "emits the generic hint when no route table is provided" do
+      source = <<~JSX
+        function X() {
+          useEffect(() => { router.push("/accounts"); }, []);
+          return <p />;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include('→ consider redirect_to <helper> for router.push("/accounts")')
+    end
+
+    it "does NOT hint for router.push inside event-handler bodies" do
+      # Inline arrow handlers extract to Stimulus methods / EventHandler
+      # body sources — not into react_hooks. A3 only annotates hook bodies.
+      source = <<~JSX
+        function X({ id }) {
+          return <button onClick={() => router.push(`/accounts/${id}`)}>X</button>;
+        }
+      JSX
+      content = file_contents(source, "x.rb", route_table: route_table)
+
+      expect(content).not_to include("redirect_to")
+    end
+
+    it "emits one hint per router.push call when a hook contains multiple" do
+      source = <<~JSX
+        function X() {
+          useEffect(() => {
+            router.push("/accounts");
+            router.push("/accounts");
+          }, []);
+          return <p />;
+        }
+      JSX
+      content = file_contents(source, "x.rb", route_table: route_table)
+
+      expect(content.scan("redirect_to accounts_path").size).to eq(2)
+    end
+  end
+
   describe "core IR rendering" do
     it "renders a single HTML element with no props as a bare tag call" do
       content = file_contents("function X() { return <hr />; }", "x.rb")
@@ -713,10 +808,11 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("[untranslated: token.blue]")
     end
 
-    it "fails translation for a unary on an unresolvable local (no silent !nil flip)" do
+    it "promotes a unary on an unresolvable local to @ivar (no silent !nil flip; A1)" do
       # `!fieldValue` used to translate to `!nil` (always true), silently
-      # flipping the guard's truthiness. Translation now bails so the
-      # caller emits a TODO and falls through to the safe fallback.
+      # flipping the guard's truthiness. After A1 widening, render-condition
+      # context promotes the bucket-4 binding to `@field_value` and emits
+      # a TODO naming the binding so a reviewer threads it as a prop.
       source = <<~JSX
         function X() {
           const { fieldValue } = customField;
@@ -726,11 +822,12 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       content = file_contents(source, "x.rb")
 
       expect(content).not_to match(/^\s*if !nil\s*$/)
-      expect(content).to include("# TODO: translate condition: !fieldValue")
-      expect(content).to include("if false")
+      expect(content).not_to include("if false")
+      expect(content).to include("if !@field_value")
+      expect(content).to include("thread as controller-passed prop(s): fieldValue")
     end
 
-    it "fails translation for a binary on an unresolvable local (no nil > 0)" do
+    it "promotes a binary on an unresolvable local to @ivar (no nil > 0; A1)" do
       source = <<~JSX
         function X() {
           const { count } = useStuff();
@@ -740,8 +837,9 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       content = file_contents(source, "x.rb")
 
       expect(content).not_to include("nil > 0")
-      expect(content).to include("# TODO: translate condition: count > 0")
-      expect(content).to include("if false")
+      expect(content).not_to include("if false")
+      expect(content).to include("if @count > 0")
+      expect(content).to include("thread as controller-passed prop(s): count")
     end
   end
 
@@ -788,10 +886,12 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content.lines.reject { |l| l.lstrip.start_with?("#") }.join).not_to include("plain styles.foo")
     end
 
-    it "bails out of a member chain whose root is a PascalCase namespace import" do
+    it "promotes a PascalCase namespace import in a condition to @ivar (A1)" do
       # TS enum imports referenced in expression context — e.g.
       # `AlertStatusEnum.Pending` — used to snake-case to `alert_status_enum.pending`
-      # which NameErrors. Bailout drops the chain with a TODO.
+      # which NameErrors. In render-condition position A1 promotes the
+      # member-chain root to `@alert_status_enum` and surfaces a TODO so
+      # the reviewer threads the enum value as a prop.
       source = <<~JSX
         import { AlertStatusEnum } from "src/__gql__/graphql";
         function X({ status }) {
@@ -800,15 +900,11 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       JSX
       content = file_contents(source, "x.rb")
 
-      expect(content).not_to include("alert_status_enum.pending")
-      expect(content).to include("# TODO: translate condition: status === AlertStatusEnum.Pending")
+      expect(content).to include("if @status == @alert_status_enum.pending")
+      expect(content).to include("thread as controller-passed prop(s): AlertStatusEnum")
     end
 
-    it "bails out when an imported identifier appears as a unary operand" do
-      # `!Foo` where Foo is imported used to translate to `!foo` (NameError)
-      # or `!Foo` (also NameError under Ruby). The unary-bailout path now
-      # fires, the whole expression fails translation, and the caller emits
-      # the safe TODO fallback.
+    it "promotes an imported identifier as a unary operand to @ivar (A1)" do
       source = <<~JSX
         import { Foo } from "bar";
         function X() {
@@ -817,8 +913,9 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       JSX
       content = file_contents(source, "x.rb")
 
-      expect(content).not_to match(/^\s*if !foo\s*$/)
-      expect(content).to include("# TODO: translate condition: !Foo")
+      expect(content).not_to include("if false")
+      expect(content).to include("if !@foo")
+      expect(content).to include("thread as controller-passed prop(s): Foo")
     end
 
     it "bails out of a reference to a sibling helper function (not an import)" do
@@ -1113,13 +1210,35 @@ RSpec.describe JsxRosetta::Backend::Phlex do
   end
 
   describe "guard-ladder collapse (closes `if false / elsif false / else` semantic inversion)" do
-    it "collapses a chain of untranslatable `return null` guards to a TODO header plus the main render" do
-      # PaymentWarning shape: multiple early-return guards with conditions
-      # the translator can't model, followed by the happy-path render. The
-      # naive emission `if false; ''; elsif false; ''; else <main>` would
-      # silently always render `main` — the source semantic was the
-      # OPPOSITE. Collapse to a TODO + just the main render so the user
-      # sees what guards used to gate it and wires them up Rails-side.
+    it "still collapses when no test translates under A1 widening" do
+      # Guard ladder where the tests can't be promoted to ivars (member
+      # chains over bucket-4 with intermediate optional-chaining; computed
+      # values). With every test still untranslatable, the collapse keeps
+      # firing — emitting the safe TODO + main render. Replaces the old
+      # `useFragment` case which is now correctly promoted under A1.
+      source = <<~JSX
+        import { Alert } from "@mui/material";
+        export default function X({ from }) {
+          if (computeReady(from) === false) return null;
+          if (helper.flush()) return null;
+          return <Alert>paid</Alert>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: 2 render guard(s) couldn't translate")
+      expect(content).to include("#   computeReady(from) === false")
+      expect(content).to include("#   helper.flush()")
+      expect(content).not_to match(/^\s*if false\b/)
+      expect(content).to include("render Alert.new")
+    end
+
+    it "no longer collapses when A1 widening can promote every test" do
+      # PaymentWarning shape: previously every test was bucket-4
+      # (untranslatable), so the ladder collapsed. Under A1, `!complete`
+      # and `data.cancelledAt` both promote to `@complete` / `@data`, so
+      # the ladder emits real if/elsif/else with a promotion TODO. The
+      # render semantic is preserved.
       source = <<~JSX
         import { Alert } from "@mui/material";
         import { useFragment } from "@apollo/client";
@@ -1132,13 +1251,11 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       JSX
       content = file_contents(source, "x.rb")
 
-      expect(content).to include("# TODO: 2 render guard(s) couldn't translate")
-      expect(content).to include("#   !complete")
-      expect(content).to include("#   data.cancelledAt")
-      # No `if false` chain remains.
-      expect(content).not_to match(/^\s*if false\b/)
-      # The main render is at the same indent as `view_template` body.
+      expect(content).not_to include("render guard(s)")
+      expect(content).to include("if !@complete")
+      expect(content).to include("elsif @data.cancelled_at")
       expect(content).to include("render Alert.new")
+      expect(content).to include("thread as controller-passed prop(s)")
     end
 
     it "leaves the chain alone when at least one test translates (we keep the structure)" do
@@ -1163,10 +1280,10 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     end
 
     it "leaves single-branch conditionals (no else) alone — only ladders with an else collapse" do
-      # `cond && <X/>` without an else isn't a guard ladder. The source
-      # semantic IS "render the span only when cond is truthy"; an
-      # untranslatable cond means we can't replicate that decision. The
-      # `if false` form correctly renders nothing as a safe default.
+      # `cond && <X/>` without an else isn't a guard ladder. A1 promotes
+      # the bucket-4 `complete` test to `@complete` and surfaces the
+      # promotion TODO — the source semantic is preserved (render the
+      # span only when @complete is truthy).
       source = <<~JSX
         import { useFragment } from "@apollo/client";
         export default function X() {
@@ -1176,7 +1293,8 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       JSX
       content = file_contents(source, "x.rb")
 
-      expect(content).to include("if false")
+      expect(content).to include("if @complete")
+      expect(content).to include("thread as controller-passed prop(s): complete")
       expect(content).not_to include("render guard(s)")
     end
   end
@@ -1453,16 +1571,17 @@ RSpec.describe JsxRosetta::Backend::Phlex do
   end
 
   describe "Gap E: module-level constants" do
-    it "emits a TODO comment block above the class for top-level const declarations" do
+    it "emits a TODO comment block above the class for non-literal top-level const declarations" do
+      # Call expressions can't lower to a Ruby literal — they fall through
+      # to the verbatim-source TODO block.
       source = <<~JSX
-        const FOO = 400;
+        const FOO = computeFoo();
         function X() { return <p>{FOO}</p>; }
       JSX
       content = file_contents(source, "x.rb")
 
       expect(content).to include("# TODO: module-level constants")
-      expect(content).to include("const FOO = 400;")
-      # And the prefix lands above the class definition.
+      expect(content).to include("const FOO = computeFoo();")
       expect(content.index("# TODO: module-level constants")).to be < content.index("class X")
     end
 
@@ -1477,7 +1596,7 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       # module-level TODO block verbatim in every emitted .rb. Now the
       # first sibling carries it and the rest stay clean.
       source = <<~JSX
-        const FOO = 400;
+        const FOO = computeFoo();
         function A() { return <p>{FOO}</p>; }
         function B() { return <p>{FOO}</p>; }
         function C() { return <p>{FOO}</p>; }
@@ -1490,6 +1609,132 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(contents["a.rb"]).to include("# TODO: module-level constants")
       expect(contents["b.rb"]).not_to include("# TODO: module-level constants")
       expect(contents["c.rb"]).not_to include("# TODO: module-level constants")
+    end
+  end
+
+  describe "literal-shaped module-level const → Ruby constant" do
+    it "emits a numeric literal as a Ruby constant above the class" do
+      source = <<~JSX
+        const FOO = 400;
+        function X() { return <p /> }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("FOO = 400\n")
+      expect(content).not_to include("# TODO: module-level constants")
+      expect(content.index("FOO = 400")).to be < content.index("class X")
+    end
+
+    it "emits a string literal as a frozen Ruby constant" do
+      source = <<~JSX
+        const TITLE = "Welcome";
+        function X() { return <p /> }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include('TITLE = "Welcome".freeze')
+    end
+
+    it "emits boolean and null literals" do
+      source = <<~JSX
+        const ENABLED = true;
+        const NOTHING = null;
+        function X() { return <p /> }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("ENABLED = true")
+      expect(content).to include("NOTHING = nil")
+    end
+
+    it "emits an array of literals as a frozen Ruby constant" do
+      source = <<~JSX
+        const TAGS = ["one", "two", "three"];
+        function X() { return <p /> }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include('TAGS = ["one", "two", "three"].freeze')
+    end
+
+    it "emits an object of literals as a frozen Ruby constant" do
+      source = <<~JSX
+        const LEVELS = { warn: "yellow", error: "red" };
+        function X() { return <p /> }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include('LEVELS = {"warn" => "yellow", "error" => "red"}.freeze')
+    end
+
+    it "handles a template literal with no interpolations" do
+      source = <<~JSX
+        const TITLE = `Welcome to the system`;
+        function X() { return <p /> }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include('TITLE = "Welcome to the system".freeze')
+    end
+
+    it "handles unary-minus numeric literals" do
+      source = <<~JSX
+        const OFFSET = -1;
+        function X() { return <p /> }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("OFFSET = -1")
+    end
+
+    it "snake_case-upcases the constant name" do
+      source = <<~JSX
+        const helperTags = ["a", "b"];
+        function X() { return <p /> }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include('HELPER_TAGS = ["a", "b"].freeze')
+    end
+
+    it "bails to the verbatim TODO block when the initializer references an identifier" do
+      source = <<~JSX
+        const REF = someOther;
+        function X() { return <p /> }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: module-level constants")
+      expect(content).to include("const REF = someOther;")
+    end
+
+    it "bails when an object value isn't itself a literal" do
+      source = <<~JSX
+        const MIXED = { key: someCall() };
+        function X() { return <p /> }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).not_to match(/^MIXED =/)
+      expect(content).to include("# TODO: module-level constants")
+    end
+
+    it "emits each literal constant only once across sibling components" do
+      source = <<~JSX
+        const TAGS = ["a", "b"];
+        function A() { return <p /> }
+        function B() { return <p /> }
+      JSX
+      backend = described_class.new
+      components = JsxRosetta::IR.lower_all(JsxRosetta.parse(source), source: source)
+      files = components.flat_map { |c| backend.emit(c) }
+      contents = files.to_h { |f| [f.path, f.contents] }
+
+      # Both siblings carry the constant (use sites would otherwise
+      # NameError) but each file emits exactly one declaration line.
+      [contents["a.rb"], contents["b.rb"]].each do |body|
+        expect(body.scan(/^TAGS = /).size).to eq(1)
+      end
     end
   end
 
@@ -2061,12 +2306,57 @@ RSpec.describe JsxRosetta::Backend::Phlex do
     end
   end
 
-  describe "guard whose test resolves to a known local binding" do
-    # `error && <X />` where `error` is destructured from a hook collapses
-    # to `if nil` in v0.4.0 (the translator returns `"nil"` to make the
-    # file load). `if nil` is valid Ruby but the branch silently never
-    # renders. Treat `"nil"` as untranslatable so the TODO surfaces.
-    it "falls through to the TODO path instead of emitting `if nil`" do
+  describe "A1: condition-mode promotion details" do
+    it "lists multiple promoted bindings in source order in the TODO" do
+      source = <<~JSX
+        function X() {
+          const { loading, error } = useQuery();
+          return <div>{(loading || error) && <Banner />}</div>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("thread as controller-passed prop(s): loading, error")
+      expect(content).to include("if @loading || @error")
+    end
+
+    it "leaves clean non-bucket-4 conditions alone (no promotion TODO)" do
+      source = <<~JSX
+        function X({ show }) {
+          return <div>{show && <Banner />}</div>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("if @show")
+      expect(content).not_to include("thread as controller-passed prop")
+    end
+
+    it "does NOT widen iterables — loop over a bucket-4 local stays untranslated" do
+      # Iterables take the opposite trade-off from conditions: `nil.each`
+      # would crash at render time while `[].each` renders nothing, so the
+      # narrow translator is the safer default. A1 only widens conditions.
+      source = <<~JSX
+        function X() {
+          const { items } = useQuery();
+          return <ul>{items.map(item => <li>{item}</li>)}</ul>;
+        }
+      JSX
+      content = file_contents(source, "x.rb")
+
+      expect(content).to include("# TODO: translate iterable: items")
+      expect(content).to include("[].each")
+      expect(content).not_to include("@items.each")
+    end
+  end
+
+  describe "guard whose test resolves to a known local binding (A1: condition-mode widening)" do
+    # `error && <X />` where `error` is destructured from a hook used to
+    # collapse to `if nil` (silently never renders) in v0.4.0, and to
+    # `if false` + TODO in v0.5.x. A1 promotes the bucket-4 binding to
+    # `@error` and surfaces a TODO so the reviewer wires the prop. The
+    # source semantic is preserved.
+    it "promotes the bucket-4 local to @ivar and emits a promotion TODO" do
       source = <<~JSX
         function X() {
           const { error } = useQuery();
@@ -2076,8 +2366,9 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       content = file_contents(source, "x.rb")
 
       expect(content).not_to match(/^\s*if nil\s*$/)
-      expect(content).to include("# TODO: translate condition: error")
-      expect(content).to include("if false")
+      expect(content).not_to include("if false")
+      expect(content).to include("if @error")
+      expect(content).to include("thread as controller-passed prop(s): error")
     end
   end
 
@@ -2317,12 +2608,15 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).to include("compound-rule")
     end
 
-    it "leaves non-cva module-level consts on the old TODO-comment path" do
-      # cva should be additive: other module-level constants still surface
-      # as a "# TODO: module-level constants" comment block.
+    it "leaves non-literal non-cva module-level consts on the old TODO-comment path" do
+      # cva should be additive: non-literal module-level constants (here,
+      # a call expression) still surface as a "# TODO: module-level constants"
+      # comment block. Literal-shaped consts now lower to a real Ruby
+      # constant on their own (see "literal-shaped module-level const"
+      # describe block); cva keeps its dedicated emit.
       source = <<~JSX
         import { cva } from "class-variance-authority";
-        const PI = 3.14;
+        const HELPERS = computeHelpers();
         const xVariants = cva("base", { variants: { variant: { default: "v" } } });
         function X({ variant, ...props }) {
           return <div className={cn(xVariants({ variant }))} {...props} />;
@@ -2332,7 +2626,7 @@ RSpec.describe JsxRosetta::Backend::Phlex do
 
       expect(content).to include("X_BASE_CLASS")
       expect(content).to include("# TODO: module-level constants")
-      expect(content).to include("const PI = 3.14")
+      expect(content).to include("const HELPERS = computeHelpers();")
     end
 
     it "translates a literal-pinned axis (`{ variant: \"default\" }`) to a string key" do

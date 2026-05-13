@@ -143,6 +143,27 @@ module JsxRosetta
       include Node
     end
 
+    # A literal-shaped module-level `const` declaration that lowers to a real
+    # Ruby constant. Distinct from `LocalBinding` (verbatim TODO block) and
+    # `CvaBinding` (structured cva variants). The detector accepts initializers
+    # whose value reduces to a Ruby-literal-friendly object — strings, numbers,
+    # booleans, null, arrays/hashes of the same. Non-literal initializers
+    # (call expressions, identifier references, JSX) still fall through to
+    # the `LocalBinding` path so their verbatim source surfaces in the
+    # module-bindings TODO block.
+    #
+    # name          : String — original JS identifier (e.g. "TAGS", "COLUMNS").
+    # constant_name : String — Ruby constant identifier emitted above the class
+    #                 (`AST::Inflector.underscore(name).upcase`). Stored on the
+    #                 IR so future collision-detection has somewhere to bind.
+    # value         : Object — Ruby-literal-friendly value (String, Integer,
+    #                 Float, true, false, nil, Array of the same, Hash with
+    #                 String keys mapping to the same). Backends call `.inspect`
+    #                 to emit the literal text.
+    ModuleConstant = Data.define(:name, :constant_name, :value) do
+      include Node
+    end
+
     # A className attribute value that resolves to a known cva binding's
     # call shape — `className={cn(buttonVariants({ variant, size }),
     # className)}` or the no-cn direct form `className={buttonVariants({
