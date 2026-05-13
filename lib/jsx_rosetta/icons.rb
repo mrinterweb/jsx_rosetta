@@ -25,9 +25,13 @@ module JsxRosetta
 
     # Look up the inner-SVG for a Lucide icon. Tolerates both canonical
     # (`ChevronRight`) and legacy `*Icon` (`ChevronRightIcon`) names, since
-    # shadcn varies which it imports across components.
+    # shadcn varies which it imports across components. Returns nil for
+    # the degenerate name `"Icon"` (and any empty result after stripping)
+    # so callers don't get a misleading data[""] miss.
     def self.lucide_for(name)
       name = name.to_s
+      return nil if name.empty? || name == "Icon"
+
       data = lucide_data
       data[name] || data[name.sub(/Icon\z/, "")]
     end

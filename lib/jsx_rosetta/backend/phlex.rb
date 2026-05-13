@@ -1553,30 +1553,48 @@ module JsxRosetta
       # `app/components/` without further configuration.
 
       def lucide_icon_files(component)
-        names = referenced_lucide_icons(component)
-        return [] if names.empty?
+        usages = referenced_lucide_icons(component)
+        return [] if usages.empty?
 
-        files = [File.new(path: "lucide_icon.rb", contents: render_lucide_icon_base_rb)]
-        names.sort.each do |name|
-          path = "#{AST::Inflector.underscore(name)}.rb"
-          files << File.new(path: path, contents: render_lucide_icon_class_rb(name))
+        @seen_lucide_icons ||= Set.new
+        files = []
+        unless @seen_lucide_icons.include?(:base)
+          files << File.new(path: "lucide_icon.rb", contents: render_lucide_icon_base_rb)
+          @seen_lucide_icons << :base
+        end
+
+        usages.sort_by { |u| u[:local_name] }.each do |usage|
+          next if @seen_lucide_icons.include?(usage[:local_name])
+
+          path = "#{AST::Inflector.underscore(usage[:local_name])}.rb"
+          files << File.new(
+            path: path,
+            contents: render_lucide_icon_class_rb(usage[:local_name], canonical: usage[:canonical_name])
+          )
+          @seen_lucide_icons << usage[:local_name]
         end
         files
       end
 
-      # Set of icon names imported from a Lucide-shaped package AND used as
-      # a JSX component tag inside the component body. Names that aren't in
-      # the vendored icon data are still emitted, but the class renders a
-      # TODO comment instead of an SVG (the human reviewer fills in the path).
+      # Lucide imports used as JSX tags, each carrying both the local
+      # binding (what the emitted file/class is named after) and the
+      # canonical export (used to look up the vendored SVG path data).
+      # The two diverge under aliased imports — `import { ChevronRight as
+      # CR }` should still resolve `ChevronRight`'s SVG while emitting a
+      # `cr.rb` defining `class CR < LucideIcon`. Names not in the
+      # vendored data still emit, but the class falls back to a TODO
+      # `inner_svg` instead of NameError-ing at render.
       def referenced_lucide_icons(component)
-        lucide_local_names = component.module_imports
-                                      .select { |i| Icons.lucide_source?(i.source) }
-                                      .to_set(&:name)
-        return [] if lucide_local_names.empty?
+        lucide_by_local = component.module_imports
+                                   .select { |i| Icons.lucide_source?(i.source) }
+                                   .to_h { |i| [i.name, i.imported_name || i.name] }
+        return [] if lucide_by_local.empty?
 
         invocations = Set.new
         collect_component_invocations(component.body, invocations)
-        invocations & lucide_local_names
+        invocations.intersection(lucide_by_local.keys).map do |local_name|
+          { local_name: local_name, canonical_name: lucide_by_local.fetch(local_name) }
+        end
       end
 
       # Walk an IR subtree and collect every ComponentInvocation tag name we
@@ -1610,10 +1628,9 @@ module JsxRosetta
           #{mod_open}#{indent}class LucideIcon < Phlex::HTML
           #{indent}  BASE_ATTRS = %{xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"}.freeze
 
-          #{indent}  def initialize(class_name: nil, **props)
+          #{indent}  def initialize(class_name: nil, **)
           #{indent}    super()
           #{indent}    @class_name = class_name
-          #{indent}    @props = props
           #{indent}  end
 
           #{indent}  def view_template
@@ -1629,13 +1646,16 @@ module JsxRosetta
         RUBY
       end
 
-      def render_lucide_icon_class_rb(name)
-        inner = Icons.lucide_for(name)
+      # `name` is the local binding (the Ruby class name we emit), `canonical`
+      # is the original Lucide export — they diverge under aliased imports.
+      # SVG lookup keys on `canonical`; the class definition keys on `name`.
+      def render_lucide_icon_class_rb(name, canonical: name)
+        inner = Icons.lucide_for(canonical)
         mod_open, mod_close, indent = lucide_module_wrap
         body = if inner
                  "#{indent}  def inner_svg = #{format_svg_string(inner)}"
                else
-                 "#{indent}  # TODO: #{name.inspect} isn't in jsx_rosetta's vendored lucide.json.\n" \
+                 "#{indent}  # TODO: #{canonical.inspect} isn't in jsx_rosetta's vendored lucide.json.\n" \
                    "#{indent}  # Fill in inner_svg with the SVG path data from lucide.dev, or refresh\n" \
                    "#{indent}  # `lib/jsx_rosetta/icons/lucide.json`.\n" \
                    "#{indent}  def inner_svg = \"\""

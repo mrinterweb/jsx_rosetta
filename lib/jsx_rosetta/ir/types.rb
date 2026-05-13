@@ -92,11 +92,19 @@ module JsxRosetta
     #          to reference the imported value). For `import { foo as bar }`
     #          this is "bar"; for `import * as styles` this is "styles";
     #          for `import Default` this is "Default".
-    # source : String — the module specifier verbatim (e.g. "./styles.module.css",
-    #          "@apollo/client", "react"). Lets backends apply per-source
-    #          policy later (e.g. always strip `*.module.css` references).
-    # kind   : Symbol — :default | :named | :namespace.
-    ModuleImport = Data.define(:name, :source, :kind) do
+    # source        : String — the module specifier verbatim
+    #                 (e.g. "./styles.module.css", "@apollo/client", "react").
+    #                 Lets backends apply per-source policy later (e.g. always
+    #                 strip `*.module.css` references).
+    # kind          : Symbol — :default | :named | :namespace.
+    # imported_name : String? — original exported name from the source module.
+    #                 For `import { ChevronRight as CR } from "lucide-react"`,
+    #                 `name` is `"CR"` and `imported_name` is `"ChevronRight"`.
+    #                 nil for default / namespace imports where there's no
+    #                 distinct exported name. Backends that look up vendored
+    #                 data by canonical name (icons) need the imported name;
+    #                 most callers want the local binding.
+    ModuleImport = Data.define(:name, :source, :kind, :imported_name) do
       include Node
     end
 

@@ -1647,6 +1647,43 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       # Same path data as the canonical ChevronRight.
       expect(files["chevron_right_icon.rb"]).to include("m9 18 6-6-6-6")
     end
+
+    it "resolves vendored SVG path data through an aliased import" do
+      # `import { ChevronRight as CR } from "lucide-react"` should emit
+      # `cr.rb` defining `class CR < LucideIcon`, but the SVG path data
+      # has to come from the canonical export (`ChevronRight`), not the
+      # local alias `CR` (which isn't in lucide.json).
+      source = <<~JSX
+        import { ChevronRight as CR } from "lucide-react";
+        function X() { return <CR />; }
+      JSX
+      files = files_for(source)
+
+      expect(files["cr.rb"]).to include("class CR < LucideIcon")
+      expect(files["cr.rb"]).to include("m9 18 6-6-6-6")
+      expect(files["cr.rb"]).not_to include("TODO:")
+    end
+
+    it "dedups the LucideIcon base across sibling components in a batch" do
+      # Two components in one source both reference Lucide icons. The base
+      # `lucide_icon.rb` and any icon shared between them should appear in
+      # the emitter's output exactly once — re-emitting per-component
+      # bloats batch translations and risks overwriting hand-edits.
+      source = <<~JSX
+        import { ChevronRight, Search } from "lucide-react";
+        export function X() { return <ChevronRight />; }
+        export function Y() { return <ChevronRight />; }
+        export function Z() { return <Search />; }
+      JSX
+      backend = described_class.new
+      components = JsxRosetta::IR.lower_all(JsxRosetta.parse(source), source: source)
+      emitted = components.flat_map { |c| backend.emit(c) }
+      paths = emitted.map(&:path)
+
+      expect(paths.count("lucide_icon.rb")).to eq(1)
+      expect(paths.count("chevron_right.rb")).to eq(1)
+      expect(paths.count("search.rb")).to eq(1)
+    end
   end
 
   describe "auto-yield on blockless spread-children tags" do

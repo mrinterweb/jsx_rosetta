@@ -388,7 +388,12 @@ module JsxRosetta
             name = spec[:local]&.[](:name)
             next unless name
 
-            imports << ModuleImport.new(name: name, source: source, kind: import_specifier_kind(spec))
+            imports << ModuleImport.new(
+              name: name,
+              source: source,
+              kind: import_specifier_kind(spec),
+              imported_name: spec[:imported]&.[](:name)
+            )
           end
         end
         imports
