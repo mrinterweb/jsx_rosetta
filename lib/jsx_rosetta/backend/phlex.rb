@@ -72,8 +72,18 @@ module JsxRosetta
 
       RAILS_VIEW_BASE_CLASS = "Views::Base"
 
-      HREF_ATTR_NAMES = %w[href to].freeze
-      LINK_TAGS = %w[a Link NavLink RouterLink].freeze
+      # Per-tag map of which attribute names carry a URL that the href
+      # rewriter should attempt to rewrite. Most link tags use `href`/`to`;
+      # `<form action="...">` uses `action`. Slice C1 added the `form`
+      # entry — non-GET forms are skipped at format_attributes time
+      # before they reach try_rewrite_href.
+      LINK_TAG_ATTRS = {
+        "a" => %w[href].freeze,
+        "Link" => %w[href to].freeze,
+        "NavLink" => %w[href to].freeze,
+        "RouterLink" => %w[href to].freeze,
+        "form" => %w[action].freeze
+      }.freeze
       # Matches `router.push("…")` / `router.push('…')` / `router.push(\`…\`)`
       # in verbatim hook source, capturing the quoted argument (including the
       # surrounding quote/backtick). A3: only fires for sync hook bodies —
@@ -1123,6 +1133,13 @@ module JsxRosetta
         events, others = attributes.partition { |a| a.is_a?(IR::EventBinding) || a.is_a?(IR::StimulusBinding) }
         spreads, plain_attrs = others.partition { |a| a.is_a?(IR::SpreadAttribute) }
 
+        # Per-element form-method check. Set before any attribute renders
+        # so try_rewrite_href can consult it. Scoped per element via a
+        # local backup/restore around the iteration — nested forms are
+        # rare but legal HTML.
+        prev_form_rewritable = @form_action_rewritable
+        @form_action_rewritable = tag == "form" ? form_action_rewritable?(plain_attrs) : false
+
         parts = { sym: [], str: [] }
         plain_attrs.each do |a|
           append_attribute_part(a, translator, parts, context: context, tag: tag, todos: todos, indent: indent)
@@ -1131,6 +1148,8 @@ module JsxRosetta
 
         joined = build_attribute_list(parts, spreads, translator)
         joined.empty? ? "" : "(#{joined})"
+      ensure
+        @form_action_rewritable = prev_form_rewritable
       end
 
       def append_attribute_part(attribute, translator, parts, context:, todos:, indent: 0, tag: nil)
@@ -1298,16 +1317,38 @@ module JsxRosetta
       # Slice 3: rewrite `href`/`to` on link-shaped tags to a Rails URL
       # helper call when the literal/template-literal path matches a
       # route in the scanned table. Returns nil to fall through to the
-      # default emission path.
+      # default emission path. Slice C1 added `<form action>` — see
+      # form_action_rewritable? for the method-attribute check.
       def try_rewrite_href(name, value, translator, tag:)
         return nil unless @href_rewriter
-        return nil unless tag && LINK_TAGS.include?(tag) && HREF_ATTR_NAMES.include?(name)
+        return nil unless tag
+
+        allowed_attrs = LINK_TAG_ATTRS[tag]
+        return nil unless allowed_attrs&.include?(name)
+        return nil if tag == "form" && !@form_action_rewritable
 
         case value
         when String
           @href_rewriter.rewrite_literal(value)
         when IR::Interpolation
           rewrite_interpolation_href(value.expression, translator)
+        end
+      end
+
+      # `<form action="…">` only rewrites for safe (GET) submissions —
+      # slice-1 routes are GET-only, so POST/PUT/DELETE forms must stay
+      # verbatim until the route table supports non-GET routes. Returns
+      # true when no method attr is set (HTML default = GET) or when the
+      # method is a literal GET; false otherwise (including interpolated
+      # / TODO methods where we can't statically prove GET).
+      def form_action_rewritable?(attributes)
+        method_attr = attributes.find { |a| a.is_a?(IR::Attribute) && a.name == "method" }
+        return true unless method_attr
+
+        case method_attr.value
+        when nil, true then true
+        when String then method_attr.value.casecmp("get").zero?
+        else false
         end
       end
 

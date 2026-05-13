@@ -275,6 +275,73 @@ RSpec.describe JsxRosetta::Backend::Phlex do
 
       expect(content).to include("href: '/accounts'")
     end
+
+    context "<form action> (C1)" do
+      it "rewrites a literal action on a GET form" do
+        content = file_contents(
+          'function X() { return <form method="get" action="/accounts">F</form>; }',
+          "x.rb", route_table: route_table
+        )
+
+        expect(content).to include("action: accounts_path")
+        expect(content).not_to include("action: '/accounts'")
+      end
+
+      it "rewrites a literal action when no method attr is present (HTML default = GET)" do
+        content = file_contents(
+          'function X() { return <form action="/accounts">F</form>; }',
+          "x.rb", route_table: route_table
+        )
+
+        expect(content).to include("action: accounts_path")
+      end
+
+      it "rewrites a template-literal action on a GET form" do
+        content = file_contents(
+          'function X({ id }) { return <form method="get" action={`/accounts/${id}`}>F</form>; }',
+          "x.rb", route_table: route_table
+        )
+
+        expect(content).to include("action: account_path(@id)")
+      end
+
+      it "leaves the action verbatim on a POST form (route table is GET-only)" do
+        content = file_contents(
+          'function X() { return <form method="post" action="/accounts">F</form>; }',
+          "x.rb", route_table: route_table
+        )
+
+        expect(content).to include("action: '/accounts'")
+        expect(content).not_to include("action: accounts_path")
+      end
+
+      it "is case-insensitive on the method value" do
+        content = file_contents(
+          'function X() { return <form method="GET" action="/accounts">F</form>; }',
+          "x.rb", route_table: route_table
+        )
+
+        expect(content).to include("action: accounts_path")
+      end
+
+      it "leaves the action verbatim when method is interpolated (can't statically prove GET)" do
+        content = file_contents(
+          "function X({ verb }) { return <form method={verb} action=\"/accounts\">F</form>; }",
+          "x.rb", route_table: route_table
+        )
+
+        expect(content).to include("action: '/accounts'")
+      end
+
+      it "leaves external action URLs unchanged" do
+        content = file_contents(
+          'function X() { return <form action="https://example.com">F</form>; }',
+          "x.rb", route_table: route_table
+        )
+
+        expect(content).to include("action: 'https://example.com'")
+      end
+    end
   end
 
   describe "A3: router.push() hints in hook bodies" do
