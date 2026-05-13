@@ -26,7 +26,7 @@ module JsxRosetta
     case name
     when :view_component then Backend::ViewComponent.new(**options.slice(:helpers, :layout))
     when :rails_view then Backend::RailsView.new(**options.slice(:helpers, :layout))
-    when :phlex then Backend::Phlex.new(**options.slice(:suffix, :namespace))
+    when :phlex then Backend::Phlex.new(**options.slice(:suffix, :namespace, :rails_view, :route_table))
     else
       raise Error, "unknown backend: #{name.inspect}"
     end
@@ -39,5 +39,6 @@ require_relative "jsx_rosetta/parser"
 require_relative "jsx_rosetta/ir"
 require_relative "jsx_rosetta/routes"
 require_relative "jsx_rosetta/icons"
+require_relative "jsx_rosetta/pages_routing"
 require_relative "jsx_rosetta/backend"
 require_relative "jsx_rosetta/cli"
