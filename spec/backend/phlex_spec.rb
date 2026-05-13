@@ -98,6 +98,103 @@ RSpec.describe JsxRosetta::Backend::Phlex do
       expect(content).not_to match(/^module /)
     end
 
+    it "places a namespaced route under app/views/<ns>/<controller>/<action>.rb (B3)" do
+      route = JsxRosetta::PagesRouting::Route.new(
+        rails_path: "/admin/users/:id", controller: "users", action: "show",
+        source_path: "admin/users/[id].tsx", namespace: ["admin"]
+      )
+      files = files_for(source, rails_view: route)
+
+      expect(files.keys).to eq(["admin/users/show.rb"])
+      expect(files["admin/users/show.rb"]).to include("class Views::Admin::Users::Show < Views::Base")
+    end
+
+    it "places a two-level namespaced route in nested subdirectories" do
+      route = JsxRosetta::PagesRouting::Route.new(
+        rails_path: "/admin/billing/invoices", controller: "invoices", action: "index",
+        source_path: "admin/billing/invoices/index.tsx", namespace: %w[admin billing]
+      )
+      files = files_for(source, rails_view: route)
+
+      expect(files.keys).to eq(["admin/billing/invoices/index.rb"])
+      expect(files["admin/billing/invoices/index.rb"])
+        .to include("class Views::Admin::Billing::Invoices::Index < Views::Base")
+    end
+
+    it "places a route-group route under the group's namespace (B5)" do
+      route = JsxRosetta::PagesRouting::Route.new(
+        rails_path: "/about", controller: "pages", action: "about",
+        source_path: "(marketing)/about.tsx", namespace: ["marketing"]
+      )
+      files = files_for(source, rails_view: route)
+
+      expect(files.keys).to eq(["marketing/pages/about.rb"])
+      expect(files["marketing/pages/about.rb"])
+        .to include("class Views::Marketing::Pages::About < Views::Base")
+    end
+
+    it "places an error-page route under app/views/errors/<action>.rb (B4)" do
+      route = JsxRosetta::PagesRouting::Route.new(
+        rails_path: "/404", controller: "errors", action: "not_found",
+        source_path: "404.tsx", kind: :error_page
+      )
+      files = files_for(source, rails_view: route)
+
+      expect(files.keys).to eq(["errors/not_found.rb"])
+      expect(files["errors/not_found.rb"]).to include("class Views::Errors::NotFound < Views::Base")
+    end
+
+    it "places an _app.tsx layout at app/views/layouts/application.rb (B2)" do
+      route = JsxRosetta::PagesRouting::Route.new(
+        rails_path: nil, controller: "layouts", action: "application",
+        source_path: "_app.tsx", kind: :layout
+      )
+      app_source = "function App({ Component, pageProps }) { return <Component {...pageProps} />; }"
+      files = files_for(app_source, rails_view: route)
+
+      expect(files.keys).to eq(["layouts/application.rb"])
+      content = files["layouts/application.rb"]
+      expect(content).to include("class Views::Layouts::Application < Views::Base")
+      expect(content).to include("yield")
+    end
+
+    it "emits yield for `<Component {...pageProps} />` even outside layout placement (canonical Next.js shape)" do
+      app_source = "function App({ Component, pageProps }) { return <Component {...pageProps} />; }"
+      files = files_for(app_source)
+
+      content = files.values.first
+      expect(content).to include("yield")
+      expect(content).not_to include("render Component")
+    end
+
+    it "emits a getServerSideProps TODO block pointed at the matching controller (B1)" do
+      route = rails_route(controller: "claims", action: "show")
+      jsx = <<~JSX
+        export async function getServerSideProps(ctx) {
+          const { id } = ctx.params;
+          const claim = await fetchClaim(id);
+          return { props: { claim } };
+        }
+        function ClaimShow({ claim }) { return <h1>{claim.id}</h1>; }
+      JSX
+      content = files_for(jsx, rails_view: route).fetch("claims/show.rb")
+
+      expect(content).to include("# TODO: port the original Next.js `getServerSideProps` to ClaimsController#show:")
+      expect(content).to include("#   export async function getServerSideProps(ctx)")
+      expect(content).to include("#     const claim = await fetchClaim(id);")
+      expect(content).to include("# In Rails: load the data in the controller")
+    end
+
+    it "uses a generic target when no rails_view is set" do
+      jsx = <<~JSX
+        export const getStaticProps = async () => ({ props: { hello: 'world' } });
+        function Hello({ hello }) { return <h1>{hello}</h1>; }
+      JSX
+      content = files_for(jsx).values.first
+
+      expect(content).to include("# TODO: port the original Next.js `getStaticProps` to the host controller action:")
+    end
+
     it "rejects rails_view: combined with suffix:" do
       expect { described_class.new(rails_view: rails_route(controller: "pages", action: "home"), suffix: "Component") }
         .to raise_error(ArgumentError, /cannot be combined/)

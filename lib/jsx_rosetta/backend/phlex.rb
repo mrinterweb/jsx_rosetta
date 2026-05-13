@@ -207,9 +207,21 @@ module JsxRosetta
       end
 
       def rails_view_class_name
+        return rails_layout_class_name if @rails_view.kind == :layout
+
+        namespace_parts = (@rails_view.namespace || []).map { |ns| AST::Inflector.upper_camelize(ns) }
         controller = AST::Inflector.upper_camelize(@rails_view.controller)
         action = AST::Inflector.upper_camelize(@rails_view.action)
-        "Views::#{controller}::#{action}"
+        (["Views"] + namespace_parts + [controller, action]).join("::")
+      end
+
+      # Layouts land under Views::Layouts:: regardless of source path —
+      # `_app.tsx` → Views::Layouts::Application. There's only ever one
+      # "controller" for layouts (`layouts`), so the controller segment
+      # is collapsed into the namespace.
+      def rails_layout_class_name
+        action = AST::Inflector.upper_camelize(@rails_view.action)
+        "Views::Layouts::#{action}"
       end
 
       def parent_class
@@ -249,15 +261,19 @@ module JsxRosetta
       end
 
       def ruby_path(component)
-        return "#{@rails_view.controller}/#{@rails_view.action}.rb" if @rails_view
+        return "#{rails_view_dir}/#{@rails_view.action}.rb" if @rails_view
 
         "#{AST::Inflector.underscore(class_name(component))}.rb"
       end
 
       def stimulus_path(component)
-        return "#{@rails_view.controller}/#{@rails_view.action}_controller.js" if @rails_view
+        return "#{rails_view_dir}/#{@rails_view.action}_controller.js" if @rails_view
 
         "#{AST::Inflector.underscore(class_name(component))}_controller.js"
+      end
+
+      def rails_view_dir
+        ((@rails_view.namespace || []) + [@rails_view.controller]).join("/")
       end
 
       def stimulus_identifier(component)
@@ -266,8 +282,34 @@ module JsxRosetta
 
       def render_ruby_class(component, translator)
         class_body = render_class_body(component, translator)
-        prefix = render_module_bindings_prefix(component)
+        prefix = "#{render_server_data_source_prefix(component)}#{render_module_bindings_prefix(component)}"
         wrap_in_namespace("#{prefix}#{class_body}")
+      end
+
+      # When the source file exports `getServerSideProps` /
+      # `getStaticProps`, emit a TODO block above the class with the
+      # body verbatim. The block names the matching Rails controller
+      # action when `@rails_view` is set; otherwise it points at "the
+      # host controller" generically.
+      def render_server_data_source_prefix(component)
+        return "" unless component.server_data_source
+
+        sds = component.server_data_source
+        target = if @rails_view
+                   "#{AST::Inflector.upper_camelize(@rails_view.controller)}Controller##{@rails_view.action}"
+                 else
+                   "the host controller action"
+                 end
+        body_lines = comment_lines(sds.source)
+        lines = [
+          "# TODO: port the original Next.js `#{sds.hook_name}` to #{target}:",
+          "#",
+          *body_lines,
+          "#",
+          "# In Rails: load the data in the controller (set @ivars), and read",
+          "# them in this view via the standard props plumbing."
+        ]
+        "#{lines.join("\n")}\n"
       end
 
       # Top-level `const`/`let` declarations outside the component
@@ -687,6 +729,7 @@ module JsxRosetta
         when IR::Text then render_text(node, indent: indent)
         when IR::Interpolation then render_interpolation(node, translator, indent: indent)
         when IR::Comment then render_comment(node, indent: indent)
+        when IR::LayoutYield then "#{" " * indent}yield"
         end
       end
 

@@ -617,6 +617,60 @@ RSpec.describe JsxRosetta::IR::Lowering do
     end
   end
 
+  describe "B1: getServerSideProps / getStaticProps capture" do
+    it "captures an exported `async function getServerSideProps(ctx)` verbatim" do
+      ir = lower(<<~JSX)
+        export async function getServerSideProps(ctx) {
+          const { id } = ctx.params;
+          return { props: { id } };
+        }
+        function X() { return <p />; }
+      JSX
+
+      expect(ir.server_data_source).not_to be_nil
+      expect(ir.server_data_source.hook_name).to eq("getServerSideProps")
+      expect(ir.server_data_source.source).to include("export async function getServerSideProps(ctx)")
+      expect(ir.server_data_source.source).to include("return { props: { id } };")
+    end
+
+    it "captures the const-arrow form" do
+      ir = lower(<<~JSX)
+        export const getServerSideProps = async (ctx) => ({ props: { id: ctx.params.id } });
+        function X() { return <p />; }
+      JSX
+
+      expect(ir.server_data_source.hook_name).to eq("getServerSideProps")
+      expect(ir.server_data_source.source).to include("export const getServerSideProps")
+    end
+
+    it "captures getStaticProps in the same way" do
+      ir = lower(<<~JSX)
+        export async function getStaticProps() {
+          return { props: { hello: "world" } };
+        }
+        function X() { return <p />; }
+      JSX
+
+      expect(ir.server_data_source.hook_name).to eq("getStaticProps")
+    end
+
+    it "returns nil when no hook export is present" do
+      ir = lower("function X() { return <p />; }")
+
+      expect(ir.server_data_source).to be_nil
+    end
+
+    it "captures the first hook when both are present (rare)" do
+      ir = lower(<<~JSX)
+        export async function getServerSideProps() { return { props: {} }; }
+        export async function getStaticProps() { return { props: {} }; }
+        function X() { return <p />; }
+      JSX
+
+      expect(ir.server_data_source.hook_name).to eq("getServerSideProps")
+    end
+  end
+
   describe "Gap D: render-prop / function-as-children" do
     it "lowers `<Form.List>{(fields) => <p>{fields}</p>}</Form.List>` to RenderProp" do
       ir = lower(<<~JSX)
@@ -1755,7 +1809,8 @@ RSpec.describe JsxRosetta::IR::Lowering do
         ],
         react_hooks: [],
         render_methods: [],
-        mode: :view
+        mode: :view,
+        server_data_source: nil
       )
 
       expect(ir).to eq(expected)

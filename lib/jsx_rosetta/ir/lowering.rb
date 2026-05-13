@@ -185,7 +185,9 @@ module JsxRosetta
         name, function = candidates.first
         @module_bindings = capture_module_bindings(file.program, candidates)
         @module_imports = capture_module_imports(file.program)
-        attach_module_metadata(lower_component(name, function), @module_bindings, @module_imports)
+        @server_data_source = capture_server_data_source(file.program)
+        attach_module_metadata(lower_component(name, function),
+                               @module_bindings, @module_imports, @server_data_source)
       end
 
       def lower_all_components(file)
@@ -194,8 +196,50 @@ module JsxRosetta
 
         @module_bindings = capture_module_bindings(file.program, candidates)
         @module_imports = capture_module_imports(file.program)
-        candidates.map do |name, function|
-          attach_module_metadata(lower_component(name, function), @module_bindings, @module_imports)
+        @server_data_source = capture_server_data_source(file.program)
+        candidates.each_with_index.map do |(name, function), idx|
+          # Only the first sibling carries the server_data_source — a page
+          # file has at most one such export, and attaching it to every
+          # sibling would duplicate the TODO block across N files.
+          sds = idx.zero? ? @server_data_source : nil
+          attach_module_metadata(lower_component(name, function),
+                                 @module_bindings, @module_imports, sds)
+        end
+      end
+
+      SERVER_DATA_HOOK_NAMES = %w[getServerSideProps getStaticProps].freeze
+
+      # Capture a top-level `export function getServerSideProps()` or
+      # `export const getServerSideProps = ...` (or getStaticProps) so the
+      # Phlex backend can surface the body as a TODO comment block. Returns
+      # nil when no such export is present (the common case for ordinary
+      # components — only Next.js pages have these).
+      def capture_server_data_source(program)
+        program.body.each do |stmt|
+          next unless stmt.of_type?("ExportNamedDeclaration")
+
+          decl = stmt[:declaration]
+          next unless decl.is_a?(AST::Node)
+
+          name = server_data_hook_name(decl)
+          return ServerDataSource.new(hook_name: name, source: source_of(stmt)) if name
+        end
+        nil
+      end
+
+      def server_data_hook_name(decl)
+        case decl.type
+        when "FunctionDeclaration"
+          id = decl[:id]
+          id&.[](:name) if id.is_a?(AST::Node) && SERVER_DATA_HOOK_NAMES.include?(id[:name])
+        when "VariableDeclaration"
+          first = decl[:declarations].first
+          return nil unless first.is_a?(AST::Node)
+
+          id = first[:id]
+          return nil unless id.is_a?(AST::Node) && id.of_type?("Identifier")
+
+          id[:name] if SERVER_DATA_HOOK_NAMES.include?(id[:name])
         end
       end
 
@@ -473,8 +517,12 @@ module JsxRosetta
         end
       end
 
-      def attach_module_metadata(component, module_bindings, module_imports)
-        component.with(module_bindings: module_bindings, module_imports: module_imports)
+      def attach_module_metadata(component, module_bindings, module_imports, server_data_source = nil)
+        component.with(
+          module_bindings: module_bindings,
+          module_imports: module_imports,
+          server_data_source: server_data_source
+        )
       end
 
       # Capture every top-level `import` declaration so the translator can
@@ -760,7 +808,8 @@ module JsxRosetta
           stimulus_methods: @stimulus_methods,
           react_hooks: @react_hooks,
           render_methods: @render_methods,
-          mode: mode
+          mode: mode,
+          server_data_source: nil
         )
       end
 
@@ -1394,6 +1443,12 @@ module JsxRosetta
           # Gap J: `const { Content } = Layout; <Content/>` should resolve
           # to `Layout::Content`, not a bare `ContentComponent`.
           ComponentInvocation.new(name: "#{parent}.#{tag}", props: attributes, children: children)
+        elsif next_js_layout_yield?(tag, attributes)
+          # `<Component {...pageProps} />` — the canonical Next.js _app
+          # content slot. Lowering to LayoutYield lets the Phlex backend
+          # emit `yield` (Rails layout convention) instead of trying to
+          # render the prop verbatim.
+          LayoutYield.new
         elsif html_element?(tag)
           Element.new(tag: tag, attributes: attributes, children: children)
         elsif (radix = radix_primitive_for(tag))
@@ -2226,6 +2281,19 @@ module JsxRosetta
 
         first = tag[0]
         first == first.downcase
+      end
+
+      # `<Component {...pageProps} />` — Next.js _app content slot. Tag must
+      # be exactly "Component" and the props must include a spread of
+      # "pageProps". Strict shape match keeps this from false-firing on
+      # ordinary code that happens to render a prop-named `<Component>` —
+      # the `{...pageProps}` spread is the unambiguous Next.js signal.
+      def next_js_layout_yield?(tag, attributes)
+        return false unless tag == "Component"
+
+        attributes.any? do |attr|
+          attr.is_a?(SpreadAttribute) && attr.expression.strip == "pageProps"
+        end
       end
 
       def source_of(node)

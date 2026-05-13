@@ -104,13 +104,14 @@ RSpec.describe JsxRosetta::PagesRouting do
       expect(route.action).to eq("edit")
     end
 
-    it "treats nested named dirs as path segments, not separate controllers" do
+    it "promotes the innermost named dir to controller and outer dirs to namespace (B3)" do
       route = routes_for("workflows/[id]/versions/index.tsx").first
 
       expect(route).to have_attributes(
         rails_path: "/workflows/:id/versions",
-        controller: "workflows",
-        action: "show"
+        controller: "versions",
+        action: "show",
+        namespace: ["workflows"]
       )
     end
 
@@ -121,25 +122,186 @@ RSpec.describe JsxRosetta::PagesRouting do
     end
   end
 
+  describe ".scan namespace nesting (B3)" do
+    it "promotes a single named-dir to controller with empty namespace" do
+      route = routes_for("users/[id].tsx").first
+
+      expect(route).to have_attributes(
+        rails_path: "/users/:id",
+        controller: "users",
+        action: "show",
+        namespace: []
+      )
+    end
+
+    it "treats two named dirs as namespace + controller" do
+      route = routes_for("admin/users/[id].tsx").first
+
+      expect(route).to have_attributes(
+        rails_path: "/admin/users/:id",
+        controller: "users",
+        action: "show",
+        namespace: ["admin"]
+      )
+    end
+
+    it "treats three named dirs as two-level namespace + controller" do
+      route = routes_for("admin/billing/invoices/index.tsx").first
+
+      expect(route).to have_attributes(
+        rails_path: "/admin/billing/invoices",
+        controller: "invoices",
+        action: "index",
+        namespace: %w[admin billing]
+      )
+    end
+
+    it "snake_cases multi-word namespace segments" do
+      route = routes_for("policyAdmin/users/index.tsx").first
+
+      expect(route.namespace).to eq(["policy_admin"])
+      expect(route.controller).to eq("users")
+    end
+
+    it "keeps bracket dirs flowing into the URL without breaking namespacing" do
+      route = routes_for("admin/users/[id]/edit.tsx").first
+
+      expect(route).to have_attributes(
+        rails_path: "/admin/users/:id/edit",
+        controller: "users",
+        action: "edit",
+        namespace: ["admin"]
+      )
+    end
+  end
+
+  describe ".scan route groups (B5)" do
+    it "treats a (group) dir as URL-invisible namespace" do
+      route = routes_for("(marketing)/about.tsx").first
+
+      expect(route).to have_attributes(
+        rails_path: "/about",
+        controller: "pages",
+        action: "about",
+        namespace: ["marketing"]
+      )
+    end
+
+    it "treats a (group)/index.tsx as URL-invisible root-of-group" do
+      route = routes_for("(marketing)/index.tsx").first
+
+      expect(route).to have_attributes(
+        rails_path: "/",
+        controller: "pages",
+        action: "index",
+        namespace: ["marketing"]
+      )
+    end
+
+    it "stacks multiple nested groups" do
+      route = routes_for("(marketing)/(public)/about.tsx").first
+
+      expect(route).to have_attributes(
+        rails_path: "/about",
+        namespace: %w[marketing public]
+      )
+    end
+
+    it "combines a (group) with a nested named dir (B5 + B3)" do
+      route = routes_for("(group)/users/[id].tsx").first
+
+      expect(route).to have_attributes(
+        rails_path: "/users/:id",
+        controller: "users",
+        action: "show",
+        namespace: ["group"]
+      )
+    end
+
+    it "doesn't add the group name to the URL" do
+      route = routes_for("(internal)/dashboard.tsx").first
+
+      expect(route.rails_path).to eq("/dashboard")
+      expect(route.rails_path).not_to include("internal")
+    end
+  end
+
   describe ".scan skipped files" do
-    it "skips _app.tsx with the layout reason" do
-      _routes, skipped = scan("_app.tsx", "index.tsx")
+    it "skips _document.tsx (HTML scaffolding is owned by Rails)" do
+      _routes, skipped = scan("_document.tsx", "index.tsx")
 
-      expect(skipped.map(&:source_path)).to include("_app.tsx")
-      expect(skipped.first.reason).to include("application wrapper")
+      expect(skipped.map(&:source_path)).to include("_document.tsx")
+      expect(skipped.first.reason).to include("HTML document")
     end
 
-    it "skips _document.tsx, _error.tsx, 404.tsx, 500.tsx" do
-      _routes, skipped = scan("_document.tsx", "_error.tsx", "404.tsx", "500.tsx")
-
-      expect(skipped.map(&:source_path)).to match_array(%w[_document.tsx _error.tsx 404.tsx 500.tsx])
-    end
-
-    it "produces no routes when the directory contains only skipped files" do
+    it "produces no standard routes when only layout / skipped files are present" do
       routes, skipped = scan("_app.tsx", "_document.tsx")
 
-      expect(routes).to be_empty
-      expect(skipped.size).to eq(2)
+      expect(routes.map(&:kind)).to eq([:layout])
+      expect(skipped.size).to eq(1)
+    end
+  end
+
+  describe ".scan layouts (B2)" do
+    it "recognizes _app.tsx as a Rails application layout" do
+      routes, _skipped = scan("_app.tsx", "index.tsx")
+      layout = routes.find { |r| r.kind == :layout }
+
+      expect(layout).to have_attributes(
+        rails_path: nil,
+        controller: "layouts",
+        action: "application",
+        source_path: "_app.tsx"
+      )
+    end
+
+    it "still skips _document.tsx" do
+      routes, skipped = scan("_document.tsx", "index.tsx")
+
+      expect(routes.map(&:kind)).not_to include(:layout)
+      expect(skipped.map(&:source_path)).to include("_document.tsx")
+    end
+  end
+
+  describe ".scan error pages (B4)" do
+    it "recognizes _error.tsx as a fallback error route" do
+      routes, _skipped = scan("_error.tsx", "index.tsx")
+      error_route = routes.find { |r| r.kind == :error_page }
+
+      expect(error_route).to have_attributes(
+        rails_path: "/_error",
+        controller: "errors",
+        action: "fallback",
+        kind: :error_page
+      )
+    end
+
+    it "recognizes 404.tsx as not_found" do
+      routes, _skipped = scan("404.tsx", "index.tsx")
+      error_route = routes.find { |r| r.kind == :error_page }
+
+      expect(error_route).to have_attributes(
+        rails_path: "/404",
+        controller: "errors",
+        action: "not_found"
+      )
+    end
+
+    it "recognizes 500.tsx as internal_server_error" do
+      routes, _skipped = scan("500.tsx", "index.tsx")
+      error_route = routes.find { |r| r.kind == :error_page }
+
+      expect(error_route).to have_attributes(
+        rails_path: "/500",
+        controller: "errors",
+        action: "internal_server_error"
+      )
+    end
+
+    it "does not list error pages as skipped" do
+      _routes, skipped = scan("404.tsx", "500.tsx", "_error.tsx")
+
+      expect(skipped.map(&:source_path)).to be_empty
     end
   end
 
@@ -282,6 +444,176 @@ RSpec.describe JsxRosetta::PagesRouting do
 
       expect { compile_ruby(output) }.not_to raise_error
     end
+
+    context "namespace nesting (B3 / B5)" do
+      let(:route_admin_users_show) do
+        JsxRosetta::PagesRouting::Route.new(
+          rails_path: "/admin/users/:id", controller: "users", action: "show",
+          source_path: "admin/users/[id].tsx", namespace: ["admin"]
+        )
+      end
+
+      let(:route_admin_users_index) do
+        JsxRosetta::PagesRouting::Route.new(
+          rails_path: "/admin/users", controller: "users", action: "index",
+          source_path: "admin/users/index.tsx", namespace: ["admin"]
+        )
+      end
+
+      let(:route_marketing_about) do
+        JsxRosetta::PagesRouting::Route.new(
+          rails_path: "/about", controller: "pages", action: "about",
+          source_path: "(marketing)/about.tsx", namespace: ["marketing"]
+        )
+      end
+
+      it "emits to: \"namespace/controller#action\" form for nested-dir routes" do
+        output = described_class.emit(
+          routes: [route_admin_users_index, route_admin_users_show], skipped: [],
+          source_dir: "pages", generated_at: "2026-05-13"
+        )
+
+        expect(output).to include(%(  get "/admin/users", to: "admin/users#index", as: :admin_users))
+        expect(output).to include(%(  get "/admin/users/:id", to: "admin/users#show", as: :admin_user))
+      end
+
+      it "emits to: \"group/controller#action\" form for route-group routes (B5)" do
+        output = described_class.emit(
+          routes: [route_marketing_about], skipped: [],
+          source_dir: "pages", generated_at: "2026-05-13"
+        )
+
+        expect(output).to include(%(  get "/about", to: "marketing/pages#about", as: :marketing_pages_about))
+      end
+
+      it "shows the qualified controller in the group-header comment" do
+        output = described_class.emit(
+          routes: [route_admin_users_index], skipped: [],
+          source_dir: "pages", generated_at: "2026-05-13"
+        )
+
+        expect(output).to include("# == admin/users ==")
+      end
+
+      it "emits the qualified target in the scaffold hint" do
+        output = described_class.emit(
+          routes: [route_admin_users_index, route_admin_users_show], skipped: [],
+          source_dir: "pages", generated_at: "2026-05-13"
+        )
+
+        expect(output).to include(
+          '# system "rails", "generate", "controller", "admin/users", "index", "show"'
+        )
+      end
+
+      it "passes ruby -c with namespaced routes" do
+        output = described_class.emit(
+          routes: [route_admin_users_index, route_admin_users_show, route_marketing_about],
+          skipped: [], source_dir: "pages", generated_at: "2026-05-13"
+        )
+
+        expect { compile_ruby(output) }.not_to raise_error
+      end
+    end
+
+    context "error pages (B4)" do
+      let(:route_not_found) do
+        JsxRosetta::PagesRouting::Route.new(
+          rails_path: "/404", controller: "errors", action: "not_found",
+          source_path: "404.tsx", kind: :error_page
+        )
+      end
+
+      let(:route_server_error) do
+        JsxRosetta::PagesRouting::Route.new(
+          rails_path: "/500", controller: "errors", action: "internal_server_error",
+          source_path: "500.tsx", kind: :error_page
+        )
+      end
+
+      it "emits a config.exceptions_app comment block above the draw" do
+        output = described_class.emit(
+          routes: [route_index, route_not_found, route_server_error], skipped: [],
+          source_dir: "pages", generated_at: "2026-05-13"
+        )
+
+        expect(output).to include("# Error pages — Next.js _error / 404 / 500 detected")
+        expect(output).to include("config.exceptions_app = self.routes")
+        expect(output).to include(%(#       match "/404", to: "errors#not_found", via: :all))
+        expect(output).to include(%(#       match "/500", to: "errors#internal_server_error", via: :all))
+        expect(output).to include("public/404.html / public/500.html")
+      end
+
+      it "lists error routes in a dedicated draw-block section" do
+        output = described_class.emit(
+          routes: [route_index, route_not_found, route_server_error], skipped: [],
+          source_dir: "pages", generated_at: "2026-05-13"
+        )
+
+        expect(output).to include("# == errors (config.exceptions_app) ==")
+        expect(output).to include(%(  match "/404", to: "errors#not_found", via: :all, as: :errors_not_found))
+        expect(output).to include(
+          %(  match "/500", to: "errors#internal_server_error", via: :all, as: :errors_internal_server_error)
+        )
+      end
+
+      it "skips error routes from the standard `# ==` group headers" do
+        output = described_class.emit(
+          routes: [route_index, route_not_found], skipped: [],
+          source_dir: "pages", generated_at: "2026-05-13"
+        )
+
+        standard_errors_idx = output.index(%(# == errors ==\n))
+        expect(standard_errors_idx).to be_nil
+      end
+
+      it "passes ruby -c when error pages are present" do
+        output = described_class.emit(
+          routes: [route_index, route_not_found, route_server_error], skipped: [],
+          source_dir: "pages", generated_at: "2026-05-13"
+        )
+
+        expect { compile_ruby(output) }.not_to raise_error
+      end
+    end
+
+    context "layouts (B2)" do
+      let(:route_app_layout) do
+        JsxRosetta::PagesRouting::Route.new(
+          rails_path: nil, controller: "layouts", action: "application",
+          source_path: "_app.tsx", kind: :layout
+        )
+      end
+
+      it "emits a layouts comment block above the draw" do
+        output = described_class.emit(
+          routes: [route_index, route_app_layout], skipped: [],
+          source_dir: "pages", generated_at: "2026-05-13"
+        )
+
+        expect(output).to include("Layouts — translated to app/views/layouts/<action>.rb")
+        expect(output).to include("#   - _app.tsx → app/views/layouts/application.rb")
+      end
+
+      it "does not emit a route line for the layout" do
+        output = described_class.emit(
+          routes: [route_app_layout], skipped: [],
+          source_dir: "pages", generated_at: "2026-05-13"
+        )
+
+        expect(output).not_to match(/get .*layouts/)
+        expect(output).not_to match(/match .*layouts/)
+      end
+
+      it "passes ruby -c when only a layout is present" do
+        output = described_class.emit(
+          routes: [route_app_layout], skipped: [],
+          source_dir: "pages", generated_at: "2026-05-13"
+        )
+
+        expect { compile_ruby(output) }.not_to raise_error
+      end
+    end
   end
 
   def compile_ruby(source)
@@ -397,6 +729,63 @@ RSpec.describe JsxRosetta::PagesRouting do
 
       expect(contents.scan("def show").size).to eq(1)
     end
+
+    context "with namespace (B3 / B5)" do
+      def namespaced_route(rails_path:, controller:, action:, namespace:)
+        JsxRosetta::PagesRouting::Route.new(
+          rails_path: rails_path, controller: controller, action: action,
+          source_path: "src.tsx", namespace: namespace
+        )
+      end
+
+      it "lands the controller file in a namespaced subdirectory" do
+        routes = [
+          namespaced_route(rails_path: "/admin/users", controller: "users",
+                           action: "index", namespace: ["admin"]),
+          namespaced_route(rails_path: "/admin/users/:id", controller: "users",
+                           action: "show", namespace: ["admin"])
+        ]
+
+        files = described_class.emit_controllers(routes: routes)
+
+        expect(files.map(&:path)).to contain_exactly("admin/users_controller.rb")
+      end
+
+      it "emits the qualified class declaration with the namespace as a Ruby module" do
+        routes = [
+          namespaced_route(rails_path: "/admin/users", controller: "users",
+                           action: "index", namespace: ["admin"])
+        ]
+
+        contents = described_class.emit_controllers(routes: routes).first.contents
+
+        expect(contents).to include("class Admin::UsersController < ApplicationController")
+      end
+
+      it "splits two-level namespaces into nested module path and class name" do
+        routes = [
+          namespaced_route(rails_path: "/admin/billing/invoices", controller: "invoices",
+                           action: "index", namespace: %w[admin billing])
+        ]
+
+        files = described_class.emit_controllers(routes: routes)
+        contents = files.first.contents
+
+        expect(files.first.path).to eq("admin/billing/invoices_controller.rb")
+        expect(contents).to include("class Admin::Billing::InvoicesController < ApplicationController")
+      end
+
+      it "references the namespaced view path in the wiring comment" do
+        routes = [
+          namespaced_route(rails_path: "/admin/users", controller: "users",
+                           action: "index", namespace: ["admin"])
+        ]
+
+        contents = described_class.emit_controllers(routes: routes).first.contents
+
+        expect(contents).to include("app/views/admin/users/<action>.rb")
+      end
+    end
   end
 
   describe JsxRosetta::PagesRouting::Naming do
@@ -437,6 +826,39 @@ RSpec.describe JsxRosetta::PagesRouting do
     it "names other actions as `<controller>_<action>`" do
       route = make_route(rails_path: "/about", controller: "pages", action: "about")
       expect(described_class.route_name(route)).to eq("pages_about")
+    end
+
+    describe "with namespace" do
+      def make_namespaced(rails_path:, controller:, action:, namespace:)
+        JsxRosetta::PagesRouting::Route.new(
+          rails_path: rails_path, controller: controller, action: action,
+          source_path: "src.tsx", namespace: namespace
+        )
+      end
+
+      it "prefixes the namespace on index actions" do
+        route = make_namespaced(rails_path: "/admin/users", controller: "users",
+                                action: "index", namespace: ["admin"])
+        expect(described_class.route_name(route)).to eq("admin_users")
+      end
+
+      it "prefixes the namespace on show actions" do
+        route = make_namespaced(rails_path: "/admin/users/:id", controller: "users",
+                                action: "show", namespace: ["admin"])
+        expect(described_class.route_name(route)).to eq("admin_user")
+      end
+
+      it "joins multi-level namespaces with underscores" do
+        route = make_namespaced(rails_path: "/admin/billing/invoices", controller: "invoices",
+                                action: "index", namespace: %w[admin billing])
+        expect(described_class.route_name(route)).to eq("admin_billing_invoices")
+      end
+
+      it "prefixes namespace on a route-group route (URL-invisible namespace)" do
+        route = make_namespaced(rails_path: "/about", controller: "pages",
+                                action: "about", namespace: ["marketing"])
+        expect(described_class.route_name(route)).to eq("marketing_pages_about")
+      end
     end
   end
 
@@ -494,6 +916,23 @@ RSpec.describe JsxRosetta::PagesRouting do
 
       it "returns nil for paths with anchors" do
         expect(rewriter.rewrite_literal("/accounts#top")).to be_nil
+      end
+
+      context "with namespaced routes (B3)" do
+        let(:routes) do
+          [
+            route(rails_path: "/admin/users", controller: "users", action: "index").with(namespace: ["admin"]),
+            route(rails_path: "/admin/users/:id", controller: "users", action: "show").with(namespace: ["admin"])
+          ]
+        end
+
+        it "rewrites a namespaced collection path with the namespace-prefixed helper" do
+          expect(rewriter.rewrite_literal("/admin/users")).to eq("admin_users_path")
+        end
+
+        it "rewrites a namespaced member path with the singular namespace-prefixed helper" do
+          expect(rewriter.rewrite_literal("/admin/users/42")).to eq("admin_user_path(42)")
+        end
       end
     end
 

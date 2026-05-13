@@ -75,11 +75,33 @@ module JsxRosetta
     #         that returns the translated data, instead of `view_template`.
     #         JSX inside object properties still extracts to private
     #         methods on the class via the IR::Lambda path.
+    # server_data_source : ServerDataSource | nil — capture of a
+    #                  Next.js `getServerSideProps` / `getStaticProps`
+    #                  export from the same source file as this component.
+    #                  Body preserved verbatim so the Phlex backend can
+    #                  emit it as a TODO comment block above the class
+    #                  (the matching Rails controller action is where the
+    #                  user ports the data-loading logic). Attached only
+    #                  to the first component when a file contains
+    #                  multiple — Next.js page files have exactly one
+    #                  default-export component, so collisions are rare.
     Component = Data.define(:name, :props, :body, :rest_prop_name,
                             :local_bindings, :local_binding_names,
                             :module_bindings, :module_imports,
                             :stimulus_methods, :react_hooks,
-                            :render_methods, :mode) do
+                            :render_methods, :mode, :server_data_source) do
+      include Node
+    end
+
+    # A Next.js server data-loading export (`getServerSideProps` /
+    # `getStaticProps`). Captured at lowering time so the Phlex backend can
+    # surface the body as a TODO comment block pointed at the matching
+    # Rails controller action. Body is preserved verbatim — no JS-to-Ruby
+    # translation is attempted per project rules.
+    #
+    # hook_name : String — "getServerSideProps" or "getStaticProps".
+    # source    : String — verbatim JS of the entire export statement.
+    ServerDataSource = Data.define(:hook_name, :source) do
       include Node
     end
 
@@ -518,6 +540,16 @@ module JsxRosetta
     # params : [String] — param names (camelCase preserved; backends snake_case).
     # body   : Node — the lowered IR node produced by the arrow's body.
     RenderProp = Data.define(:params, :body) do
+      include Node
+    end
+
+    # The Next.js `_app.tsx` content slot — what JSX writes as
+    # `<Component {...pageProps} />`. Lowered to a distinguished node so
+    # the Phlex backend can emit `yield` (the Rails layout convention) in
+    # its place when the host file is a layout. Outside the layout
+    # rendering path the node still emits a yield, since the only way to
+    # produce one in our IR is to hit this exact source shape.
+    LayoutYield = Data.define do
       include Node
     end
 

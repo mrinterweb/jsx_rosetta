@@ -295,9 +295,9 @@ RSpec.describe JsxRosetta::CLI do
     end
 
     it "errors when the input file is a skipped (non-page) file" do
-      root, pages_dir = make_page_file("_app.tsx",
-                                       contents: "export function App({Component}) { return <Component/>; }")
-      result = run("translate", File.join(pages_dir, "_app.tsx"),
+      root, pages_dir = make_page_file("_document.tsx",
+                                       contents: "export default function Document() { return <html/>; }")
+      result = run("translate", File.join(pages_dir, "_document.tsx"),
                    "--as=phlex", "--rails-routes", pages_dir)
 
       expect(result[:code]).to eq(JsxRosetta::CLI::EXIT_FAILURE)

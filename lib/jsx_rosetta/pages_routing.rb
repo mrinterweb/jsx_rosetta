@@ -16,10 +16,28 @@ module JsxRosetta
   # Slice 1 of plans/nextjs_pages_to_rails.md: routes only. No file
   # moves, no controller skeletons, no class renames.
   module PagesRouting
-    Route = Data.define(:rails_path, :controller, :action, :source_path) do
+    # A single route resolved from the pages tree.
+    #
+    # `namespace` is `[]` for top-level routes, otherwise an ordered list of
+    # Rails namespace segments (slice-4 B3 nested dirs + B5 route groups).
+    # Both shapes flow into the same array — Naming + Emitter wrap routes in
+    # nested `namespace :foo do` blocks regardless of which mechanism added
+    # the segment.
+    #
+    # `kind` is `:standard` for regular GET routes, `:error_page` for
+    # `_error.tsx` / `404.tsx` / `500.tsx` (emitted via `config.exceptions_app`
+    # rather than the regular draw block), or `:layout` for `_app.tsx`
+    # (emitted as a view-placement directive only, not a route line).
+    Route = Data.define(:rails_path, :controller, :action, :source_path, :namespace, :kind) do
+      def initialize(rails_path:, controller:, action:, source_path:, namespace: [], kind: :standard)
+        super
+      end
+
       # Extracts the named URL params from `rails_path` in order. Catches
       # `:foo`, `*rest`, and `(/*extra)`-style optional catch-alls.
       def url_params
+        return [] if rails_path.nil?
+
         rails_path.scan(/[:*]([a-z_][a-z0-9_]*)/i).flatten
       end
     end
@@ -28,11 +46,23 @@ module JsxRosetta
     ControllerFile = Data.define(:path, :contents)
 
     SKIPPED_LEAVES = {
-      "_app" => "Next.js application wrapper — convert to app/views/layouts/application.html.erb",
-      "_document" => "Next.js HTML document — typically subsumed by Rails layout",
-      "_error" => "Next.js error handler — wire to config.exceptions_app",
-      "404" => "404 page — wire to config.exceptions_app",
-      "500" => "500 page — wire to config.exceptions_app"
+      "_document" => "Next.js HTML document — typically subsumed by Rails layout"
+    }.freeze
+
+    # Next.js error pages — leaf names that map to an `errors` controller
+    # with a standard action name. Routed via `config.exceptions_app` in
+    # Rails, not via the regular draw block.
+    ERROR_PAGE_LEAVES = {
+      "_error" => "fallback",
+      "404" => "not_found",
+      "500" => "internal_server_error"
+    }.freeze
+
+    # Leaf names that resolve to a Rails application layout, not a page.
+    # `_app.tsx` lands as `app/views/layouts/<action>.rb`. `_document.tsx`
+    # stays in SKIPPED_LEAVES — Rails owns the surrounding HTML scaffold.
+    LAYOUT_LEAVES = {
+      "_app" => "application"
     }.freeze
 
     DEFAULT_EXTENSIONS = %w[.tsx .jsx].freeze
@@ -56,8 +86,20 @@ module JsxRosetta
       module_function
 
       def route_name(route)
-        return "root" if route.rails_path == "/" && route.controller == "pages" && route.action == "index"
+        return "root" if route.rails_path == "/" && route.controller == "pages" &&
+                         route.action == "index" && route.namespace.empty?
 
+        base = base_route_name(route)
+        return base if route.namespace.empty?
+
+        "#{route.namespace.join("_")}_#{base}"
+      end
+
+      def url_helper_name(route)
+        "#{route_name(route)}_path"
+      end
+
+      def base_route_name(route)
         case route.action
         when "index" then route.controller
         when "show" then AST::Inflector.singularize(route.controller)
@@ -65,10 +107,6 @@ module JsxRosetta
         when "edit" then "edit_#{AST::Inflector.singularize(route.controller)}"
         else "#{route.controller}_#{route.action}"
         end
-      end
-
-      def url_helper_name(route)
-        "#{route_name(route)}_path"
       end
     end
 
@@ -223,6 +261,10 @@ module JsxRosetta
             leaf = segments.last
             if (reason = SKIPPED_LEAVES[leaf])
               skipped << Skipped.new(source_path: rel_path, reason: reason)
+            elsif ERROR_PAGE_LEAVES.key?(leaf)
+              routes << build_error_route(leaf, rel_path)
+            elsif LAYOUT_LEAVES.key?(leaf)
+              routes << build_layout_route(leaf, rel_path)
             else
               routes << build_route(segments, rel_path)
             end
@@ -247,16 +289,50 @@ module JsxRosetta
           parts
         end
 
+        # `_error.tsx` / `404.tsx` / `500.tsx` get a synthetic ErrorsController
+        # route. `rails_path` records the URL Rails should match (`/<status>`)
+        # so HrefRewriter and emitter share the same shape, but the emitter
+        # ignores it for the `get` block (it's listed in the `config.exceptions_app`
+        # comment header instead).
+        def build_error_route(leaf, source_path)
+          action = ERROR_PAGE_LEAVES.fetch(leaf)
+          Route.new(
+            rails_path: "/#{leaf}",
+            controller: "errors",
+            action: action,
+            source_path: source_path,
+            kind: :error_page
+          )
+        end
+
+        # `_app.tsx` lands as a Rails application layout. It does NOT
+        # produce a route line in routes.rb (rails_path is nil) — the
+        # emitter calls it out in a dedicated comment block instead.
+        # `controller` reads "layouts" so the Phlex view-placement path
+        # falls out naturally (`app/views/layouts/application.rb`).
+        def build_layout_route(leaf, source_path)
+          action = LAYOUT_LEAVES.fetch(leaf)
+          Route.new(
+            rails_path: nil,
+            controller: "layouts",
+            action: action,
+            source_path: source_path,
+            kind: :layout
+          )
+        end
+
         def build_route(segments, source_path)
           leaf = segments.last
           dir_segments = segments[0..-2]
           inside_bracket_dir = dir_segments.any? { |s| bracket_segment?(s) }
+          controller, namespace = controller_and_namespace_for(dir_segments)
 
           Route.new(
             rails_path: rails_path_for(segments),
-            controller: controller_for(dir_segments),
+            controller: controller,
             action: action_for(leaf, inside_bracket_dir: inside_bracket_dir),
-            source_path: source_path
+            source_path: source_path,
+            namespace: namespace
           )
         end
 
@@ -267,13 +343,28 @@ module JsxRosetta
           AST::Inflector.underscore(leaf)
         end
 
-        def controller_for(dir_segments)
-          first_named = dir_segments.find { |segment| !bracket_segment?(segment) }
-          AST::Inflector.underscore(first_named || "pages")
+        # Returns [controller_name, namespace_array]. Splits dir_segments
+        # into three buckets: route_groups (paren-wrapped) feed entirely
+        # into namespace; named dirs feed into namespace except for the
+        # last one which becomes the controller; bracket dirs (URL params)
+        # are URL-only and don't participate in either.
+        def controller_and_namespace_for(dir_segments)
+          named = []
+          groups = []
+          dir_segments.each do |segment|
+            if route_group_segment?(segment)
+              groups << route_group_name(segment)
+            elsif !bracket_segment?(segment)
+              named << segment
+            end
+          end
+          controller = named.empty? ? "pages" : named.pop
+          namespace = (groups + named).map { |n| AST::Inflector.underscore(n) }
+          [AST::Inflector.underscore(controller), namespace]
         end
 
         def rails_path_for(segments)
-          parts = segments.map { |segment| segment_to_path_part(segment) }
+          parts = segments.filter_map { |segment| segment_to_path_part(segment) }
           parts.pop if parts.last == [:literal, "index"]
           build_path(parts)
         end
@@ -286,6 +377,10 @@ module JsxRosetta
             [:catch_all, AST::Inflector.underscore(Regexp.last_match(1))]
           when /\A\[([^\]]+)\]\z/
             [:param, AST::Inflector.underscore(Regexp.last_match(1))]
+          when /\A\(([^)]+)\)\z/
+            # Route groups are URL-invisible — they only affect controller
+            # namespace (handled in controller_and_namespace_for).
+            nil
           else
             [:literal, segment]
           end
@@ -293,6 +388,14 @@ module JsxRosetta
 
         def bracket_segment?(segment)
           segment.start_with?("[") && segment.end_with?("]")
+        end
+
+        def route_group_segment?(segment)
+          segment.start_with?("(") && segment.end_with?(")") && segment.length > 2
+        end
+
+        def route_group_name(segment)
+          segment[1..-2]
         end
 
         def build_path(parts)
@@ -315,10 +418,15 @@ module JsxRosetta
       class << self
         def emit(routes:, skipped:, source_dir:, generated_at: nil)
           generated_at ||= Time.now.utc.strftime("%Y-%m-%d")
+          page_routes = routes.select { |r| r.kind == :standard }
+          error_routes = routes.select { |r| r.kind == :error_page }
+          layout_routes = routes.select { |r| r.kind == :layout }
           sections = [header(source_dir, generated_at, routes, skipped)]
           sections << skipped_block(skipped) unless skipped.empty?
-          sections << draw_block(routes)
-          sections << generator_hints(routes) unless routes.empty?
+          sections << layouts_block(layout_routes) unless layout_routes.empty?
+          sections << error_pages_block(error_routes) unless error_routes.empty?
+          sections << draw_block(page_routes, error_routes)
+          sections << generator_hints(page_routes) unless page_routes.empty?
           "#{sections.join("\n\n")}\n"
         end
 
@@ -339,12 +447,66 @@ module JsxRosetta
           lines.join("\n")
         end
 
-        def draw_block(routes)
-          return "Rails.application.routes.draw do\nend" if routes.empty?
+        # Header for application-layout files (`_app.tsx`). Layouts don't
+        # produce route lines — they land in `app/views/layouts/<action>.rb`
+        # via the Phlex view-placement path. Listed in the header so a
+        # human reading routes.rb can see where _app.tsx went.
+        def layouts_block(layout_routes)
+          lines = ["# Layouts — translated to app/views/layouts/<action>.rb. " \
+                   "No route lines are emitted; Rails resolves layouts by name."]
+          layout_routes.sort_by(&:action).each do |route|
+            lines << "#   - #{route.source_path} → app/views/layouts/#{route.action}.rb"
+          end
+          lines.join("\n")
+        end
+
+        # Wiring header for error pages. Listed above the draw block since
+        # Rails matches these via `config.exceptions_app`, not via the regular
+        # router. The comment block names each detected error page + the
+        # corresponding ErrorsController action, plus the two standard wiring
+        # approaches (exceptions_app vs. public/<status>.html).
+        def error_pages_block(error_routes)
+          lines = [
+            "# Error pages — Next.js _error / 404 / 500 detected. Wire one of:",
+            "#",
+            "# (1) config.exceptions_app — in config/application.rb:",
+            "#       config.exceptions_app = self.routes",
+            "#     Then declare them as ordinary routes inside the draw block:"
+          ]
+          error_routes.sort_by(&:rails_path).each do |route|
+            lines << "#       match #{route.rails_path.inspect}, " \
+                     "to: \"errors##{route.action}\", via: :all"
+          end
+          lines += [
+            "#",
+            "# (2) Static fallbacks — drop the rendered templates at",
+            "#     public/404.html / public/500.html and let Rails serve them",
+            "#     directly without hitting the app."
+          ]
+          lines.join("\n")
+        end
+
+        def draw_block(routes, error_routes = [])
+          return "Rails.application.routes.draw do\nend" if routes.empty? && error_routes.empty?
 
           unique, duplicates = dedupe(routes)
           body = grouped_body(unique, duplicates)
+          body += error_routes_draw_lines(error_routes) unless error_routes.empty?
           (["Rails.application.routes.draw do"] + body + ["end"]).join("\n")
+        end
+
+        # The error-page routes themselves still go in the draw block so
+        # `match "/404", to: "errors#not_found"` is part of routes.rb — the
+        # header comment explains the `config.exceptions_app` wiring needed
+        # to make Rails actually invoke them. Sorted with a blank line above
+        # for visual separation.
+        def error_routes_draw_lines(error_routes)
+          lines = ["", "  # == errors (config.exceptions_app) =="]
+          error_routes.sort_by(&:action).each do |route|
+            lines << (%(  match #{route.rails_path.inspect}, to: "errors##{route.action}", ) +
+                     %(via: :all, as: :#{Naming.route_name(route)}))
+          end
+          lines
         end
 
         def dedupe(routes)
@@ -362,11 +524,11 @@ module JsxRosetta
         end
 
         def grouped_body(routes, duplicates)
-          by_controller = routes.group_by(&:controller).sort.to_h
+          by_controller = routes.group_by { |r| group_key(r) }.sort.to_h
           lines = []
-          by_controller.each_with_index do |(controller, group_routes), idx|
+          by_controller.each_with_index do |(_, group_routes), idx|
             lines << "" if idx.positive?
-            lines << "  # == #{controller} =="
+            lines << "  # == #{controller_label(group_routes.first)} =="
             group_routes.sort_by { |r| sort_key(r) }.each do |route|
               lines << route_line(route)
               dup_key = [route.controller, route.action, route.rails_path]
@@ -379,30 +541,44 @@ module JsxRosetta
           lines
         end
 
+        def group_key(route)
+          [route.namespace, route.controller]
+        end
+
+        def controller_label(route)
+          qualified_controller(route)
+        end
+
+        def qualified_controller(route)
+          (route.namespace + [route.controller]).join("/")
+        end
+
         def sort_key(route)
           # `root to: ...` first within its group, then alpha by path.
           [route.rails_path == "/" ? 0 : 1, route.rails_path]
         end
 
         def route_line(route)
-          if route.rails_path == "/" && route.controller == "pages" && route.action == "index"
+          target = qualified_controller(route)
+          if route.rails_path == "/" && target == "pages" && route.action == "index"
             %(  root to: "pages#index")
           elsif route.rails_path.start_with?("*")
-            %(  match #{route.rails_path.inspect}, to: "#{route.controller}##{route.action}", ) +
+            %(  match #{route.rails_path.inspect}, to: "#{target}##{route.action}", ) +
               %(via: :all, as: :#{Naming.route_name(route)})
           else
-            %(  get #{route.rails_path.inspect}, to: "#{route.controller}##{route.action}", ) +
+            %(  get #{route.rails_path.inspect}, to: "#{target}##{route.action}", ) +
               %(as: :#{Naming.route_name(route)})
           end
         end
 
         def generator_hints(routes)
-          unique = routes.uniq { |r| [r.controller, r.action] }
-          by_controller = unique.group_by(&:controller).sort.to_h
+          unique = routes.uniq { |r| [r.namespace, r.controller, r.action] }
+          by_controller = unique.group_by { |r| [r.namespace, r.controller] }.sort.to_h
           lines = ["# Suggested controller scaffolds (uncomment to run with `ruby`):"]
-          by_controller.each do |controller, group_routes|
+          by_controller.each_value do |group_routes|
+            target = qualified_controller(group_routes.first)
             actions = group_routes.map(&:action).uniq.sort
-            args = ([controller] + actions).map(&:inspect).join(", ")
+            args = ([target] + actions).map(&:inspect).join(", ")
             lines << %(# system "rails", "generate", "controller", #{args}, "--skip-routes")
           end
           lines.join("\n")
@@ -416,30 +592,41 @@ module JsxRosetta
     module ControllerEmitter
       class << self
         def emit(routes:)
-          unique = routes.uniq { |r| [r.controller, r.action] }
-          unique.group_by(&:controller).sort.map do |controller, group_routes|
+          unique = routes.uniq { |r| [r.namespace, r.controller, r.action] }
+          unique.group_by { |r| [r.namespace, r.controller] }.sort.map do |(namespace, controller), group_routes|
             ControllerFile.new(
-              path: "#{controller}_controller.rb",
-              contents: render(controller, group_routes.sort_by(&:action))
+              path: controller_path(namespace, controller),
+              contents: render(namespace, controller, group_routes.sort_by(&:action))
             )
           end
         end
 
         private
 
-        def render(controller, group_routes)
-          class_name = "#{AST::Inflector.upper_camelize(controller)}Controller"
+        def controller_path(namespace, controller)
+          ((namespace || []) + ["#{controller}_controller.rb"]).join("/")
+        end
+
+        def render(namespace, controller, group_routes)
+          qualified_class = qualified_controller_class(namespace, controller)
+          view_dir = ((namespace || []) + [controller]).join("/")
           actions = group_routes.map { |route| action_section(route) }.join("\n\n")
           <<~RUBY
             # frozen_string_literal: true
 
             # Generated by jsx_rosetta pages-routes. Wire up `before_action`
             # filters and load instance variables for the matching Phlex view
-            # (app/views/#{controller}/<action>.rb).
-            class #{class_name} < ApplicationController
+            # (app/views/#{view_dir}/<action>.rb).
+            class #{qualified_class} < ApplicationController
             #{actions}
             end
           RUBY
+        end
+
+        def qualified_controller_class(namespace, controller)
+          parts = (namespace || []).map { |ns| AST::Inflector.upper_camelize(ns) }
+          parts << "#{AST::Inflector.upper_camelize(controller)}Controller"
+          parts.join("::")
         end
 
         def action_section(route)
