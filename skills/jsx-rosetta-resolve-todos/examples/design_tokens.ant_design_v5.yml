@@ -1,0 +1,190 @@
+# Ant Design v5 design-token mapping — example for the jsx-rosetta-resolve-todos skill.
+#
+# Source:    Ant Design v5 default theme (https://ant.design/docs/react/customize-theme).
+# License:   Ant Design tokens and palette values are documented public API
+#            (Ant Design is MIT-licensed). This file documents the defaults; it
+#            contains no application-specific configuration.
+#
+# Use this file as-is if your source app uses Ant Design v5 with default theming.
+# If your app overrides ConfigProvider tokens, copy this file into your
+# `.claude/skills/jsx-rosetta-resolve-todos/data/design_tokens.yml` and adjust
+# values to match your overrides — the defaults here become the wrong answer
+# for any token your theme has changed.
+#
+# Schema:
+#   match:   Regex with one capture group. The capture is looked up in `tokens`.
+#            jsx_rosetta TODOs of the form
+#              # TODO: (attribute|style declaration) "X" dropped — couldn't translate: <RHS>
+#            are checked against this regex; matches drive substitution.
+#   tokens:  Map of capture-group string → entry. Each entry:
+#     value     Literal substitution. Integer = pixels (rendered as "<n>px" in
+#               inline style, bare integer in numeric kwargs). String = used
+#               verbatim. `null` = explicitly do not auto-resolve (e.g.
+#               component-namespace tokens that vary per app).
+#     tailwind  Optional. Suggested utility class for a className refactor.
+#     category  Optional grouping label.
+#     notes     Optional caveat for human readers.
+
+match: 'token\.(\w+)'
+
+tokens:
+  sizeXXS:    {value: 4,  tailwind: "p-1",  category: spacing}
+  paddingXXS: {value: 4,  tailwind: "p-1",  category: spacing}
+  marginXXS:  {value: 4,  tailwind: "m-1",  category: spacing}
+  paddingXS:  {value: 8,  tailwind: "p-2",  category: spacing}
+  marginXS:   {value: 8,  tailwind: "m-2",  category: spacing}
+  paddingSM:  {value: 12, tailwind: "p-3",  category: spacing}
+  marginSM:   {value: 12, tailwind: "m-3",  category: spacing}
+  padding:    {value: 16, tailwind: "p-4",  category: spacing}
+  margin:     {value: 16, tailwind: "m-4",  category: spacing}
+  paddingMD:  {value: 20, tailwind: "p-5",  category: spacing}
+  marginMD:   {value: 20, tailwind: "m-5",  category: spacing}
+  paddingLG:  {value: 24, tailwind: "p-6",  category: spacing}
+  marginLG:   {value: 24, tailwind: "m-6",  category: spacing}
+  paddingXL:  {value: 32, tailwind: "p-8",  category: spacing}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # BORDER / RADIUS
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  borderRadiusSM: {value: 4, tailwind: "rounded-sm",   category: radius}
+  borderRadius:   {value: 6, tailwind: "rounded-md",   category: radius, notes: "Ant default 6px sits between Tailwind sm(4) and md(6); rounded-md is closest."}
+  borderRadiusLG: {value: 8, tailwind: "rounded-lg",   category: radius}
+  lineWidth:      {value: 1, tailwind: "border",       category: line}
+  border:         {value: "1px solid #d9d9d9", tailwind: "border border-gray-300", category: line, notes: "Bare token.border is non-standard; assumed shorthand for the default 1px solid colorBorder."}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # TYPOGRAPHY
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  fontSizeSM:       {value: 12, tailwind: "text-xs",   category: typography}
+  fontSize:         {value: 14, tailwind: "text-sm",   category: typography}
+  fontSizeLG:       {value: 16, tailwind: "text-base", category: typography}
+  fontSizeXL:       {value: 20, tailwind: "text-xl",   category: typography}
+  fontSizeHeading4: {value: 20, tailwind: "text-xl",   category: typography}
+  fontSizeHeading3: {value: 24, tailwind: "text-2xl",  category: typography}
+  fontSizeHeading2: {value: 30, tailwind: "text-3xl",  category: typography}
+  fontWeightStrong: {value: 600, tailwind: "font-semibold", category: typography}
+  lineHeight:       {value: 1.5714, tailwind: "leading-normal", category: typography, notes: "Ant default ≈ 22/14."}
+  fontFamily:       {value: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif", tailwind: "font-sans", category: typography}
+  fontFamilyCode:   {value: "'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace", tailwind: "font-mono", category: typography}
+  font:             {value: 14, tailwind: "text-sm", category: typography, notes: "Bare `token.font` is non-standard; treated as fontSize default. Verify per usage."}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # COLOR — TEXT
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  colorTextBase:        {value: "#000000",            tailwind: "text-black",     category: color-text}
+  colorText:            {value: "rgba(0, 0, 0, 0.88)", tailwind: "text-gray-900", category: color-text}
+  colorTextSecondary:   {value: "rgba(0, 0, 0, 0.65)", tailwind: "text-gray-700", category: color-text}
+  colorTextTertiary:    {value: "rgba(0, 0, 0, 0.45)", tailwind: "text-gray-500", category: color-text}
+  colorTextQuaternary:  {value: "rgba(0, 0, 0, 0.25)", tailwind: "text-gray-400", category: color-text}
+  colorTextDescription: {value: "rgba(0, 0, 0, 0.45)", tailwind: "text-gray-500", category: color-text}
+  colorTextDisabled:    {value: "rgba(0, 0, 0, 0.25)", tailwind: "text-gray-400", category: color-text, notes: "Same alpha as quaternary; semantic intent differs."}
+  colorTextLightSolid:  {value: "#ffffff",            tailwind: "text-white",     category: color-text, notes: "On dark/colored backgrounds."}
+  colorWhite:           {value: "#ffffff",            tailwind: "text-white",     category: color-text}
+  colorLink:            {value: "#1677ff",            tailwind: "text-blue-600",  category: color-text}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # COLOR — BACKGROUND
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  colorBgContainer:  {value: "#ffffff",            tailwind: "bg-white",      category: color-bg}
+  colorBgLayout:     {value: "#f5f5f5",            tailwind: "bg-gray-100",   category: color-bg}
+  colorBgSolid:      {value: "#000000",            tailwind: "bg-black",      category: color-bg}
+  colorBgTextHover:  {value: "rgba(0, 0, 0, 0.06)", tailwind: "hover:bg-gray-100", category: color-bg, notes: "Use as hover state, not base."}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # COLOR — BORDER
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  colorBorder:          {value: "#d9d9d9", tailwind: "border-gray-300", category: color-border}
+  colorBorderSecondary: {value: "#f0f0f0", tailwind: "border-gray-200", category: color-border}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # COLOR — FILL (translucent overlays)
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  colorFillSecondary:  {value: "rgba(0, 0, 0, 0.06)", tailwind: "bg-black/5",  category: color-fill}
+  colorFillTertiary:   {value: "rgba(0, 0, 0, 0.04)", tailwind: "bg-black/5",  category: color-fill}
+  colorFillQuaternary: {value: "rgba(0, 0, 0, 0.02)", tailwind: "bg-black/[0.02]", category: color-fill}
+  colorFillAlter:      {value: "rgba(0, 0, 0, 0.02)", tailwind: "bg-black/[0.02]", category: color-fill}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # COLOR — FEEDBACK (semantic: primary/success/warning/error/info)
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  colorPrimary: {value: "#1677ff", tailwind: "text-blue-600",   category: color-feedback}
+  colorSuccess: {value: "#52c41a", tailwind: "text-green-600",  category: color-feedback}
+  colorWarning: {value: "#faad14", tailwind: "text-amber-500",  category: color-feedback}
+  colorError:   {value: "#ff4d4f", tailwind: "text-red-500",    category: color-feedback}
+  colorInfo:    {value: "#1677ff", tailwind: "text-blue-600",   category: color-feedback}
+
+  # Feedback backgrounds (lightened tints used for Alert / Tag / Badge surfaces)
+  colorPrimaryBg:      {value: "#e6f4ff", tailwind: "bg-blue-50",   category: color-feedback-bg}
+  colorPrimaryBgHover: {value: "#bae0ff", tailwind: "bg-blue-100",  category: color-feedback-bg}
+  colorInfoBgHover:    {value: "#bae0ff", tailwind: "bg-blue-100",  category: color-feedback-bg}
+  colorErrorBg:        {value: "#fff2f0", tailwind: "bg-red-50",    category: color-feedback-bg}
+  colorErrorBgHover:   {value: "#fff1f0", tailwind: "bg-red-50",    category: color-feedback-bg}
+  colorWarningBg:      {value: "#fffbe6", tailwind: "bg-amber-50",  category: color-feedback-bg}
+  colorWarningBgHover: {value: "#fff1b8", tailwind: "bg-amber-100", category: color-feedback-bg}
+
+  # Feedback borders
+  colorErrorBorder:       {value: "#ffccc7", tailwind: "border-red-200",  category: color-feedback-border}
+  colorInfoBorderHover:   {value: "#91caff", tailwind: "border-blue-300", category: color-feedback-border}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # COLOR — BRAND PALETTE (named hues; used as base color names in Tag etc.)
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  blue:   {value: "#1677ff", tailwind: "text-blue-600",   category: color-brand}
+  green:  {value: "#52c41a", tailwind: "text-green-600",  category: color-brand}
+  gold:   {value: "#faad14", tailwind: "text-amber-500",  category: color-brand}
+  orange: {value: "#fa8c16", tailwind: "text-orange-500", category: color-brand}
+  red:    {value: "#f5222d", tailwind: "text-red-600",    category: color-brand}
+  purple: {value: "#722ed1", tailwind: "text-purple-600", category: color-brand}
+  cyan:   {value: "#13c2c2", tailwind: "text-cyan-600",   category: color-brand}
+
+  # Indexed palette shades (1=lightest, 10=darkest) — shows up in custom theming.
+  blue1:   {value: "#e6f4ff", tailwind: "bg-blue-50",   category: color-palette-shade}
+  blue2:   {value: "#bae0ff", tailwind: "bg-blue-100",  category: color-palette-shade}
+  blue6:   {value: "#1677ff", tailwind: "text-blue-600", category: color-palette-shade}
+  green10: {value: "#092b00", tailwind: "text-green-950", category: color-palette-shade}
+
+  # Bare `token.color` — non-standard, source-specific. Don't auto-substitute.
+  color: {value: null, tailwind: null, category: unknown, notes: "Bare token.color isn't an Ant Design v5 default. Likely a custom theme extension. Sharpen the TODO with the surrounding context; don't auto-resolve."}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # SHADOW
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  boxShadow:          {value: "0 6px 16px 0 rgba(0,0,0,.08), 0 3px 6px -4px rgba(0,0,0,.12), 0 9px 28px 8px rgba(0,0,0,.05)", tailwind: "shadow-md", category: shadow}
+  boxShadowTertiary:  {value: "0 1px 2px 0 rgba(0,0,0,.03), 0 1px 6px -1px rgba(0,0,0,.02), 0 2px 4px 0 rgba(0,0,0,.02)", tailwind: "shadow-sm", category: shadow}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # BREAKPOINT
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  screenLG: {value: 992, tailwind: "lg:", category: breakpoint, notes: "Ant Design lg breakpoint = 992px. Tailwind's lg: prefix is 1024px — close, not identical."}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # COMPONENT-NAMESPACE TOKENS — leave as TODO; resolution is per-component
+  # ─────────────────────────────────────────────────────────────────────────────
+  #
+  # These references (e.g. `token.Tag.colorText`) reach into Ant's component-token
+  # overrides, which the consuming app may have customized via ConfigProvider.
+  # Auto-substituting the default is unsafe — it would silently lose overrides.
+  # Sharpen the TODO with a note explaining what the source was reading and
+  # defer to human review.
+
+  Tag:    {value: null, tailwind: null, category: component, notes: "Ant Tag component-token namespace. Read the property in the source (e.g. token.Tag.defaultBg) and emit a sharper TODO."}
+  Layout: {value: null, tailwind: null, category: component, notes: "Ant Layout component-token namespace. Same handling as token.Tag."}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # AMBIGUOUS / EDGE
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  token: {value: null, tailwind: null, category: unknown, notes: "`token.token` — almost certainly a source bug or destructure typo. Flag for human review."}
+
+  paddingContentVerticalSM:   {value: 6,  tailwind: "py-1.5", category: spacing, notes: "Ant content-padding tokens; defaults vary by theme. Verify per usage."}
+  paddingContentHorizontalSM: {value: 12, tailwind: "px-3",   category: spacing, notes: "Ant content-padding tokens; defaults vary by theme. Verify per usage."}

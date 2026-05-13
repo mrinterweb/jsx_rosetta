@@ -168,6 +168,56 @@ auto-perform. Common cases:
 - **Reserved Rails controller names** (in the routes script) → `# WARNING:`
   line listing collisions.
 
+## Resolving TODOs (optional Claude Code skill)
+
+The repository ships an optional [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) skill and worker agent that automate the last-mile work of clearing `# TODO:` comments from the generated output. The skill is fully generic — it ships no app-specific assumptions, no design-system data, and no host-stack conventions. You bring those.
+
+**What it does:**
+
+- A pure-Ruby corpus scanner (`tools/discover_bailouts.rb`) tallies the dropped-expression patterns in your generated output and surfaces likely design-system / config-namespace clusters.
+- A pure-Ruby substitution pass (`tools/apply_substitutions.rb`) reads a YAML you supply (`match:` regex + `tokens:` value table) and splices values into the generated `render Foo.new(...)` calls. Always validates with `ruby -c` before writing; reverts on failure.
+- LLM-driven recipes for React hooks, Apollo data fetching, event handlers, Next.js navigation, and module-level constants. These default to **sharpening** verbose TODOs into single-decision items rather than guessing translations.
+- A `jsx-rosetta-resolve-todo-file` worker agent for parallel fan-out across a corpus.
+
+A reference Ant Design v5 token mapping ships under `examples/` — drop-in usable if your source app uses Ant Design with default theming.
+
+**Layout in this repo:**
+
+```
+skills/jsx-rosetta-resolve-todos/
+├── SKILL.md                     # workflow + routing table
+├── recipes/                     # per-TODO-class recipes
+├── tools/                       # discover_bailouts.rb, apply_substitutions.rb
+├── data/design_tokens.template.yml   # blank schema for your design system
+└── examples/design_tokens.ant_design_v5.yml   # reference for Ant-using apps
+
+agents/
+└── jsx-rosetta-resolve-todo-file.md   # fan-out worker definition
+```
+
+**Installing into your environment:**
+
+User-level (available in every Claude Code session on your machine):
+
+```bash
+mkdir -p ~/.claude/skills ~/.claude/agents
+ln -s "$(pwd)/skills/jsx-rosetta-resolve-todos" ~/.claude/skills/
+ln -s "$(pwd)/agents/jsx-rosetta-resolve-todo-file.md" ~/.claude/agents/
+```
+
+Project-level (only available in the consuming Rails app):
+
+```bash
+# from your Rails app's repo root
+mkdir -p .claude/skills .claude/agents
+cp -R /path/to/jsx_rosetta/skills/jsx-rosetta-resolve-todos .claude/skills/
+cp /path/to/jsx_rosetta/agents/jsx-rosetta-resolve-todo-file.md .claude/agents/
+```
+
+In either case, your app-specific configuration (the populated `data/design_tokens.yml`, `data/target_app_conventions.md`, etc.) belongs **inside the consuming app's** `.claude/skills/jsx-rosetta-resolve-todos/data/` — not here. Anything app-specific should be `.gitignore`d in your Rails repo if it shouldn't be shared.
+
+The scripts under `tools/` are runnable directly with `ruby` — Claude Code is not required to use them. The recipes and the agent are what require Claude Code.
+
 ## What's deferred
 
 - Translating React state primitives (`useState` / `useEffect` etc.). The

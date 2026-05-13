@@ -1,0 +1,71 @@
+# design_tokens.template.yml — schema for apply_substitutions.rb config.
+#
+# Copy this file to your consuming app, e.g.:
+#   <your-app>/.claude/skills/jsx-rosetta-resolve-todos/data/design_tokens.yml
+# and fill in the entries that apply to your source codebase.
+#
+# Workflow to populate it:
+#   1. Run discover_bailouts.rb on your jsx_rosetta-generated output to find
+#      the dominant repeating member chains. It will print a suggested
+#      `match:` regex and the top capture keys.
+#   2. Paste the suggested regex into `match:` below.
+#   3. For each top key, look up what it resolves to in your source codebase
+#      (the design system's published defaults, your theme overrides, your
+#      Tailwind config, etc.) and add an entry to `tokens:`.
+#   4. Run apply_substitutions.rb --config <this file> on the corpus.
+#   5. Re-run discover_bailouts.rb to confirm the count dropped, and to
+#      surface the next worthwhile cluster to map.
+#
+# Pre-built reference tables for common design systems live in the skill's
+# `examples/` directory. If your source uses one of them with default
+# theming, you can use that file directly instead of building this one.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Schema
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# match
+#   A regex string with exactly one capture group. The capture is used as the
+#   lookup key against `tokens:`. Examples:
+#     'token\.(\w+)'                  → Ant Design tokens (`token.colorText`)
+#     'theme\.palette\.(\w+)\.main'   → MUI palette mains (`theme.palette.primary.main`)
+#     'vars\.colors\.(\w+)'           → vanilla-extract color vars
+#     'tokens\.(\w+)'                 → Chakra UI tokens
+#
+# tokens
+#   Map from capture-group string → entry hash. Each entry:
+#
+#   value      The literal substitution. Type-sensitive:
+#                Integer → rendered as "<n>px" in inline style declarations,
+#                          and as a bare integer in numeric component kwargs.
+#                String  → used verbatim. Wrap CSS values, hex colors,
+#                          rgba(), font-family lists, etc.
+#                null    → explicitly skip auto-resolution. Use for entries
+#                          you've intentionally chosen NOT to substitute
+#                          (component-namespace tokens, ambiguous shorthand,
+#                          values that depend on runtime context). The TODO
+#                          stays in place for human review.
+#
+#   tailwind   (optional) Suggested utility class for a className-based
+#              refactor pass. Not used by apply_substitutions.rb directly;
+#              available as documentation for downstream recipes that want
+#              to convert inline styles to Tailwind utilities.
+#
+#   category   (optional) A grouping label for your own organization
+#              (e.g. "spacing", "color-text"). Not interpreted by tools.
+#
+#   notes      (optional) Free text for human readers — caveats, ambiguity,
+#              "verify per usage" reminders, etc.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fill in below
+# ─────────────────────────────────────────────────────────────────────────────
+
+match: ''   # e.g. 'token\.(\w+)'
+
+tokens: {}
+  # exampleKey:
+  #   value: 4
+  #   tailwind: "p-1"
+  #   category: spacing
+  #   notes: "Ant Design v5 default 4px base."
